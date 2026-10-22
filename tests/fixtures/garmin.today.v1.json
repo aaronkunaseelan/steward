@@ -1,0 +1,45 @@
+{
+  "schema": "garmin.today.v1",
+  "week": [],
+  "at": "2026-10-16T12:00:00Z",
+  "auth": "ok",
+  "pulled_at": "2026-10-16T11:55:00Z",
+  "watch_uploaded_at": "2026-10-16T11:30:00Z",
+  "watch_fresh_until": "2026-10-16T23:30:00Z",
+  "fresh_through": "2026-10-16T11:30:00Z",
+  "date": "2026-10-16",
+  "body_battery": {
+    "now": 60,
+    "at": "2026-10-16T11:30:00Z",
+    "high": 80,
+    "low": 30,
+    "charged": 50,
+    "drained": 20
+  },
+  "sleep": {
+    "date": "2026-10-16",
+    "start": "2026-10-15T20:00:00Z",
+    "end": "2026-10-16T04:00:00Z",
+    "duration_s": 28800,
+    "score": 80,
+    "quality": "Synthetic fixture: good"
+  },
+  "stress": {
+    "avg": 20,
+    "max": 50,
+    "now": 15,
+    "at": "2026-10-16T11:30:00Z"
+  },
+  "hrv": {
+    "last_night_ms": 50,
+    "weekly_ms": 45,
+    "status": "balanced"
+  },
+  "resting_hr": 60,
+  "steps": 2000,
+  "training_readiness": {
+    "score": 75,
+    "level": "high"
+  },
+  "last_activity": null
+}

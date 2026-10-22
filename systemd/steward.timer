@@ -1,0 +1,10 @@
+[Unit]
+Description=Steward tick cadence
+
+[Timer]
+OnCalendar=*:0/20
+Unit=steward-tick.service
+Persistent=false
+
+[Install]
+WantedBy=timers.target

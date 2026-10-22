@@ -1,0 +1,11 @@
+{"type":"session_meta","payload":{"id":"synthetic-codex","cwd":"/tmp/synthetic"}}
+{"type":"turn_context","payload":{"model":"synthetic-sol"}}
+{"timestamp":"2026-10-17T08:00:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Review the synthetic job."}]}}
+{"timestamp":"2026-10-17T08:00:01Z","type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"Check the synthetic inputs."}],"encrypted_content":"never display encrypted reasoning"}}
+{"timestamp":"2026-10-17T08:00:02Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"call2","arguments":"{\"command\": \"printf synthetic\"}"}}
+{"timestamp":"2026-10-17T08:00:03Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call2","output":"synthetic job output"}}
+{"timestamp":"2026-10-17T08:00:04Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Finished the synthetic job."}]}}
+{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300,"cached_input_tokens":200,"cache_write_input_tokens":0,"output_tokens":40,"reasoning_output_tokens":0,"total_tokens":340}}}}
+{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300,"cached_input_tokens":200,"cache_write_input_tokens":0,"output_tokens":40,"reasoning_output_tokens":0,"total_tokens":340}}}}
+{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":500,"cached_input_tokens":300,"cache_write_input_tokens":0,"output_tokens":60,"reasoning_output_tokens":0,"total_tokens":560}}}}
+{"type":"event_msg","payload":{"type":"agent_message","message":"Duplicate finished text: do not display"}}

@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "steward.transcript.v1",
+  "title": "One Steward run (a wake or a job run) as readable turns",
+  "description": "Printed by `steward transcript <id> --json`, read only from Steward's own archive. One document per finished run; a run may hold several agent sessions (gsd-steady has two). Every declared key is present; null means unknown. Transcript and source text may be sent to the page host; secrets never: the producer redacts strings that look like credentials (bearer tokens, API keys, passwords in env assignments).",
+  "x-owner": "steward",
+  "x-consumers": ["mech-d Page 2 transcript view (via the host runner, POST /api/transcript)"],
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "id", "kind", "job", "started_at", "ended_at", "status", "sessions", "truncated", "bytes"],
+  "properties": {
+    "schema": {"const": "steward.transcript.v1"},
+    "id": {"type": "string", "pattern": "^(wake-[0-9]+|run-[0-9a-f]{32})$", "description": "wake-<wakes.id> or run-<run_id>"},
+    "kind": {"enum": ["wake", "job"]},
+    "job": {"type": ["string", "null"], "description": "Job name for kind job; null for wakes"},
+    "started_at": {"type": "string", "description": "ISO 8601 UTC"},
+    "ended_at": {"type": ["string", "null"]},
+    "status": {"type": "string", "maxLength": 40},
+    "sessions": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["agent", "model", "thread", "label", "turns"],
+        "properties": {
+          "agent": {"enum": ["claude", "codex", "pi", "other"]},
+          "model": {"type": ["string", "null"]},
+          "thread": {"type": "string", "description": "Native session/thread id (backlink)"},
+          "label": {"type": ["string", "null"], "description": "e.g. gsd step agent name (a, r1); null if none"},
+          "turns": {
+            "type": "array",
+            "maxItems": 2000,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["i", "at", "role", "type", "name", "text", "truncated"],
+              "properties": {
+                "i": {"type": "integer", "minimum": 0},
+                "at": {"type": ["string", "null"]},
+                "role": {"enum": ["user", "assistant", "tool"]},
+                "type": {"enum": ["text", "thinking", "tool_call", "tool_result"]},
+                "name": {"type": ["string", "null"], "description": "Tool name for tool_call/tool_result; else null"},
+                "text": {"type": "string", "maxLength": 8000, "description": "Text, or the tool input as compact JSON, or the tool output"},
+                "truncated": {"type": "boolean"}
+              }
+            }
+          }
+        }
+      }
+    },
+    "truncated": {"type": "boolean", "description": "true if any text, turn list or the document size cap cut content"},
+    "bytes": {"type": "integer", "minimum": 0, "description": "Size of the archived raw session files"}
+  },
+  "x-limits": "Serialized document at most 1,000,000 bytes: when over, drop the oldest tool_result texts first (keep the turn, set its text to '' and truncated true), then earlier turns."
+}

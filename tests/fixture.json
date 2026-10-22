@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "timezone": "Europe/Athens",
+  "timezone_confirmed": true,
+  "now": "2026-10-24T08:00:00+03:00",
+  "deadline": "2026-10-24T08:30:00+03:00",
+  "external_state": "known",
+  "horizon_end": "2026-10-27T00:00:00+02:00",
+  "windows": [
+    {"start": "2026-10-24T09:00:00+03:00", "end": "2026-10-24T12:00:00+03:00"},
+    {"start": "2026-10-25T09:00:00+02:00", "end": "2026-10-25T12:00:00+02:00"}
+  ],
+  "blocks": [
+    {"id": "synthetic-busy-1", "task_id": null, "kind": "busy", "pinned": false, "start": "2026-10-24T09:00:00+03:00", "end": "2026-10-24T09:30:00+03:00"},
+    {"id": "manual-1", "task_id": null, "kind": "manual", "pinned": false, "start": "2026-10-24T11:00:00+03:00", "end": "2026-10-24T11:30:00+03:00"},
+    {"id": "old-1", "task_id": "write", "kind": "scheduled", "pinned": true, "start": "2026-10-25T10:00:00+02:00", "end": "2026-10-25T11:00:00+02:00"}
+  ],
+  "tasks": [
+    {"id": "write", "minutes": 60, "deadline": "2026-10-25T12:00:00+02:00"},
+    {"id": "read", "minutes": 30, "deadline": "2026-10-24T12:00:00+03:00"},
+    {"id": "deleted", "minutes": 30, "deadline": "2026-10-25T12:00:00+02:00"}
+  ],
+  "deleted_task_ids": ["deleted"]
+}

@@ -1,0 +1,925 @@
+{
+  "x-stale-after-s": 1800,
+  "type": "object",
+  "required": [
+    "schema",
+    "system",
+    "at",
+    "state",
+    "headline",
+    "blocks"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "intent/1"
+    },
+    "system": {
+      "type": "string",
+      "enum": [
+        "gsd",
+        "steward"
+      ]
+    },
+    "at": {
+      "type": "number",
+      "minimum": 0
+    },
+    "state": {
+      "type": "string",
+      "enum": [
+        "green",
+        "red"
+      ]
+    },
+    "headline": {
+      "type": "string"
+    },
+    "blocks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "discriminator": {
+          "propertyName": "kind",
+          "mapping": {
+            "day": {
+              "type": "object",
+              "required": [
+                "kind",
+                "layer",
+                "tz",
+                "date",
+                "promises",
+                "yours",
+                "machine",
+                "attention",
+                "quiet",
+                "skips",
+                "buzz_cap"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "day"
+                },
+                "layer": {
+                  "type": "string",
+                  "enum": [
+                    "intent",
+                    "process"
+                  ]
+                },
+                "tz": {
+                  "type": "string"
+                },
+                "date": {
+                  "type": "string"
+                },
+                "promises": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "at",
+                      "label",
+                      "state",
+                      "why"
+                    ],
+                    "properties": {
+                      "at": {
+                        "type": "string"
+                      },
+                      "label": {
+                        "type": "string"
+                      },
+                      "state": {
+                        "type": "string",
+                        "enum": [
+                          "kept",
+                          "recovered",
+                          "missed",
+                          "quiet",
+                          "due"
+                        ]
+                      },
+                      "why": {
+                        "type": "string"
+                      },
+                      "met_at": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                },
+                "yours": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "from",
+                      "to",
+                      "kind",
+                      "label",
+                      "why"
+                    ],
+                    "properties": {
+                      "from": {
+                        "type": "string"
+                      },
+                      "to": {
+                        "type": "string"
+                      },
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "busy",
+                          "pinned",
+                          "block"
+                        ]
+                      },
+                      "label": {
+                        "type": "string"
+                      },
+                      "why": {
+                        "type": "string"
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                },
+                "machine": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "from",
+                      "to",
+                      "job",
+                      "state",
+                      "heavy",
+                      "why"
+                    ],
+                    "properties": {
+                      "from": {
+                        "type": "string"
+                      },
+                      "to": {
+                        "type": "string"
+                      },
+                      "job": {
+                        "type": "string"
+                      },
+                      "state": {
+                        "type": "string",
+                        "enum": [
+                          "ok",
+                          "planned",
+                          "failed",
+                          "skipped",
+                          "recovered",
+                          "running"
+                        ]
+                      },
+                      "severity": {
+                        "type": "string",
+                        "enum": ["ok", "bad", "running"],
+                        "description": "Optional producer classification: ok is not broken, bad is broken, running is in progress."
+                      },
+                      "heavy": {
+                        "type": "boolean"
+                      },
+                      "why": {
+                        "type": "string"
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                },
+                "attention": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "at",
+                      "topic",
+                      "buzz",
+                      "why"
+                    ],
+                    "properties": {
+                      "at": {
+                        "type": "string"
+                      },
+                      "topic": {
+                        "type": "string"
+                      },
+                      "buzz": {
+                        "type": "boolean"
+                      },
+                      "why": {
+                        "type": "string"
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                },
+                "quiet": {
+                  "type": "array",
+                  "items": {
+                    "type": "array",
+                    "description": "Code enforces tuple position types and exact length."
+                  }
+                },
+                "skips": {
+                  "type": "array",
+                  "items": {
+                    "type": "array",
+                    "description": "Code enforces tuple position types and exact length."
+                  }
+                },
+                "buzz_cap": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "additionalProperties": false
+            },
+            "funnel": {
+              "type": "object",
+              "required": [
+                "kind",
+                "layer",
+                "title",
+                "sub",
+                "note",
+                "steps"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "funnel"
+                },
+                "layer": {
+                  "type": "string",
+                  "enum": [
+                    "intent",
+                    "process"
+                  ]
+                },
+                "title": {
+                  "type": "string"
+                },
+                "sub": {
+                  "type": "string"
+                },
+                "note": {
+                  "type": "string"
+                },
+                "steps": {
+                  "type": "array",
+                  "items": {
+                    "type": "array",
+                    "description": "Code enforces tuple position types and exact length."
+                  }
+                }
+              },
+              "additionalProperties": false
+            },
+            "meters": {
+              "type": "object",
+              "required": [
+                "kind",
+                "layer",
+                "title",
+                "items"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "meters"
+                },
+                "layer": {
+                  "type": "string",
+                  "enum": [
+                    "intent",
+                    "process"
+                  ]
+                },
+                "title": {
+                  "type": "string"
+                },
+                "items": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "label",
+                      "used",
+                      "pace",
+                      "resets"
+                    ],
+                    "properties": {
+                      "label": {
+                        "type": "string"
+                      },
+                      "used": {
+                        "type": [
+                          "number",
+                          "null"
+                        ],
+                        "minimum": 0
+                      },
+                      "pace": {
+                        "type": [
+                          "number",
+                          "null"
+                        ],
+                        "minimum": 0
+                      },
+                      "resets": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "additionalProperties": false
+            },
+            "chips": {
+              "type": "object",
+              "required": [
+                "kind",
+                "layer",
+                "title",
+                "cap",
+                "items"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "chips"
+                },
+                "layer": {
+                  "type": "string",
+                  "enum": [
+                    "intent",
+                    "process"
+                  ]
+                },
+                "title": {
+                  "type": "string"
+                },
+                "cap": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "items": {
+                  "type": "array",
+                  "items": {
+                    "type": "array",
+                    "description": "Code enforces tuple position types and exact length."
+                  }
+                }
+              },
+              "additionalProperties": false
+            },
+            "learned": {
+              "type": "object",
+              "required": [
+                "kind",
+                "layer",
+                "title",
+                "demands",
+                "edits",
+                "undos",
+                "lessons",
+                "memory"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "learned"
+                },
+                "layer": {
+                  "type": "string",
+                  "enum": [
+                    "intent",
+                    "process"
+                  ]
+                },
+                "title": {
+                  "type": "string"
+                },
+                "demands": {
+                  "type": "array",
+                  "items": {
+                    "type": "array",
+                    "description": "Code enforces tuple position types and exact length."
+                  }
+                },
+                "edits": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "undos": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "lessons": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "memory": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "ticks": {
+              "type": "object",
+              "required": [
+                "kind",
+                "layer",
+                "window_h",
+                "total",
+                "idle",
+                "launched",
+                "woke",
+                "skipped"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "ticks"
+                },
+                "layer": {
+                  "type": "string",
+                  "enum": [
+                    "intent",
+                    "process"
+                  ]
+                },
+                "window_h": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "total": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "idle": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "launched": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "woke": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "skipped": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "additionalProperties": false
+            },
+            "stock": {
+              "type": "object",
+              "required": [
+                "kind",
+                "layer",
+                "open",
+                "you",
+                "agents",
+                "others",
+                "past_due",
+                "due_7d",
+                "fresh_through"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "stock"
+                },
+                "layer": {
+                  "type": "string",
+                  "enum": [
+                    "intent",
+                    "process"
+                  ]
+                },
+                "open": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "you": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "agents": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "others": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "past_due": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "due_7d": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "cut": {
+                  "type": ["string", "null"],
+                  "description": "Optional gsd data boundary: end of the last source window gsd read; same instant as legacy fresh_through."
+                },
+                "fresh_through": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "additionalProperties": false
+            },
+            "flow": {
+              "type": "object",
+              "required": [
+                "kind",
+                "layer",
+                "since",
+                "days"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "flow"
+                },
+                "layer": {
+                  "type": "string",
+                  "enum": [
+                    "intent",
+                    "process"
+                  ]
+                },
+                "since": {
+                  "type": "string"
+                },
+                "days": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "day",
+                      "open",
+                      "in",
+                      "out"
+                    ],
+                    "properties": {
+                      "day": {
+                        "type": "string"
+                      },
+                      "open": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "in": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "out": {
+                        "type": "integer",
+                        "minimum": 0
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "additionalProperties": false
+            },
+            "rows": {
+              "type": "object",
+              "required": [
+                "kind",
+                "layer",
+                "items"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "rows"
+                },
+                "layer": {
+                  "type": "string",
+                  "enum": [
+                    "intent",
+                    "process"
+                  ]
+                },
+                "items": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "name",
+                      "you",
+                      "agents",
+                      "others",
+                      "past_due",
+                      "due_7d",
+                      "life",
+                      "link"
+                    ],
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      },
+                      "you": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "agents": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "others": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "past_due": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "due_7d": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "life": {
+                        "type": "boolean"
+                      },
+                      "link": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "additionalProperties": false
+            },
+            "chain": {
+              "type": "object",
+              "required": [
+                "kind",
+                "layer",
+                "hops"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "chain"
+                },
+                "layer": {
+                  "type": "string",
+                  "enum": [
+                    "intent",
+                    "process"
+                  ]
+                },
+                "hops": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "name",
+                      "lag_s",
+                      "note",
+                      "warn"
+                    ],
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      },
+                      "lag_s": {
+                        "type": [
+                          "number",
+                          "null"
+                        ],
+                        "minimum": 0
+                      },
+                      "note": {
+                        "type": "string"
+                      },
+                      "warn": {
+                        "type": "boolean"
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "additionalProperties": false
+            },
+            "schedule": {
+              "type": "object",
+              "required": [
+                "kind",
+                "layer",
+                "now",
+                "window_h",
+                "items"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "schedule"
+                },
+                "layer": {
+                  "type": "string",
+                  "const": "process"
+                },
+                "now": {
+                  "type": "string"
+                },
+                "window_h": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "items": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "at",
+                      "kind",
+                      "job",
+                      "est_min",
+                      "heavy",
+                      "reason",
+                      "run_id"
+                    ],
+                    "properties": {
+                      "at": {
+                        "type": "string"
+                      },
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "job",
+                          "wake"
+                        ]
+                      },
+                      "job": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "est_min": {
+                        "type": [
+                          "number",
+                          "null"
+                        ],
+                        "minimum": 0
+                      },
+                      "heavy": {
+                        "type": "boolean"
+                      },
+                      "reason": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "run_id": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "additionalProperties": false
+            },
+            "runs": {
+              "type": "object",
+              "required": [
+                "kind",
+                "layer",
+                "items"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "runs"
+                },
+                "layer": {
+                  "type": "string",
+                  "const": "process"
+                },
+                "items": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "id",
+                      "kind",
+                      "job",
+                      "started_at",
+                      "ended_at",
+                      "status",
+                      "sessions",
+                      "turns",
+                      "reason",
+                      "transcript"
+                    ],
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "job",
+                          "wake"
+                        ]
+                      },
+                      "job": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "started_at": {
+                        "type": "string"
+                      },
+                      "ended_at": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "status": {
+                        "type": "string"
+                      },
+                      "severity": {
+                        "type": "string",
+                        "enum": ["ok", "bad", "running"],
+                        "description": "Optional producer classification: ok is not broken, bad is broken, running is in progress."
+                      },
+                      "sessions": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "turns": {
+                        "type": [
+                          "integer",
+                          "null"
+                        ],
+                        "minimum": 0
+                      },
+                      "reason": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "transcript": {
+                        "type": "boolean"
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      }
+    }
+  },
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Structural intent/1 contract. States: green = working now; red = broken now or unreadable, and the headline names why. Extension discriminator selects mapping[propertyName value]; unknown/missing tags fail closed. Beyond this subset code enforces finite numbers; at >0 and <=now+300 seconds; headline <=160 code points; <=40 blocks; recursively <=200 code points/string, <=400 items/array, <=16 keys/object, lowercase ASCII keys of length 1..24 and depth <=6 from each block. Code enforces allowlisted link URLs, calendar-date/HH:MM/UTC timestamp and transcript-id patterns, schedule ascending at and runs descending started_at, wake job=null (and schedule heavy=false), job-kind job=string, <=100 runs. Tuple rules: day quiet/skips=[HH:MM,HH:MM]; funnel steps=[string,nonnegative integer,string]; chips items=[string,string]; learned demands=[string,string,string]. Optional day promises.met_at is null or HH:MM. Transport cap: 60000 bytes. These constraints deliberately remain code, not ignored schema keywords."
+}

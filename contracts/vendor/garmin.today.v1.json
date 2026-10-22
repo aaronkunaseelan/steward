@@ -1,0 +1,99 @@
+{
+  "$id": "garmin.today.v1",
+  "description": "The owner's Garmin health for one Athens day, as last synced to Garmin Connect and pulled by the garmin producer. Producer: garmin (`garmin today --json`). Readers: Steward health sense. Every key is present; null means unknown. Times are ISO 8601 UTC strings. Freshness has three layers: watch_uploaded_at (watch to Garmin cloud, Garmin's own record), pulled_at (cloud to this store), at (this document). Additive changes keep v1; any other change is v2.",
+  "type": "object",
+  "required": ["schema", "at", "auth", "pulled_at", "watch_uploaded_at", "watch_fresh_until", "fresh_through", "date", "body_battery", "sleep", "stress", "hrv", "resting_hr", "steps", "training_readiness", "last_activity", "week"],
+  "properties": {
+    "schema": {"const": "garmin.today.v1"},
+    "at": {"type": "string"},
+    "auth": {"enum": ["ok", "signed_out", "rate_limited", "error"]},
+    "pulled_at": {"type": ["string", "null"]},
+    "watch_uploaded_at": {"type": ["string", "null"]},
+    "watch_fresh_until": {"type": ["string", "null"], "description": "Watch upload plus the producer upload staleness limit, in ISO 8601 UTC; consumers treat data as stale at or after this instant. Null when watch_uploaded_at is null."},
+    "fresh_through": {"type": ["string", "null"]},
+    "date": {"type": "string"},
+    "body_battery": {
+      "type": "object",
+      "required": ["now", "at", "high", "low", "charged", "drained"],
+      "properties": {
+        "now": {"type": ["integer", "null"], "minimum": 0},
+        "at": {"type": ["string", "null"]},
+        "high": {"type": ["integer", "null"], "minimum": 0},
+        "low": {"type": ["integer", "null"], "minimum": 0},
+        "charged": {"type": ["integer", "null"], "minimum": 0},
+        "drained": {"type": ["integer", "null"], "minimum": 0}
+      }
+    },
+    "sleep": {
+      "type": "object",
+      "required": ["date", "start", "end", "duration_s", "score", "quality"],
+      "properties": {
+        "date": {"type": ["string", "null"]},
+        "start": {"type": ["string", "null"]},
+        "end": {"type": ["string", "null"]},
+        "duration_s": {"type": ["integer", "null"], "minimum": 0},
+        "score": {"type": ["integer", "null"], "minimum": 0},
+        "quality": {"type": ["string", "null"]}
+      }
+    },
+    "stress": {
+      "type": "object",
+      "required": ["avg", "max", "now", "at"],
+      "properties": {
+        "avg": {"type": ["integer", "null"], "minimum": 0},
+        "max": {"type": ["integer", "null"], "minimum": 0},
+        "now": {"type": ["integer", "null"]},
+        "at": {"type": ["string", "null"]}
+      }
+    },
+    "hrv": {
+      "type": "object",
+      "required": ["last_night_ms", "weekly_ms", "status"],
+      "properties": {
+        "last_night_ms": {"type": ["integer", "null"], "minimum": 0},
+        "weekly_ms": {"type": ["integer", "null"], "minimum": 0},
+        "status": {"type": ["string", "null"]}
+      }
+    },
+    "resting_hr": {"type": ["integer", "null"], "minimum": 0},
+    "steps": {"type": ["integer", "null"], "minimum": 0},
+    "training_readiness": {
+      "type": "object",
+      "required": ["score", "level"],
+      "properties": {
+        "score": {"type": ["integer", "null"], "minimum": 0},
+        "level": {"type": ["string", "null"]}
+      }
+    },
+    "week": {
+      "description": "Held activities starting in the selected date's Europe/Athens Monday-week, from Monday 00:00 through the end of date, ordered by start. Missing Garmin facts are null; zone_s contains zones 1 through 5 in seconds.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["start", "type", "duration_s", "label", "aerobic_te", "anaerobic_te", "zone_s", "load"],
+        "properties": {
+          "start": {"type": "string"},
+          "type": {"type": "string"},
+          "duration_s": {"type": ["integer", "null"], "minimum": 0},
+          "label": {"type": ["string", "null"]},
+          "aerobic_te": {"type": ["number", "null"], "minimum": 0},
+          "anaerobic_te": {"type": ["number", "null"], "minimum": 0},
+          "zone_s": {
+            "type": "array", "minItems": 5, "maxItems": 5,
+            "items": {"type": ["integer", "null"], "minimum": 0}
+          },
+          "load": {"type": ["number", "null"], "minimum": 0}
+        }
+      }
+    },
+    "last_activity": {
+      "type": ["object", "null"],
+      "required": ["type", "start", "duration_s"],
+      "properties": {
+        "type": {"type": "string"},
+        "start": {"type": "string"},
+        "duration_s": {"type": ["integer", "null"], "minimum": 0}
+      }
+    }
+  }
+}

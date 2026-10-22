@@ -1,0 +1,48 @@
+#!/usr/bin/env python3
+"""exa-search QUERY [--num N] [--days D]: Exa web search, JSON results on stdout.
+
+Steward's web lookup. Pi's web-research tool uses Brave first, so Steward uses Exa and
+the two don't share one quota. The key comes from EXA_API_KEY or
+~/.config/agent-secrets/workbench.env and never enters argv or output.
+"""
+import argparse
+from datetime import datetime, timedelta, timezone
+import json
+import os
+from pathlib import Path
+import sys
+import urllib.request
+
+
+def key():
+    if os.environ.get('EXA_API_KEY'):
+        return os.environ['EXA_API_KEY']
+    for line in (Path.home() / '.config/agent-secrets/workbench.env').read_text().splitlines():
+        if line.startswith('EXA_API_KEY='):
+            return line.split('=', 1)[1].strip().strip('"\'')
+    sys.exit('exa-search: EXA_API_KEY not configured')
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('query')
+    p.add_argument('--num', type=int, default=10)
+    p.add_argument('--days', type=int, help='only pages published in the last D days')
+    a = p.parse_args()
+    body = {'query': a.query, 'numResults': min(a.num, 25), 'contents': {'text': {'maxCharacters': 600}}}
+    if a.days:
+        body['startPublishedDate'] = (datetime.now(timezone.utc) - timedelta(days=a.days)).isoformat()
+    request = urllib.request.Request('https://api.exa.ai/search', json.dumps(body).encode(),
+                                     {'x-api-key': key(), 'content-type': 'application/json'})
+    with urllib.request.urlopen(request, timeout=60) as response:
+        data = json.load(response)
+    results = [{'title': r.get('title'), 'url': r.get('url'), 'published': r.get('publishedDate'),
+                'author': r.get('author'), 'text': r.get('text')} for r in data.get('results', [])]
+    print(json.dumps({'query': a.query, 'results': results, 'cost': data.get('costDollars')}, ensure_ascii=False, indent=1))
+
+
+try:
+    main()
+except Exception as error:
+    print('exa-search: ' + type(error).__name__, file=sys.stderr)
+    sys.exit(1)

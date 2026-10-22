@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "steward.record.v1",
+  "title": "One line of $STEWARD_RUN_DIR/records.jsonl",
+  "description": "A job may write any keys in its records. The keys declared here are reserved: when present they mean this and have this type, and Steward reads them. A record that violates a reserved key is noted in the run's manifest (record_errors) and that key is ignored; it is never silently dropped.",
+  "x-owner": "steward",
+  "x-consumers": ["gsd steady", "jobs/agent-run", "jobs/backup", "every Steward job"],
+  "type": "object",
+  "properties": {
+    "schema": {"const": "steward.record.v1", "description": "Optional on records; when present it must be this."},
+    "weighted_tokens": {"type": "number", "minimum": 0, "description": "Model tokens this record's work cost, in one unit for every job: input + output + 1.25 x cache_write + 0.1 x cache_read. Steward sums them over the run as its learned token cost. Integer or float."},
+    "model_calls": {"type": "integer", "minimum": 0, "description": "Model calls behind weighted_tokens."},
+    "provider": {"enum": ["anthropic", "openai", "other"], "description": "Whose quota weighted_tokens spent (Claude subscription vs Sol pool)."},
+    "terminated": {"type": "boolean", "description": "true when written during the TERM grace (the run hit max_minutes)."},
+    "links": {"type": "array", "items": {"type": "object"}, "description": "Backlinks: {tty_run}, {session} or {url} objects, full URLs and native ids only."}
+  }
+}

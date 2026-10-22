@@ -1,0 +1,48 @@
+{
+  "$id": "phone.place.v1",
+  "description": "Where the owner is, as named places only (no coordinates), from iPhone Shortcuts arrive/leave events. Producer: phone (`phone where --json`). Readers: Steward place sense. Every key is present; null means unknown. Times are ISO 8601 UTC strings. state: at = arrived at `place` and not left since; out = left `place` (last_event) and not arrived anywhere since; unknown = no event in the last 24 h, or none ever. A missing event is never read as home. Additive changes keep v1; any other change is v2.",
+  "type": "object",
+  "required": ["schema", "at", "state", "place", "since", "last_event", "today", "places", "home"],
+  "properties": {
+    "schema": {"const": "phone.place.v1"},
+    "at": {"type": "string"},
+    "state": {"enum": ["at", "out", "unknown"]},
+    "place": {"type": ["string", "null"]},
+    "since": {"type": ["string", "null"]},
+    "last_event": {
+      "type": ["object", "null"],
+      "required": ["type", "place", "at"],
+      "properties": {
+        "type": {"enum": ["arrive", "leave"]},
+        "place": {"type": "string"},
+        "at": {"type": "string"}
+      }
+    },
+    "today": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["type", "place", "at"],
+        "properties": {
+          "type": {"enum": ["arrive", "leave"]},
+          "place": {"type": "string"},
+          "at": {"type": "string"}
+        }
+      }
+    },
+    "places": {"type": "array", "items": {"type": "string"}},
+    "home": {
+      "description": "Mac overnight city, independent of current named-place state. Unique city/country winner by night sample count in the trailing 30 days (00:00 inclusive to 06:00 exclusive Europe/Athens); at least seven uniquely supporting nights and a strict majority of placed nights. Each night supports its unique sample winner; tied placed nights remain in the denominator. Unknown samples cast no vote. since is the earliest winning-city sample in the window, not continuous residence. nights counts supporting nights, or null when unreadable; unknown city/country/since are null, ok reason is null. IP geolocation is approximate, not GPS. Missing, unreadable or insufficient evidence is unknown.",
+      "type": "object",
+      "required": ["status", "city", "country", "since", "nights", "reason"],
+      "properties": {
+        "status": {"enum": ["ok", "unknown"]},
+        "city": {"type": ["string", "null"]},
+        "country": {"type": ["string", "null"]},
+        "since": {"type": ["string", "null"]},
+        "nights": {"type": ["integer", "null"]},
+        "reason": {"type": ["string", "null"]}
+      }
+    }
+  }
+}

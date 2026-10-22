@@ -1,0 +1,47 @@
+{
+  "schema": "phone.place.v1",
+  "at": "2026-10-17T12:00:00Z",
+  "state": "at",
+  "place": "gym",
+  "since": "2026-10-17T11:45:00Z",
+  "last_event": {
+    "type": "arrive",
+    "place": "gym",
+    "at": "2026-10-17T11:45:00Z"
+  },
+  "today": [
+    {
+      "type": "leave",
+      "place": "home",
+      "at": "2026-10-17T07:00:00Z"
+    },
+    {
+      "type": "arrive",
+      "place": "office",
+      "at": "2026-10-17T07:30:00Z"
+    },
+    {
+      "type": "leave",
+      "place": "office",
+      "at": "2026-10-17T11:00:00Z"
+    },
+    {
+      "type": "arrive",
+      "place": "gym",
+      "at": "2026-10-17T11:45:00Z"
+    }
+  ],
+  "places": [
+    "home",
+    "office",
+    "gym"
+  ],
+  "home": {
+    "status": "unknown",
+    "city": null,
+    "country": null,
+    "since": null,
+    "nights": 0,
+    "reason": "Synthetic fixture: insufficient_nights"
+  }
+}

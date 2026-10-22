@@ -1,0 +1,166 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gsd.worklist.v1",
+  "title": "gsd worklist --json",
+  "description": "The work as gsd holds it, for systems that plan around it (Steward, mech-d). items contains only open items (state not done or canceled); done contains recent closure events. Times are ISO 8601 with offset. gsd computes every meaning here; consumers must not re-derive it from gsd's tables or export.",
+  "x-owner": "gsd",
+  "x-consumers": ["steward", "mech-d"],
+  "type": "object",
+  "required": ["schema", "at", "cut", "projects", "items", "done", "priorities"],
+  "properties": {
+    "schema": {"const": "gsd.worklist.v1"},
+    "at": {"type": "string", "description": "When this answer was read from the live store."},
+    "cut": {
+      "type": "object",
+      "required": ["until", "change_set_id", "committed_at"],
+      "properties": {
+        "until": {"type": ["string", "null"], "description": "gsd has reasoned over the owner's evidence up to this time: the window end of the newest landed pipeline change set. null if no pipeline run has landed."},
+        "change_set_id": {"type": ["string", "null"], "description": "That change set."},
+        "committed_at": {"type": ["string", "null"], "description": "When it landed."}
+      }
+    },
+    "priorities": {
+      "type": "object",
+      "description": "D29, additive v1: one producer-built owner list; consumers render without sorting. Open items ordered by descending numeric priority (unknown last), ascending due_at (undated last), then current graph sequence. project is the current project name, including inactive projects, or null. waiting_on_others includes items due within the inclusive interval payload.at through payload.at + 2 days; overdue items and agents are excluded.",
+      "required": [
+        "mine",
+        "waiting_on_others"
+      ],
+      "properties": {
+        "mine": {
+          "type": "array",
+          "description": "All open items with next_actor=user.",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "title",
+              "project",
+              "due_at",
+              "priority"
+            ],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "project": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "due_at": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "priority": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        },
+        "waiting_on_others": {
+          "type": "array",
+          "description": "Open items with next_actor=external and payload.at <= due_at <= payload.at + 2 days.",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "title",
+              "project",
+              "due_at",
+              "priority"
+            ],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "project": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "due_at": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "priority": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "projects": {
+      "type": "array",
+      "description": "Active projects (status active), including life areas.",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "status", "notion_url"],
+        "properties": {
+          "id": {"type": "string"},
+          "name": {"type": "string"},
+          "status": {"type": "string"},
+          "notion_url": {"type": ["string", "null"], "description": "Full URL of the projected Notion page; null if not projected."}
+        }
+      }
+    },
+    "done": {
+      "type": "array",
+      "description": "Additive v1 key: consumers must allow it to be absent in older producers (completion history then unavailable, not known empty). State-change events in the inclusive 48 hours ending at payload.at, in graph sequence order. An upsert became done or canceled when its state differs from the immediately preceding version, or follows a tombstone; creation in either state counts. Unchanged-state edits and tombstones do not count. Events remain even if later reopened or deleted; repeated closures may share an id. title and state are from the transition version; project is the current name of that version's project, null if absent or deleted. at is the graph version timestamp, not updated_at or the evidence time.",
+      "items": {
+        "type": "object",
+        "required": ["id", "title", "project", "state", "at"],
+        "properties": {
+          "id": {"type": "string"},
+          "title": {"type": "string"},
+          "project": {"type": ["string", "null"]},
+          "state": {"enum": ["done", "canceled"]},
+          "at": {"type": "string"}
+        }
+      }
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "title", "kind", "project_id", "state", "due_at", "next_actor", "waiting_on", "assigned_to", "assigned_name", "priority", "urgency", "next_review_at", "updated_at", "notion_url"],
+        "properties": {
+          "id": {"type": "string"},
+          "title": {"type": "string"},
+          "kind": {"enum": ["task", "question"]},
+          "project_id": {"type": ["string", "null"]},
+          "state": {"enum": ["inbox", "ready", "running", "blocked"]},
+          "due_at": {"type": ["string", "null"], "description": "When the item is due, as gsd holds it; null when no due date is known. The reason for a due date is gsd's prose, not part of this contract."},
+          "next_actor": {"enum": ["user", "agent", "external", "none", null], "description": "Who moves the item next: user = the owner."},
+          "waiting_on": {"type": ["string", "null"], "description": "Prose naming who or what the item waits on."},
+          "assigned_to": {"type": ["string", "null"], "description": "Person id of the owner of the work; null when unassigned (D14: unassigned beats a guess)."},
+          "assigned_name": {"type": ["string", "null"]},
+          "priority": {"type": ["string", "null"]},
+          "urgency": {"type": ["string", "null"]},
+          "next_review_at": {"type": ["string", "null"]},
+          "updated_at": {"type": "string"},
+          "notion_url": {"type": ["string", "null"]}
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,6 @@
+{"type":"system","subtype":"init","session_id":"synthetic-claude"}
+{"type":"user","timestamp":"2026-10-17T08:00:00Z","message":{"role":"user","content":"Review the synthetic task."}}
+{"type":"assistant","timestamp":"2026-10-17T08:00:01Z","message":{"role":"assistant","model":"synthetic-opus","content":[{"type":"thinking","thinking":"First check the schedule."},{"type":"text","text":"I will check it."},{"type":"tool_use","id":"call1","name":"Bash","input":{"command":"printf synthetic"}}],"id":"msg_1","usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":100,"cache_read_input_tokens":1000}}}
+{"type":"user","timestamp":"2026-10-17T08:00:02Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call1","content":[{"type":"text","text":"synthetic output"}]}]}}
+{"type":"assistant","timestamp":"2026-10-17T08:00:03Z","message":{"role":"assistant","content":[{"type":"text","text":"Finished the synthetic task."}],"id":"msg_2","usage":{"input_tokens":2,"output_tokens":3,"cache_creation_input_tokens":0,"cache_read_input_tokens":1000}}}
+{"type":"progress","data":{"text":"Do not display bookkeeping"}}

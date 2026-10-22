@@ -1,0 +1,17 @@
+{
+  "schema": "gsd.worklist.v1",
+  "at": "2026-10-16T12:00:00+00:00",
+  "cut": {"until": "2026-10-16T06:00:00+00:00", "change_set_id": "cut-1", "committed_at": "2026-10-16T07:00:00+00:00"},
+  "projects": [{"id": "p", "name": "Fixture project", "status": "active", "notion_url": null}],
+  "done": [
+    {"id": "closed", "title": "Fixture completed work", "project": "Fixture project", "state": "done", "at": "2026-10-16T08:00:00+00:00"},
+    {"id": "canceled", "title": "Fixture canceled work", "project": null, "state": "canceled", "at": "2026-10-16T09:00:00+00:00"}
+  ],
+  "items": [
+    {"id": "overdue", "title": "Past due", "kind": "task", "project_id": "p", "state": "ready", "due_at": "2026-10-15T12:00:00+00:00", "next_actor": "user", "waiting_on": null, "assigned_to": null, "assigned_name": null, "priority": null, "urgency": null, "next_review_at": null, "updated_at": "2026-10-15T12:00:00+00:00", "notion_url": null},
+    {"id": "boundary", "title": "Seven day boundary", "kind": "question", "project_id": "p", "state": "ready", "due_at": "2026-10-23T15:00:00+03:00", "next_actor": "external", "waiting_on": "Fixture response", "assigned_to": null, "assigned_name": null, "priority": null, "urgency": null, "next_review_at": null, "updated_at": "2026-10-15T12:00:00+00:00", "notion_url": null},
+    {"id": "later", "title": "Outside horizon", "kind": "task", "project_id": null, "state": "inbox", "due_at": "2026-10-23T12:00:01+00:00", "next_actor": null, "waiting_on": null, "assigned_to": null, "assigned_name": null, "priority": null, "urgency": null, "next_review_at": null, "updated_at": "2026-10-15T12:00:00+00:00", "notion_url": null},
+    {"id": "undated", "title": "No known date", "kind": "task", "project_id": null, "state": "running", "due_at": null, "next_actor": "agent", "waiting_on": null, "assigned_to": null, "assigned_name": null, "priority": null, "urgency": null, "next_review_at": null, "updated_at": "2026-10-15T12:00:00+00:00", "notion_url": null}
+  ],
+  "priorities": {"mine": [], "waiting_on_others": []}
+}

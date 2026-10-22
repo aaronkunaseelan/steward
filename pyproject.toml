@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools==75.8.0", "wheel==0.45.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "steward"
+version = "0.0.1"
+description = "Steward phase-zero scaffold and read-only diagnostics"
+requires-python = ">=3.12,<3.13"
+dependencies = []
+
+[project.scripts]
+steward = "steward.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

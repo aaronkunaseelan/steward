@@ -1,0 +1,5 @@
+#!/bin/sh
+export PYTHONPATH="$HOME/.local/lib/steward/current/src"
+# The same PATH as steward-tick.service, so a manual tick can launch batch-run.
+export PATH="$HOME/.local/bin:/home/ubuntu/workbench/scripts/run-tools:/usr/local/bin:/usr/bin:/bin"
+exec /usr/bin/python3.12 -m steward "$@"

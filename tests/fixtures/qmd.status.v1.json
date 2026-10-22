@@ -1,0 +1,13 @@
+{
+  "schema": "qmd.status.v1",
+  "installed_git_sha": "0000000000000000000000000000000000000000",
+  "at": 1792152000,
+  "alive": false,
+  "heartbeat_at": 1792142000,
+  "verify": {"state": "red", "at": 1792142000, "red_checks": ["ingestd_heartbeat"]},
+  "sources": {
+    "gmail": {"fresh_through": 1792142000, "lag_s": 10000, "current": false, "limit_s": 3600, "cadence_s": 300, "error": null, "rate_limited": false},
+    "instapaper": {"fresh_through": null, "lag_s": null, "current": null, "limit_s": 3600, "cadence_s": 900, "error": null, "rate_limited": false},
+    "x": {"fresh_through": 1792151900, "lag_s": 100, "current": true, "limit_s": 3600, "cadence_s": 900, "error": null, "rate_limited": false}
+  }
+}

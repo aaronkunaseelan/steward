@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "steward.run-summary.v1",
+  "title": "One finished Steward run (a wake or a job run) in numbers",
+  "description": "Written by the tick sweep as summary.json beside transcript.json (steward.transcript.v1) in the run's archive directory, after the archive is complete; rewritten only when the archive changes (the first hour after the end). Derived once from the raw sessions and Steward's own records. The mech-d shipper sends both files to the edge; null means unknown.",
+  "x-owner": "steward",
+  "x-consumers": ["mech-d edge runs list and transcript header (via the shipper, POST /ingest)"],
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "id", "kind", "job", "started_at", "ended_at", "duration_s", "status", "reason", "exit_code", "error", "agents", "model_calls", "tokens", "tools", "landed", "truncated", "bytes"],
+  "properties": {
+    "schema": {"const": "steward.run-summary.v1"},
+    "id": {"type": "string", "pattern": "^(wake-[0-9]+|run-[0-9a-f]{32})$"},
+    "kind": {"enum": ["wake", "job"]},
+    "job": {"type": ["string", "null"], "maxLength": 200},
+    "started_at": {"type": "string", "description": "ISO 8601 UTC"},
+    "ended_at": {"type": "string", "description": "ISO 8601 UTC"},
+    "duration_s": {"type": ["number", "null"], "minimum": 0},
+    "status": {"type": "string", "maxLength": 40},
+    "reason": {"type": ["string", "null"], "maxLength": 200, "description": "Wake gate reason or the run's placement reason"},
+    "exit_code": {"type": ["integer", "null"]},
+    "error": {"type": ["string", "null"], "maxLength": 200, "description": "First record error, credential-redacted"},
+    "agents": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["agent", "model", "label", "turns"],
+        "properties": {
+          "agent": {"enum": ["claude", "codex", "pi", "other"]},
+          "model": {"type": ["string", "null"], "maxLength": 80},
+          "label": {"type": ["string", "null"], "maxLength": 40},
+          "turns": {"type": "integer", "minimum": 0}
+        }
+      }
+    },
+    "model_calls": {"type": "integer", "minimum": 0, "description": "Model responses in the sessions (Claude message ids, Codex token_count events, Pi usage messages)"},
+    "tokens": {
+      "type": ["object", "null"],
+      "description": "Summed over sessions; null when the run had no sessions. weighted = input + output + 1.25 x cache_write + 0.1 x cache_read (the steward.record.v1 unit), rounded.",
+      "additionalProperties": false,
+      "required": ["input", "output", "cache_write", "cache_read", "weighted"],
+      "properties": {
+        "input": {"type": "integer", "minimum": 0},
+        "output": {"type": "integer", "minimum": 0},
+        "cache_write": {"type": "integer", "minimum": 0},
+        "cache_read": {"type": "integer", "minimum": 0},
+        "weighted": {"type": "integer", "minimum": 0}
+      }
+    },
+    "tools": {"type": "object", "maxProperties": 40, "additionalProperties": {"type": "integer", "minimum": 1}, "description": "Tool calls by tool name"},
+    "landed": {"type": "object", "maxProperties": 16, "additionalProperties": {"type": "integer", "minimum": 1}, "description": "Jobs: non-zero record counts plus published; wakes: model change verbs during the wake"},
+    "truncated": {"type": "boolean", "description": "As in transcript.json"},
+    "bytes": {"type": "integer", "minimum": 0, "description": "Raw archived session bytes"}
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gsd.runs.v1",
+  "x-owner": "gsd",
+  "description": "Read-only outcome ledger. R1 means all sequential reviewers. Counts and stage usage/cost are additive gsd-owned keys in the existing counts field; Steward's reserved fields/schema are unchanged. Missing measurements are null and explained in missing.",
+  "type": "object",
+  "required": ["schema", "since", "runs"],
+  "properties": {
+    "schema": {"const": "gsd.runs.v1"},
+    "since": {"type": "string"},
+    "runs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["run", "since", "until", "counts", "steps", "error", "missing"],
+        "properties": {
+          "run": {"type": "string"},
+          "since": {"type": ["string", "null"]},
+          "until": {"type": ["string", "null"]},
+          "counts": {
+            "type": "object",
+            "description": "a_changes; r1_accepted/amended/rejected on A changes only; r1_added separate; a_held/undecided; a_* and r1_* usage and cost_usd. Null is unknown, zero is measured none.",
+            "additionalProperties": {"type": ["number", "null"], "minimum": 0}
+          },
+          "steps": {"type": "array", "items": {"type": "string"}},
+          "error": {"type": ["string", "null"]},
+          "missing": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    }
+  }
+}

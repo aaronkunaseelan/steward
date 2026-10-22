@@ -1,0 +1,4 @@
+timezone = "Europe/Athens"
+gmail_account = "owner@example.test"
+pages_host = "https://pages.example.test"
+backup_remote = "test:synthetic-backups/steward"

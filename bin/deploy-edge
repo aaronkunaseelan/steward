@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+"""Deploy only the archived edge tree of an exact commit; secrets travel via stdin."""
+from pathlib import Path
+import os
+import json
+import secrets
+import subprocess
+import sys
+import tempfile
+
+repo = Path(__file__).resolve().parents[1]
+
+
+def git(*args):
+    return subprocess.check_output(['git', '-C', str(repo), *args], text=True).strip()
+
+
+def page_secrets():
+    config = Path.home() / '.config'
+    try:
+        password = json.loads((config / 'mech-d/credentials.json').read_text()).get('PAGE_PASSWORD')
+    except (OSError, ValueError):
+        raise SystemExit('Page password unavailable') from None
+    if not isinstance(password, str) or not password:
+        raise SystemExit('Page password unavailable')
+    path = config / 'steward/pages.env'
+    values = {}
+    for line in path.read_text().splitlines():
+        key, sep, value = line.partition('=')
+        if sep:
+            values[key.strip()] = value.strip().strip('"\'')
+    if not values.get('STEWARD_PAGES_TOKEN'):
+        raise SystemExit('Pages token unavailable')
+    if not values.get('SESSION_SECRET'):
+        values['SESSION_SECRET'] = secrets.token_urlsafe(48)
+        with path.open('a') as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            stream.write('\nSESSION_SECRET=' + values['SESSION_SECRET'] + '\n')
+    return {key: values[key] for key in ('STEWARD_PAGES_TOKEN', 'SESSION_SECRET')} | {'PAGE_PASSWORD': password}
+
+
+def main():
+    if len(sys.argv) != 2:
+        raise SystemExit('Usage: bin/deploy-edge <sha>')
+    if git('status', '--porcelain'):
+        raise SystemExit('Refusing dirty working tree')
+    sha = git('rev-parse', '--verify', '--end-of-options', sys.argv[1] + '^{commit}')
+    credentials = page_secrets()
+    with tempfile.TemporaryDirectory(prefix='steward-edge-') as build:
+        archive = subprocess.check_output(['git', '-C', str(repo), 'archive', sha, 'edge'])
+        subprocess.run(['tar', '-x', '-C', build], input=archive, check=True)
+        project = Path(build) / 'edge'
+        # Locked dependency install, without lifecycle scripts or credentials.
+        clean = {k: v for k, v in os.environ.items() if k in ('PATH', 'HOME', 'LANG')}
+        subprocess.run(['npm', 'ci', '--ignore-scripts', '--no-audit', '--no-fund'], cwd=project, env=clean, check=True)
+        subprocess.run(['npm', 'test'], cwd=project, env=clean, check=True)
+        cli = ['node', str(project / 'node_modules/wrangler/bin/wrangler.js')]
+        env = dict(os.environ, WRANGLER_SEND_METRICS='false')
+        subprocess.run([*cli, 'deploy'], cwd=project, env=env, check=True)
+        for name, value in credentials.items():
+            subprocess.run([*cli, 'secret', 'put', name], input=value + '\n',
+                           text=True, cwd=project, env=env, check=True)
+    print(sha + ': steward edge deployed')
+
+
+if __name__ == '__main__':
+    main()

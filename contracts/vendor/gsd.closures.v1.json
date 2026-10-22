@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gsd.closures.v1",
+  "title": "gsd closures --since ISO --json",
+  "description": "Closure events (an item becoming done or canceled) from since through at, inclusive, each at the closure's own time: the time of the version that closed the item, not of a later edit and not of the reader's run. The same rows as gsd worklist's done, over a caller-chosen window. gsd learns closures at its steady runs; a consumer judging a past day should read after the next run and compare at with the cut. Times are ISO 8601 with offset.",
+  "x-owner": "gsd",
+  "x-consumers": [
+    "steward"
+  ],
+  "type": "object",
+  "required": [
+    "schema",
+    "at",
+    "since",
+    "cut",
+    "closures"
+  ],
+  "properties": {
+    "schema": {
+      "const": "gsd.closures.v1"
+    },
+    "at": {
+      "type": "string",
+      "description": "When this answer was read from the live store; the window's end."
+    },
+    "since": {
+      "type": "string",
+      "description": "The window's start, normalised to UTC."
+    },
+    "cut": {
+      "type": "object",
+      "required": [
+        "until",
+        "change_set_id",
+        "committed_at"
+      ],
+      "properties": {
+        "until": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "gsd has reasoned over the owner's evidence up to this time (the same cut as gsd worklist)."
+        },
+        "change_set_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "committed_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "closures": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "title",
+          "project",
+          "state",
+          "at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "project": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "done",
+              "canceled"
+            ]
+          },
+          "at": {
+            "type": "string",
+            "description": "The closure's own time."
+          }
+        }
+      }
+    }
+  }
+}

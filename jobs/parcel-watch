@@ -1,0 +1,78 @@
+#!/home/ubuntu/.local/share/steward/venv/bin/python3
+# Steward job: tell the owner in Talk when a La Poste parcel gets a new scan.
+# usage: parcel-watch CODE [SEEN_THROUGH_ISO]
+# The told key is the newest event (code + date), so each scan is told once.
+# Events at or before SEEN_THROUGH_ISO were already seen by the owner.
+import argparse
+import json, os, subprocess, sys
+from datetime import datetime
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
+from steward.timing import owner_time
+from steward.settings import local_zone, zone
+from curl_cffi import requests
+
+STEWARD = os.environ.get("STEWARD_BIN", "/home/ubuntu/.local/bin/steward")
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('code')
+    parser.add_argument('seen_through', nargs='?')
+    parser.add_argument('--source-timezone', required=True)
+    parser.add_argument('--source-label', required=True)
+    parser.add_argument('--route', required=True)
+    parser.add_argument('--partner-label')
+    parser.add_argument('--partner-url')
+    parser.add_argument('--partner-link-label', default='tracking')
+    args = parser.parse_args()
+    source_zone = zone(args.source_timezone)
+    code = args.code
+    seen_through = datetime.fromisoformat(args.seen_through) if args.seen_through else None
+    try:
+        s = requests.get(f"https://www.laposte.fr/ssu/sun/back/suivi-unifie/{code}?lang=en",
+                         impersonate="chrome", headers={"Accept": "application/json"}, timeout=60).json()[0]["shipment"]
+    except Exception as e:
+        print(f"parcel read failed: {type(e).__name__}", file=sys.stderr)
+        sys.exit(1)
+
+    events = sorted(s.get("event", []), key=lambda e: e["date"])
+    latest = events[-1] if events else None
+    final = bool(s.get("isFinal"))
+    key = f"parcel:{code}:{latest['code']}:{latest['date']}" if latest else f"parcel:{code}:none"
+    record = {"schema": "steward.record.v1", "code": code, "final": final, "latest": latest, "key": key}
+
+    checked = subprocess.run([STEWARD, "told", "check", key], capture_output=True, text=True)
+    print(checked.stdout, checked.stderr)
+    if checked.returncode != 0:
+        sys.exit(1)
+    told = json.loads(checked.stdout)[key]
+    if latest and seen_through and datetime.fromisoformat(latest["date"]) <= seen_through:
+        told = True
+    record["told_before"] = told
+
+    if latest and not told:
+        source = datetime.fromisoformat(latest['date'])
+        if source.utcoffset() is None:
+            source = source.replace(tzinfo=source_zone)
+        when = source.astimezone(source_zone).strftime('%Y-%m-%d %H:%M')
+        text = f"Parcel {code} ({args.route}): {latest['label']} ({when} {args.source_label} ({owner_time(source, '%H:%M')} {local_zone().key.rsplit('/', 1)[-1]}))."
+        if final:
+            text += " Tracking shows it as final; I'll stop watching."
+        elif s.get("contextData", {}).get("partner") and args.partner_label and args.partner_url:
+            text += ' ' + args.partner_label.format(code=code) + ': [' + args.partner_link_label + '](' + args.partner_url + ')'
+        sent = subprocess.run([STEWARD, "notify", "--topic", "Talk", "--kind", "result",
+                               "--deliver", "immediate", "--told-key", key, text],
+                              capture_output=True, text=True)
+        print(sent.stdout, sent.stderr)
+        record["notified"] = sent.returncode == 0
+
+    with open(os.path.join(os.environ.get("STEWARD_RUN_DIR", "."), "records.jsonl"), "a") as f:
+        f.write(json.dumps(record) + "\n")
+
+
+try:
+    main()
+except Exception as error:
+    print('parcel-watch: ' + type(error).__name__, file=sys.stderr)
+    sys.exit(1)

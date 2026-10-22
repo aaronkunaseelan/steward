@@ -1,0 +1,76 @@
+#!/usr/bin/env python3
+"""Private, verified state and mind snapshots, copied immutably off host."""
+import argparse
+from datetime import datetime, timezone
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import sqlite3
+import subprocess
+import tarfile
+import sys
+import tempfile
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--no-upload', action='store_true')
+    parser.add_argument('--remote', help='rclone remote and prefix (or config backup_remote)')
+    parser.add_argument('--state', type=Path, default=Path.home() / '.local/state/steward/state.sqlite')
+    parser.add_argument('--data', type=Path)
+    args = parser.parse_args()
+    os.umask(0o077)
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
+    from steward import mind
+    mind_root = args.data / 'mind' if args.data else mind.directory()
+    args.data = args.data or Path.home() / '.local/share/steward'
+    root = args.data / 'backups'
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    stamp = datetime.now(timezone.utc)
+    stage = Path(tempfile.mkdtemp(prefix='.stage-', dir=root))
+    try:
+        state = args.state / 'state.sqlite' if args.state.is_dir() else args.state
+        with sqlite3.connect(state.resolve().as_uri() + '?mode=ro', uri=True) as db:
+            db.execute('VACUUM INTO ?', (str(stage / 'state.sqlite'),))
+        with sqlite3.connect(stage / 'state.sqlite') as db:
+            if db.execute('PRAGMA integrity_check').fetchall() != [('ok',)]:
+                raise ValueError('snapshot integrity check failed')
+        with tarfile.open(stage / 'memory-mind.tar.gz', 'w:gz') as archive:
+            for name in ('memory', 'mind'):
+                source = mind_root if name == 'mind' else args.data / name
+                if not source.is_dir():
+                    raise FileNotFoundError(source)
+                archive.add(source, arcname=name)
+        from steward.settings import required
+        remote = args.remote or required('backup_remote')
+        destination = remote.rstrip('/') + '/' + stamp.strftime('%Y-%m-%d') + '/'
+        records = []
+        for path in sorted(stage.iterdir()):
+            unique = 'steward-' + stamp.strftime('%Y%m%dT%H%M%S%fZ') + '-' + path.name
+            path = path.rename(stage / unique)
+            with path.open('rb') as stream:
+                digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+            records.append(dict(object=unique, bytes=path.stat().st_size, sha256=digest))
+        if not args.no_upload:
+            subprocess.run(['rclone', 'copy', '--immutable', '--checksum', str(stage), destination], check=True, capture_output=True)
+        snapshot = stage.rename(root / stamp.strftime('%Y%m%dT%H%M%S%fZ'))
+        output = Path(os.environ.get('STEWARD_RUN_DIR', str(snapshot)))
+        output.mkdir(parents=True, exist_ok=True, mode=0o700)
+        (output / 'records.jsonl').write_text(''.join(json.dumps(r) + '\n' for r in records))
+        (output / 'links.json').write_text(json.dumps({'b2_path': destination, 'uploaded': not args.no_upload}))
+        for old in sorted(p for p in root.iterdir() if p.is_dir() and not p.name.startswith('.'))[:-3]:
+            shutil.rmtree(old)
+    finally:
+        if stage.exists():
+            shutil.rmtree(stage)
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except Exception as error:
+        # Public last stderr line: never exception text (may contain owner data).
+        print('backup: ' + type(error).__name__, file=sys.stderr)
+        sys.exit(1)

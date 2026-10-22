@@ -1,0 +1,94 @@
+#!/usr/bin/env python3
+"""pocketcasts history --json: log in, read listening history, forget the token.
+
+Credentials: ~/.config/pocketcasts/credentials.env (0600), POCKETCASTS_EMAIL and
+POCKETCASTS_PASSWORD. No cached token, sync endpoint, or account mutation.
+"""
+import argparse
+import json
+from pathlib import Path
+import shlex
+import stat
+import sys
+import urllib.error
+import urllib.request
+
+BASE_URL = 'https://api.pocketcasts.com'
+CREDENTIALS = Path.home() / '.config/pocketcasts/credentials.env'
+
+
+def credentials():
+    if stat.S_IMODE(CREDENTIALS.stat().st_mode) != 0o600:
+        raise ValueError('credentials.env must have mode 0600')
+    values = {}
+    for line in CREDENTIALS.read_text().splitlines():
+        if not line.strip() or line.lstrip().startswith('#'):
+            continue
+        name, value = line.split('=', 1)
+        parts = shlex.split(value, comments=True)
+        if len(parts) != 1:
+            raise ValueError('invalid credentials.env')
+        values[name.strip()] = parts[0]
+    return {'email': values['POCKETCASTS_EMAIL'], 'password': values['POCKETCASTS_PASSWORD'], 'scope': 'webplayer'}
+
+
+def post(path, body, token=None):
+    headers = {'Content-Type': 'application/json'}
+    if token:
+        headers['Authorization'] = 'Bearer ' + token
+    request = urllib.request.Request(BASE_URL + path, json.dumps(body).encode(), headers, method='POST')
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as error:
+        # A response body may echo secrets. Never read it into diagnostics.
+        raise ValueError(f'{path}: HTTP {error.code}') from None
+
+
+def history():
+    login = post('/user/login', credentials())
+    token = login.get('token') if isinstance(login, dict) else None
+    if not isinstance(token, str) or not token:
+        raise ValueError('invalid login response: missing token')
+    data = post('/user/history', {}, token)
+    if not isinstance(data, dict) or not isinstance(data.get('episodes'), list):
+        raise ValueError('invalid history response')
+    episodes = []
+    for episode in data['episodes']:
+        if not isinstance(episode, dict) or not isinstance(episode.get('uuid'), str) or not episode['uuid']:
+            raise ValueError('invalid history episode')
+        episodes.append(dict(uuid=episode['uuid'], podcast_title=episode.get('podcastTitle') or None,
+                             episode_title=episode.get('title') or None, published_at=episode.get('published'),
+                             played_at=episode.get('playedAt')))
+    # The API's history is bounded (typically 100). Missing playedAt is unknown,
+    # not the publication date or a playback position masquerading as a timestamp.
+    return {'total': data.get('total'), 'episodes': episodes}
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('command', choices=['history'])
+    parser.add_argument('--json', action='store_true', required=True)
+    parser.parse_args(argv)
+    try:
+        result = history()
+    except urllib.error.URLError:
+        print('pocketcasts: network read failed', file=sys.stderr)
+        return 1
+    except (OSError, KeyError, TypeError):
+        print('pocketcasts: credentials or response unreadable', file=sys.stderr)
+        return 1
+    except ValueError as error:
+        # JSON and env parse errors can include input; only our fixed messages
+        # are safe to report, not arbitrary parser exception text.
+        reason = str(error)
+        if not (reason.startswith(('/user/login: HTTP ', '/user/history: HTTP ', 'invalid ', 'credentials.env must'))):
+            reason = 'invalid credentials or JSON response'
+        print('pocketcasts: ' + reason, file=sys.stderr)
+        return 1
+    print(json.dumps(result, ensure_ascii=False))
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
