@@ -52,22 +52,6 @@ class TimelineTests(unittest.TestCase):
         self.assertIsNone(wake_journal(self.db, 1)['synthesis'])
         self.assertEqual(report['previous_cursor'], 3)
 
-    def test_briefing_migration_is_resumable_and_preserves_transcripts(self):
-        import runpy
-        migrate = runpy.run_path(str(Path(__file__).parents[1] / 'bin/migrate-briefings'))['migrate']
-        data = Path(self.tmp.name) / 'data'
-        old = self.root / 'wakes/1'
-        old.mkdir(parents=True)
-        (old / 'briefing.md').write_text('evidence')
-        archive = data / 'wakes/1/sessions'
-        archive.mkdir(parents=True)
-        (archive / 'raw.jsonl').write_text('native')
-        self.assertEqual(migrate(self.root, data), 1)
-        self.assertEqual(migrate(self.root, data), 0)
-        self.assertEqual((data / 'wakes/1/briefing.md').read_text(), 'evidence')
-        self.assertEqual((archive / 'raw.jsonl').read_text(), 'native')
-        self.assertFalse((self.root / 'wakes').exists())
-
     def test_release_identity_is_the_running_archive_not_current_symlink(self):
         with patch('steward.runtime.__file__', '/opt/steward/releases/' + 'a'*40 + '/src/steward/runtime.py'):
             self.assertEqual(runtime.release_sha(), 'a'*40)

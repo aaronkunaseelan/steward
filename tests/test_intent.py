@@ -50,9 +50,18 @@ class IntentTests(unittest.TestCase):
         return next(b for b in doc['blocks'] if b['kind'] == kind)
 
     def add_job(self, db, targets):
-        return jobs.job_verb(db, 'add', 'gsd-steady', dict(
+        result = jobs.job_verb(db, 'add', 'gsd-steady', dict(
             justification='Keep the obligations fresh.', argv=[released()],
-            needs={'ready_by': targets}, max_minutes=120, heavy=True), now=NOW - timedelta(days=1))  # pre-existing job
+            needs={'ready_by': targets}, max_minutes=120, heavy=True), now=NOW - timedelta(days=1))
+        IntentTests.measure(self, db, 'gsd-steady', NOW - timedelta(days=1) + timedelta(minutes=1))
+        return result
+
+    def measure(self, db, name, at):
+        jobs.append(db, 'runs', dict(run_id='measured-' + name, job=name, state='succeeded',
+                    planned_for=at.isoformat(), started_at=at.isoformat(), ended_at=at.isoformat(),
+                    reason='First measured run.', spec_json=json.dumps(dict(argv=[released()]))),
+                    jobs.change(db, 'fixture', at))
+        db.commit()
 
     def send(self, db, interrupt=None, sender=None, topic='Talk', **options):
         def deliver(*args, **kwargs):
@@ -67,7 +76,7 @@ class IntentTests(unittest.TestCase):
         target = now.astimezone(TEST_ZONE).replace(hour=0, minute=1, second=0, microsecond=0).isoformat()
         jobs.append(db, 'runs', dict(run_id='fixture-good', job='gsd-steady', state='succeeded',
                     planned_for=target, started_at=target, ended_at=target,
-                    reason='Fixture success.', spec_json='{}'), cid)
+                    reason='Fixture success.', spec_json=json.dumps(dict(argv=[released()]))), cid)
         readings = {name: dict(status='ok', data={'events': [], 'digest': 'fixture'})
                     for name in senses.INTERVALS if name not in ('health', 'place')}
         readings['gsd']['data']['cut'] = dict(until=now.isoformat(), committed_at=now.isoformat())
@@ -85,11 +94,12 @@ class IntentTests(unittest.TestCase):
             jobs.job_verb(st.db, 'add', 'consolidate', dict(
                 justification='Keep memory fresh.', argv=[released()],
                 needs={'ready_by': ['06:00']}), now=now - timedelta(days=1))
+            self.measure(st.db, 'consolidate', now - timedelta(days=1) + timedelta(minutes=1))
             cid = jobs.change(st.db, 'fixture', now, 'tick')
             row = dict(run_id='unfolded', job='consolidate', state='started',
                        planned_for=(now - timedelta(minutes=20)).isoformat(),
                        started_at=(now - timedelta(minutes=20)).isoformat(),
-                       reason='Fixture run.', spec_json='{}')
+                       reason='Fixture run.', spec_json=json.dumps(dict(argv=[released()])))
             jobs.append(st.db, 'runs', row, cid)
             st.db.commit()
         path = runtime.manifest_path(self.data, row)
@@ -129,7 +139,7 @@ class IntentTests(unittest.TestCase):
             row = dict(run_id='unfolded-gsd', job='gsd-steady', state='started',
                        planned_for=(now - timedelta(minutes=20)).isoformat(),
                        started_at=(now - timedelta(minutes=20)).isoformat(),
-                       reason='Fixture run.', spec_json='{}')
+                       reason='Fixture run.', spec_json=json.dumps(dict(argv=[released()])))
             jobs.append(st.db, 'runs', row, jobs.change(st.db, 'fixture', now, 'tick'))
             st.db.commit()
         path = runtime.manifest_path(self.data, row)
@@ -158,6 +168,7 @@ class IntentTests(unittest.TestCase):
             jobs.job_verb(st.db, 'add', 'consolidate', dict(
                 justification='Keep memory fresh.', argv=[released()],
                 needs={'ready_by': ['06:00']}), now=now - timedelta(days=1))
+            self.measure(st.db, 'consolidate', now - timedelta(days=1) + timedelta(minutes=1))
         doc = self.doc(now=now)
         self.assertEqual(doc['state'], 'red')
         self.assertIn('consolidate missed 06:00', doc['headline'])
@@ -307,20 +318,6 @@ class IntentTests(unittest.TestCase):
             notify.flush(st.db, lambda *a, **k: 10, NOW, {})
         self.assertFalse(self.block(self.doc(), 'day')['attention'][0]['buzz'])
 
-    def test_existing_s6_metadata_is_understood_without_new_flag(self):
-        with writer(self.state) as st:
-            result = self.send(st.db, 'Act before the deadline.')
-            with st.db:
-                row = st.db.execute('SELECT * FROM outbox WHERE id=?', (result['outbox_id'],)).fetchone()
-                data = notify.interrupt_data(row)
-                data.pop('buzz')
-                st.db.execute('UPDATE outbox SET delivery=? WHERE id=?', (json.dumps(data), row['id']))
-        self.assertTrue(self.block(self.doc(), 'day')['attention'][0]['buzz'])
-        with writer(self.state) as st:
-            with st.db:
-                st.db.execute('UPDATE outbox SET sent_at=?', ((NOW + timedelta(minutes=1)).isoformat(),))
-        self.assertFalse(self.block(self.doc(), 'day')['attention'][0]['buzz'])
-
     def test_gsd_promises_follow_current_ready_by_and_ignore_dry_runs(self):
         targets = ['07:10', '19:20']
         with writer(self.state) as st:
@@ -333,7 +330,7 @@ class IntentTests(unittest.TestCase):
                 for job, end in [('gsd-step-dry', '2026-10-17T03:00:00+00:00'),
                                  ('gsd-steady', '2026-10-17T15:30:00+00:00')]:
                     jobs.append(st.db, 'runs', dict(run_id=job, job=job, state='succeeded', planned_for=end,
-                                reason='Fixture placement.', started_at=end, ended_at=end, spec_json='{}'), cid)
+                                reason='Fixture placement.', started_at=end, ended_at=end, spec_json=json.dumps(dict(argv=[released()]))), cid)
         promises = self.block(self.doc(now=NOW.replace(hour=17)), 'day')['promises']
         gsd = [p for p in promises if p['label'] == 'gsd-steady']
         self.assertEqual([p['at'] for p in gsd], targets)
@@ -350,7 +347,7 @@ class IntentTests(unittest.TestCase):
                 end = '2026-10-17T14:47:00+00:00'  # 17:47 Athens.
                 jobs.append(st.db, 'runs', dict(run_id='recovery', job='gsd-steady', state='succeeded',
                             planned_for=end, started_at=end, ended_at=end,
-                            reason='Fixture success.', spec_json='{}'), cid)
+                            reason='Fixture success.', spec_json=json.dumps(dict(argv=[released()]))), cid)
             self.send(st.db, topic='Today', told_key='orientation:2026-10-17')
             with st.db:
                 st.db.execute("UPDATE outbox SET sent_at='2026-10-17T04:00:00+00:00'")
@@ -380,7 +377,7 @@ class IntentTests(unittest.TestCase):
                 cid = jobs.change(st.db, 'fixture', now)
                 jobs.append(st.db, 'runs', dict(run_id='late', job='gsd-steady', state='succeeded',
                             planned_for=now.isoformat(), started_at=NOW.replace(hour=15).isoformat(),
-                            ended_at=NOW.replace(hour=16, minute=23).isoformat(), reason='Late success.', spec_json='{}'), cid)
+                            ended_at=NOW.replace(hour=16, minute=23).isoformat(), reason='Late success.', spec_json=json.dumps(dict(argv=[released()]))), cid)
                 for name, at in [('orientation', '04:00'), ('day_close', '16:05')]:
                     st.db.execute('INSERT INTO told VALUES (?, ?, NULL, NULL, ?, 1)',
                                   (name + ':2026-10-17', '2026-10-17T' + at + ':00+00:00', 'Today'))
@@ -393,7 +390,7 @@ class IntentTests(unittest.TestCase):
             with st.db:
                 jobs.append(st.db, 'runs', dict(run_id='later-failed', job='gsd-steady', state='failed',
                             planned_for=now.isoformat(), started_at=now.isoformat(), ended_at=now.isoformat(),
-                            reason='Latest failure.', spec_json='{}'), jobs.change(st.db, 'fixture', now))
+                            reason='Latest failure.', spec_json=json.dumps(dict(argv=[released()]))), jobs.change(st.db, 'fixture', now))
         doc = self.doc(now=now)
         self.assertEqual(next(p['state'] for p in self.block(doc, 'day')['promises']
                               if p['label'] == 'gsd-steady'), 'recovered')
@@ -405,6 +402,7 @@ class IntentTests(unittest.TestCase):
         spec = dict(justification='Advisories before the day starts.', argv=[released()], needs={'ready_by': ['06:40', '18:40']})
         with writer(self.state) as st:
             jobs.job_verb(st.db, 'add', 'advisories', spec, now=NOW)  # 12:00 Athens; 06:40 already passed
+            self.measure(st.db, 'advisories', NOW)
         mine = [p for p in self.block(self.doc(), 'day')['promises'] if p['label'] == 'advisories']
         self.assertEqual([(p['at'], p['state']) for p in mine], [('18:40', 'due')])
         with writer(self.state) as st:
@@ -461,7 +459,7 @@ class IntentTests(unittest.TestCase):
         now = NOW.replace(hour=15, minute=40)
         with writer(self.state) as st:
             notify.notify(st.db, 'Today', 'result', 'Reply, not the close',
-                          sender=lambda *a: 1, now=now)
+                          sender=lambda *a, **options: 1, now=now)
         promises = self.block(self.doc(now=now), 'day')['promises']
         self.assertEqual(next(p['state'] for p in promises if p['label'] == 'Day close'), 'due')
 
@@ -681,10 +679,10 @@ class IntentTests(unittest.TestCase):
                     jobs.append(st.db, 'runs', dict(run_id=f'{i:032x}', job='gsd-steady', state='succeeded',
                                 planned_for=at.isoformat(), reason='A Steward-authored reason ' + 'x' * 300,
                                 started_at=(at - timedelta(minutes=10)).isoformat(), ended_at=at.isoformat(),
-                                spec_json='{}', cost_minutes=10), cid)
+                                spec_json=json.dumps(dict(argv=[released()])), cost_minutes=10), cid)
                 jobs.append(st.db, 'runs', dict(run_id='f' * 32, job='gsd-steady', state='succeeded',
                             planned_for=(NOW - timedelta(days=8)).isoformat(), started_at=(NOW - timedelta(days=8)).isoformat(),
-                            ended_at=(NOW - timedelta(days=8)).isoformat(), spec_json='{}', reason='old'), cid)
+                            ended_at=(NOW - timedelta(days=8)).isoformat(), spec_json=json.dumps(dict(argv=[released()])), reason='old'), cid)
                 for i, delta in enumerate((1, 35, 37)):
                     jobs.append(st.db, 'runs', dict(run_id=f'{200+i:032x}', job='gsd-steady', state='planned',
                                 planned_for=(NOW + timedelta(hours=delta)).isoformat(), started_at=None, ended_at=None,
@@ -693,7 +691,7 @@ class IntentTests(unittest.TestCase):
                               (1000, NOW.isoformat(), 'gated', '{}', 'Owner Talk', 'synthetic'))
             row = jobs.get(st.db, 'runs', f'{0:032x}')
             archive.job(self.data, row, now=NOW)
-        doc = self.doc({'wake_times': []})  # Schedule's fixed scope wakes are not suppressed by config.
+        doc = self.doc({'wake_times': []})  # Moment wakes remain when ordinary wakes are disabled.
         schedule = self.block(doc, 'schedule')
         self.assertEqual(set(schedule), {'kind', 'layer', 'now', 'window_h', 'items'})
         self.assertEqual(schedule['layer'], 'process')
@@ -710,7 +708,7 @@ class IntentTests(unittest.TestCase):
                 self.assertIsNone(item['job'])
                 self.assertIsNone(item['run_id'])
                 self.assertFalse(item['heavy'])
-                self.assertIn(intent.hm(intent.when(item['at'])), intent.DEFAULT_WAKE_TIMES + ['07:00', '18:30'])
+                self.assertIn(intent.hm(intent.when(item['at'])), ['07:00', '18:30'])
         runs = self.block(doc, 'runs')
         self.assertEqual(set(runs), {'kind', 'layer', 'items'})
         self.assertEqual(runs['layer'], 'process')
@@ -729,21 +727,59 @@ class IntentTests(unittest.TestCase):
         self.assertTrue(available['transcript'])
         self.assertEqual((available['sessions'], available['turns']), (0, 0))
 
+    def test_schedule_uses_configured_wakes_and_preserves_moments(self):
+        settings = {'wake_times': ['12:34']}
+        items = self.block(self.doc(settings), 'schedule')['items']
+        clocks = {intent.hm(intent.when(i['at'])) for i in items if i['kind'] == 'wake'}
+        self.assertEqual(clocks, {'12:34', '07:00', '18:30'})
+        clocks = {intent.hm(intent.when(i['at'])) for i in
+                  self.block(self.doc({'wake_times': []}), 'schedule')['items'] if i['kind'] == 'wake'}
+        self.assertEqual(clocks, {'07:00', '18:30'})
+
+    def test_configured_wake_dst_slots_match_dispatch(self):
+        from steward import runtime
+        for now, expected in [
+                ('2026-03-28T13:00:00+00:00', ['2026-03-30T00:30:00+00:00']),
+                ('2026-10-24T12:00:00+00:00', ['2026-10-25T00:30:00+00:00', '2026-10-25T01:30:00+00:00'])]:
+            settings = {'wake_times': ['03:30']}
+            slots = intent.schedule([], datetime.fromisoformat(now), settings)['items']
+            self.assertEqual([i['at'] for i in slots], expected)
+            for item in slots:
+                at = datetime.fromisoformat(item['at'])
+                self.assertEqual(runtime.latest_wake(at, settings), at)
+
     def test_schedule_unknown_duration_and_dst_wall_times(self):
-        row = dict(run_id='a'*32, job='synthetic', state='planned', spec_json='{}', reason=None,
+        row = dict(run_id='a'*32, job='synthetic', state='planned', spec_json=json.dumps(dict(argv=[released()])), reason=None,
                    planned_for=(NOW + timedelta(hours=1)).isoformat(), started_at=None, ended_at=None)
-        item = next(i for i in intent.schedule([row], NOW)['items'] if i['kind'] == 'job')
+        item = next(i for i in intent.schedule([row], NOW, {})['items'] if i['kind'] == 'job')
         self.assertIsNone(item['est_min'])
         self.assertIsNone(item['reason'])
         now = datetime(2026, 10, 24, 12, tzinfo=timezone.utc)
-        items = intent.schedule([], now)['items']
+        items = intent.schedule([], now, {})['items']
         self.assertEqual(len({i['at'] for i in items}), len(items))
         self.assertTrue(any(i['at'] == '2026-10-25T03:00:00+00:00' for i in items))  # 05:00 Athens after DST.
 
+    def test_schedule_observed_duration_keeps_unknown_distinct_from_reservation_bound(self):
+        from steward import planner
+        row = dict(run_id='planned', job='synthetic', state='planned', spec_json='{}', reason=None,
+                   planned_for=(NOW + timedelta(hours=1)).isoformat(), started_at=None, ended_at=None)
+        runs = [row]
+        def estimate():
+            return next(i['est_min'] for i in intent.schedule(runs, NOW, {})['items'] if i['kind'] == 'job')
+        self.assertIsNone(estimate())
+        self.assertEqual(planner.expected(runs, 'synthetic', {'max_minutes': 45}), 45)
+        for minutes, state in [(10, 'succeeded'), (20, 'failed')]:
+            runs.append(dict(job='synthetic', state=state, started_at=(NOW - timedelta(minutes=minutes)).isoformat(),
+                             ended_at=NOW.isoformat(), planned_for=NOW.isoformat(), cost_minutes=None))
+        self.assertEqual(estimate(), 15)
+        runs[-1]['cost_minutes'] = 8
+        self.assertEqual(estimate(), 8)
+        self.assertEqual(planner.expected(runs, 'synthetic', {'max_minutes': 45}), 8)
+
     def test_schedule_array_cap(self):
-        rows = [dict(run_id=f'{i:032x}', job='synthetic', state='planned', spec_json='{}', reason=None,
+        rows = [dict(run_id=f'{i:032x}', job='synthetic', state='planned', spec_json=json.dumps(dict(argv=[released()])), reason=None,
                      planned_for=(NOW + timedelta(minutes=i)).isoformat(), started_at=None, ended_at=None) for i in range(405)]
-        self.assertEqual(len(intent.schedule(rows, NOW)['items']), 400)
+        self.assertEqual(len(intent.schedule(rows, NOW, {})['items']), 400)
 
     def test_document_validates_against_mech_d_contract(self):
         # mech-d owns intent/1 and ships contracts/intent-1.json (vendored here, compared in test_contracts).

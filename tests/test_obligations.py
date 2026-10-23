@@ -61,7 +61,8 @@ class ObligationTests(unittest.TestCase):
                  ('2026-10-25T06:40:00+02:00', '2026-10-25T06:30:00+02:00'),
                  ('2026-10-26T00:10:00+02:00', '2026-10-25T18:30:00+02:00'),
                  ('2026-03-29T06:40:00+03:00', '2026-03-29T06:30:00+03:00')]
-        with patch('steward.jobs.current', side_effect=lambda db, table: [job] if table == 'jobs' else []):
+        with patch('steward.jobs.current', side_effect=lambda db, table: [job] if table == 'jobs' else []), \
+             patch('steward.jobs.execution_profile', return_value={'measured_at': '2026-01-01T00:00:00+00:00'}):
             for now, target in cases:
                 with self.subTest(now=now):
                     result = timing.latest_job_obligation(None, 'gsd-steady', dt(now))

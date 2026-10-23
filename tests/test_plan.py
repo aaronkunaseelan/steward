@@ -45,22 +45,20 @@ class PlanTests(unittest.TestCase):
             self.assertIsNone(planner.rule(jobs.get(db, 'jobs', 'test'), jobs.current(db, 'runs'), at, NOW))
             self.assertEqual(planner.rule(jobs.get(db, 'jobs', 'test'), jobs.current(db, 'runs'), at+timedelta(minutes=20), NOW), 'ready_by')
 
-    def test_churn_moves_cancels_not_creation_and_frozen(self):
+    def test_model_repeated_and_near_term_moves_succeed(self):
         self.add()
-        self.add('other', heavy=True)
         with writer(self.root) as store:
             db = store.db
-            def reserve(name, hours):
-                return jobs.run_verb(db, 'plan', name, 'reason', (NOW+timedelta(hours=hours)).isoformat(), now=NOW, actor='model', churn_cap=2)
-            first = reserve('test', 4)
-            reserve('other', 6)
-            reserve('test', 5)
-            jobs.run_verb(db, 'cancel', first['run_id'], 'reason', now=NOW, actor='model', churn_cap=2)
-            reserve('test', 7)  # creations do not consume churn
-            with self.assertRaisesRegex(StateError, 'churn cap'):
-                reserve('test', 8)
-            with self.assertRaisesRegex(StateError, 'frozen horizon'):
-                reserve('test', 1)
+            first = jobs.run_verb(db, 'plan', 'test', 'reserve', NOW.isoformat(), now=NOW, actor='model')
+            for minutes in range(20, 201, 20):
+                moved = jobs.run_verb(db, 'plan', 'test', 'adapt',
+                                      (NOW + timedelta(minutes=minutes)).isoformat(), now=NOW, actor='model')
+                self.assertEqual(moved['run_id'], first['run_id'])
+            near = jobs.run_verb(db, 'plan', 'test', 'near term',
+                                 (NOW + timedelta(minutes=20)).isoformat(), now=NOW, actor='model')
+            self.assertEqual(near['status'], 'planned')
+            self.assertEqual(jobs.get(db, 'runs', first['run_id'])['planned_for'],
+                             (NOW + timedelta(minutes=20)).isoformat())
 
     def test_tty_cost_fold(self):
         self.add(recurring=False)
@@ -79,14 +77,14 @@ class PlanTests(unittest.TestCase):
             learned = jobs.snapshot(store.db, now=NOW)['jobs'][0]['cost']
             self.assertEqual(learned, dict(median_minutes=12, median_tokens=120, run_count=1, last_status='succeeded'))
 
-    def test_model_cancel_frozen_and_owner_exception(self):
+    def test_model_can_cancel_near_term_reservation(self):
         self.add()
         with writer(self.root) as store:
             db = store.db
             rid = jobs.run_verb(db, 'now', 'test', 'owner', now=NOW)['run_id']
-            with self.assertRaisesRegex(StateError, 'frozen horizon'):
-                jobs.run_verb(db, 'cancel', rid, 'model', now=NOW, actor='model')
-            jobs.run_verb(db, 'cancel', rid, 'owner', now=NOW)
+            result = jobs.run_verb(db, 'cancel', rid, 'adapt', now=NOW, actor='model')
+            self.assertEqual(result['status'], 'cancelled')
+            self.assertEqual(jobs.get(db, 'runs', rid)['state'], 'cancelled')
 
     def test_cli_plan_read_only_and_rule_error(self):
         import io

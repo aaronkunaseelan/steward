@@ -13,17 +13,11 @@ import sys
 import tempfile
 
 from .settings import local_zone
+from .memory import local_day
 from .jobs import (UTC, append, change, current, duration, get, instant,
-                   now_utc, plan, snapshot, COMPUTE_GRID_MINUTES)
-from . import senses, mind, records, archive, timing
+                   now_utc, plan, snapshot, COMPUTE_GRID_MINUTES, execution_profile, is_extra)
+from . import senses, mind, records, archive, timing, capabilities, planner
 from .state import StateError, atomic_file, local_path, writer
-
-
-# The Steward wake is Opus at medium effort (owner decision 2026-10-16): it is the one place
-# where judgement about the owner's time is made. Async jobs use capabilities.AGENTS.
-WAKE_AGENT = ['-a', 'claude', '-m', 'claude-opus-5-5']
-WAKE_VENDOR_ARGS = ['--permission-mode', 'bypassPermissions', '--effort', 'medium',
-                    '--exclude-dynamic-system-prompt-sections']
 
 
 from .settings import config_dir, config, validate_settings
@@ -69,16 +63,12 @@ def grid(dt, up):
     return datetime.fromtimestamp((math.ceil(value) if up else math.floor(value)) * COMPUTE_GRID_MINUTES * 60, UTC)
 
 
-def expected_minutes(runs, name, spec):
-    from .planner import expected
-    return expected(runs, name, spec)
-
-
 def placement(job, runs, now):
     spec = json.loads(job['spec_json'])
     needs = spec['needs']
-    expected = timedelta(minutes=expected_minutes(runs, job['name'], spec))
-    starts = [instant(r['started_at']) for r in runs if r['job'] == job['name'] and r['started_at']]
+    expected = timedelta(minutes=planner.expected(runs, job['name'], spec))
+    history = [r for r in runs if r['job'] == job['name'] and not is_extra(r)]
+    starts = [instant(r['started_at']) for r in history if r['started_at']]
     from .planner import gap_floor, cadence_deadline
     deadline = cadence_deadline(job['name'], spec, runs)
     floor = gap_floor(runs, job['name'], spec)
@@ -86,15 +76,15 @@ def placement(job, runs, now):
         at = grid(max(now, max(starts) + duration(needs['every']['min']) if starts else now), True)
         reason = 'default: every.min ' + needs['every']['min'] + ' after last start'
     elif 'max_staleness' in needs:
-        ends = [instant(r['ended_at']) for r in runs if r['job'] == job['name'] and r['state'] == 'succeeded']
+        ends = [instant(r['ended_at']) for r in history if r['state'] == 'succeeded']
         at = max(now, grid(max(ends) + duration(needs['max_staleness']) - expected, False)) if ends else now
         reason = 'default: max_staleness ' + needs['max_staleness']
     else:
         candidates = []
-        day = now.astimezone(local_zone()).date()
+        day = local_day(now)
         # A deadline already served by a success in its freshness window (the 6 h before it,
         # as in the planner) needs no second run: plan for the next deadline instead.
-        served = [instant(r['ended_at']) for r in runs if r['job'] == job['name'] and r['state'] == 'succeeded' and r['ended_at']]
+        served = [instant(r['ended_at']) for r in history if r['state'] == 'succeeded' and r['ended_at']]
         for offset in range(4):
             for clock in needs['ready_by']:
                 from .timing import clock_on
@@ -104,8 +94,8 @@ def placement(job, runs, now):
                 if timing.kept(served, deadline):
                     continue
                 fresh, _ = timing.deadline_window(deadline)
-                if any(r['job'] == job['name'] and r['state'] == 'failed' and r.get('retry_of')
-                       and fresh <= instant(r['planned_for']) <= deadline for r in runs):
+                if any(r['state'] == 'failed' and r.get('retry_of')
+                       and fresh <= instant(r['planned_for']) <= deadline for r in history):
                     continue  # X-24: exhaustion must not become a fresh default for the same target.
                 # Start early enough for one rerun, within the 6-h freshness window, so a
                 # skipped or failed slot is retried at the next tick while the deadline can be met.
@@ -133,8 +123,8 @@ def placement(job, runs, now):
             other_spec = json.loads(other['spec_json'])
             if other['state'] in ('planned', 'started') and other_spec['heavy']:
                 start = instant(other['started_at'] or other['planned_for'])
-                end = start + timedelta(minutes=other_spec['max_minutes'])
-                if at < end and start < at + timedelta(minutes=spec['max_minutes']):
+                end = start + timedelta(minutes=planner.expected(runs, other['job'], other_spec))
+                if at < end and start < at + expected:
                     at = grid(end, True)
     return at, reason
 
@@ -204,13 +194,17 @@ NOTHING_NEW = 'nothing new'
 DEFAULT_WAKE_TIMES = [f'{h:02}:00' for h in range(9, 22)] + ['01:00', '05:00']
 
 
+def wake_times(settings):
+    return settings.get('wake_times', DEFAULT_WAKE_TIMES)
+
+
 def latest_wake(now, settings):
     """Compare real instants, including both occurrences of an autumn wall time."""
     slots = []
-    today = now.astimezone(local_zone()).date()
+    today = local_day(now)
     for days_ago in (0, 1, 2):
         day = today - timedelta(days=days_ago)
-        for value in settings.get('wake_times', DEFAULT_WAKE_TIMES):
+        for value in wake_times(settings):
             for fold in (0, 1):
                 candidate = timing.clock_on(day, value, fold)
                 if candidate is not None and candidate <= now:
@@ -273,7 +267,7 @@ def tick(root, data=None, clock=now_utc, load_reader=host_load, lock_reader=heav
         for job in current(db, 'jobs'):
             if job['state'] == 'active':
                 try:
-                    validate_spec(db, json.loads(job['spec_json']), job['name'],
+                    validate_spec(json.loads(job['spec_json']), job['name'],
                                   qmd_status=lambda: cached_runner(['qmd', 'status', '--json']))
                 except (StateError, ValueError, TypeError, KeyError) as exc:
                     invalid_specs[job['name']] = str(exc).splitlines()[0]
@@ -284,6 +278,7 @@ def tick(root, data=None, clock=now_utc, load_reader=host_load, lock_reader=heav
         talk = messages.poll(db, now, settings, sender, update_fetcher or updates, telegram)
         from . import pages
         result['pages_poll_ok'] = pages.poll(db, now, pages_transport)
+        result['your_items'] = pages.sync_your_items(db, observations.get('gsd', {}), now, pages_transport)
         # A skip suppresses wakes only; deterministic work continues normally.
         skipping = status(db, now)['current']
         with db:
@@ -315,7 +310,7 @@ def tick(root, data=None, clock=now_utc, load_reader=host_load, lock_reader=heav
                     row.update(state=manifest['status'], exit_code=manifest['exit_code'], ended_at=instant(manifest['ended_at']).isoformat(), manifest=str(path))
                     if manifest['exit_code']:
                         row['reason'] = failure_reason(manifest['exit_code'], path.parent)
-                elif now > instant(row['started_at']) + timedelta(minutes=spec['max_minutes'] + 5) and unit_reader(row['unit']) is False:
+                elif now > instant(row['started_at']) + timedelta(minutes=spec.get('_limit_minutes', spec['max_minutes']) + 5) and unit_reader(row['unit']) is False:
                     row.update(state='failed', ended_at=now.isoformat(), reason='batch unit gone without valid manifest')
                 else:
                     continue
@@ -325,43 +320,36 @@ def tick(root, data=None, clock=now_utc, load_reader=host_load, lock_reader=heav
                 if (row['state'] == 'failed' and not row['retry_of'] and job['state'] == 'active' and job['name'] not in invalid_specs
                         and json.loads(job['spec_json'])['needs'].get('ready_by')):
                     plan(db, row['job'], now, 'retry of run ' + row['run_id'], now, cid,
-                         move=False, retry_of=row['run_id'])
-            # Multiple passes allow dependencies added before their parent to obtain a reservation.
-            jobs = current(db, 'jobs')
-            for _ in range(len(jobs)):
-                made = False
-                for job in jobs:
-                    if job['name'] in invalid_specs:
+                         move=False, retry_of=row['run_id'], extra=is_extra(row))
+            for job in current(db, 'jobs'):
+                if job['name'] in invalid_specs:
+                    continue
+                spec = json.loads(job['spec_json'])
+                runs = current(db, 'runs')
+                if job['state'] != 'active' or not spec['recurring'] or any(r['job'] == job['name'] and r['state'] in ('planned', 'started') for r in runs):
+                    continue
+                at, reason = placement(job, runs, now)
+                if at is not None:
+                    from .planner import rule
+                    if at > now + timedelta(hours=36):
+                        # Not due inside the planning window: nothing is wrong, it is planned later.
+                        result.setdefault('later', {})[job['name']] = at.isoformat()
                         continue
-                    spec = json.loads(job['spec_json'])
-                    runs = current(db, 'runs')
-                    if job['state'] != 'active' or not spec['recurring'] or any(r['job'] == job['name'] and r['state'] in ('planned', 'started') for r in runs):
+                    # The feasible time nearest the default, so a refused default never
+                    # collapses to "now" and reruns a job that was just served.
+                    slots = [grid(now, True) + timedelta(minutes=COMPUTE_GRID_MINUTES*i) for i in range(109)]
+                    candidates = [at] + sorted(slots, key=lambda t: abs(t - at)) + [now]
+                    default_at = at
+                    at = next((t for t in candidates if rule(job, runs, t, now) is None), None)
+                    if at is None:
+                        result.setdefault('unplanned', {})[job['name']] = 'no feasible time'
                         continue
-                    at, reason = placement(job, runs, now)
-                    if at is not None:
-                        from .planner import rule
-                        if at > now + timedelta(hours=36):
-                            # Not due inside the planning window: nothing is wrong, it is planned later.
-                            result.setdefault('later', {})[job['name']] = at.isoformat()
-                            continue
-                        # The feasible time nearest the default, so a refused default never
-                        # collapses to "now" and reruns a job that was just served.
-                        slots = [grid(now, True) + timedelta(minutes=COMPUTE_GRID_MINUTES*i) for i in range(109)]
-                        candidates = [at] + sorted(slots, key=lambda t: abs(t - at)) + [now]
-                        default_at = at
-                        at = next((t for t in candidates if rule(job, runs, t, now) is None), None)
-                        if at is None:
-                            result.setdefault('unplanned', {})[job['name']] = 'no feasible time'
-                            continue
-                        if at != default_at:
-                            reason = 'default: feasible alternative; original placement violates calendar C constraints'
-                        try:
-                            plan(db, job['name'], at, reason, now, cid, churn_cap=settings.get('churn_cap', 6))
-                            made = True
-                        except StateError as exc:
-                            result.setdefault('unplanned', {})[job['name']] = str(exc)
-                if not made:
-                    break
+                    if at != default_at:
+                        reason = 'default: feasible alternative; original placement violates calendar C constraints'
+                    try:
+                        plan(db, job['name'], at, reason, now, cid)
+                    except StateError as exc:
+                        result.setdefault('unplanned', {})[job['name']] = str(exc)
         # Commit started intent before crossing the process boundary. The lock serializes ticks.
         for row in current(db, 'runs'):
             if row['state'] != 'planned' or instant(row['planned_for']) > now:
@@ -377,6 +365,8 @@ def tick(root, data=None, clock=now_utc, load_reader=host_load, lock_reader=heav
                 reason = 'host-load guard unknown'
             if job['state'] != 'active':
                 reason = 'job is not active'
+            elif any(r['job'] == row['job'] and r['state'] == 'started' for r in current(db, 'runs')):
+                reason = 'job already started'
             elif reason is None and spec['heavy'] and (any(r['state'] == 'started' and json.loads(r['spec_json'])['heavy'] for r in current(db, 'runs')) or lock_reader()):
                 reason = 'heavy lane busy or unknown'
             with db:
@@ -385,13 +375,17 @@ def tick(root, data=None, clock=now_utc, load_reader=host_load, lock_reader=heav
                     append(db, 'runs', row, cid)
                     result['refused'].append(row['run_id'])
                     continue
+                profile = execution_profile(db, row['job'], spec)
+                spec = dict(spec, _limit_minutes=profile['limit_minutes'], _capability_sha=profile['capability_sha'])
+                if is_extra(row):
+                    spec['_extra'] = True
                 name = 'steward-' + row['job'] + '-' + row['run_id']
                 row.update(state='started', started_at=now.isoformat(), unit='batch-' + name + '.service',
                            spec_json=json.dumps(spec, sort_keys=True))
                 append(db, 'runs', row, cid)
             # run-exec owns the deadline (TERM, grace, KILL, manifest); the unit's limit
             # is only a backstop after it, or systemd would kill run-exec first.
-            argv = ['batch-run'] + (['--heavy'] if spec['heavy'] else []) + ['--name', name, '--max', str(spec['max_minutes'] + 5) + 'm']
+            argv = ['batch-run'] + (['--heavy'] if spec['heavy'] else []) + ['--name', name, '--max', str(spec['_limit_minutes'] + 5) + 'm']
             if spec.get('env_file'):
                 argv += ['--env-file', spec['env_file']]
             # batch-run does not preserve PYTHONPATH, so explicitly bind the current code root.
@@ -465,15 +459,24 @@ def execute(root, run_id, data=None, clock=now_utc):
         spec = json.loads(row['spec_json'])
         start = clock()
         env = dict(os.environ, STEWARD_RUN_DIR=str(directory), STEWARD_ACTOR='model', STEWARD_DELIVER=spec['deliver'], STEWARD_STATE=str(root), STEWARD_JOB=row['job'], STEWARD_RUN_ID=run_id)
-        code = 127
+        code, collection_error = 127, None
         with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
             try:
                 proc = subprocess.Popen(spec['argv'], cwd=spec.get('cwd', str(Path.home())), env=env, stdout=out, stderr=err, start_new_session=True)
                 try:
-                    code = proc.wait(timeout=spec['max_minutes'] * 60)
+                    code = proc.wait(timeout=spec.get('_limit_minutes', spec['max_minutes']) * 60)
                 except subprocess.TimeoutExpired:
-                    stop(proc)
                     code = 124
+                    stop(proc)
+                    # tty workers have their own session, outside the job's process group.
+                    link_path = directory / 'links.json'
+                    try:
+                        if link_path.exists():
+                            for ref in archive.links(json.loads(link_path.read_text())):
+                                if ref.get('tty_run'):
+                                    subprocess.run(['tty', 'stop', ref['tty_run']], capture_output=True, timeout=30)
+                    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                        collection_error = 'unknown: tty stop ' + type(exc).__name__
             except OSError:
                 pass
             for stream, name in ((out, 'stdout.txt'), (err, 'stderr.txt')):
@@ -488,17 +491,33 @@ def execute(root, run_id, data=None, clock=now_utc):
             except ValueError:
                 links = []
         _, record_errors = records.inspect(directory)
-        manifest = dict(job=row['job'], run_id=run_id, host=socket.gethostname(), argv=spec['argv'], cwd=spec.get('cwd', str(Path.home())), started_at=start.isoformat(), ended_at=end.isoformat(), exit_code=code, status='succeeded' if code == 0 else 'failed', duration=(end - start).total_seconds(), links=links, record_errors=record_errors)
-        atomic_file(path, json.dumps(manifest, sort_keys=True).encode())
+        manifest = dict(schema='steward.job.v2', job=row['job'], run_id=run_id, host=socket.gethostname(), argv=spec['argv'], cwd=spec.get('cwd', str(Path.home())), started_at=start.isoformat(), ended_at=end.isoformat(), exit_code=code, status='succeeded' if code == 0 else 'failed', duration=(end - start).total_seconds(), links=links, record_errors=record_errors)
+        if is_extra(row):
+            manifest['extra'] = True
         archived = archive_attempt(archive.job, data_root(data), row, manifest=manifest, now=end)
+        if collection_error:
+            archived = collection_error
+        manifest['transcript_collection'] = dict(status='ok' if archived == 'complete' else 'unknown',
+                                               reason=None if archived == 'complete' else archived)
+        atomic_file(path, json.dumps(manifest, sort_keys=True).encode())
         return {'run_id': run_id, 'status': manifest['status'], 'exit_code': code, 'archive': archived}
 
 
-def harness(argv):
+def harness(argv, env=None, timeout=38 * 60, links_path=None):
+    # Publish the identity before waiting: TERM can then stop/archive a job's tty.
+    if links_path is not None:
+        argv = list(argv)
+        argv.insert(argv.index('--') if '--' in argv else len(argv), '--bg')
+        result = subprocess.run(argv, capture_output=True, text=True, check=True,
+                                env=dict(os.environ, STEWARD_ACTOR='model', **(env or {})))
+        run_id = json.loads(result.stdout)['run']
+        atomic_file(links_path, json.dumps({'tty_run': run_id}).encode())
+        subprocess.run(['tty', 'wait', run_id], stdout=subprocess.DEVNULL, timeout=timeout)
+        return run_id
     # tty's recorded worker has a separate session from the foreground waiter.
-    process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, env=dict(os.environ, STEWARD_ACTOR='model'))
+    process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, env=dict(os.environ, STEWARD_ACTOR='model', **(env or {})))
     try:
-        output, _ = process.communicate(timeout=38 * 60)
+        output, _ = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         process.terminate()
         output, _ = process.communicate(timeout=10)
@@ -559,6 +578,7 @@ def wake(root, clock=now_utc, runner=harness, settings=None, prompt=None, sender
             state['finds_waiting'] = messages.queued(db)
             from . import pages
             state['live_pages'] = pages.live(db, now)
+            state['your_items_page'] = pages.your_items(db)
         directory = data_root() / 'wakes' / str(wake_id)
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         source = Path(__file__).resolve().parents[2]
@@ -569,6 +589,19 @@ def wake(root, clock=now_utc, runner=harness, settings=None, prompt=None, sender
             try:
                 stable = memory.system_prompt(prompt, source=mind.directory(settings))
                 text = memory.briefing(store.db, now, dict(state, gate_reason=reason), receipt=briefing_info)
+                from . import briefing
+                baseline = None
+                previous = {}
+                for row in store.db.execute('SELECT id, checkpoint FROM wakes WHERE id < ? ORDER BY id DESC', (wake_id,)):
+                    checkpoint = json.loads(row['checkpoint'])
+                    if checkpoint.get('model_calls', 0) > 0:
+                        baseline = row['id']
+                        previous = checkpoint.get('briefing', {}).get('sections', {})
+                        break
+                section_info = briefing.section_info(text, briefing_info)
+                index = briefing.wake_index(text, section_info, previous, reason, state['rituals'])
+                briefing_info.update(sections=section_info, baseline_wake=baseline,
+                                     index_bytes=len(index.encode()))
                 briefing_info['system_bytes'] = len(stable.encode())
             except StateError as exc:
                 briefing_info.update(complete=False, error=str(exc))
@@ -580,6 +613,8 @@ def wake(root, clock=now_utc, runner=harness, settings=None, prompt=None, sender
                 store.db.execute('UPDATE wakes SET checkpoint=? WHERE id=?',
                                  (json.dumps({'briefing': briefing_info}), wake_id))
         atomic_file(directory / 'briefing.md', text.encode())
+        atomic_file(directory / 'index.md', index.encode())
+        atomic_file(directory / 'briefing-sections.json', json.dumps(section_info).encode())
         calls = 0
         status = 'skipped'
         run_id = None
@@ -587,7 +622,7 @@ def wake(root, clock=now_utc, runner=harness, settings=None, prompt=None, sender
             calls = 1
             status = 'completed'
             try:
-                run_id = runner(['tty', 'run', *WAKE_AGENT, '--no-accept', '-C', str(directory), str(directory / 'briefing.md'), '--', *WAKE_VENDOR_ARGS, '--append-system-prompt', stable])
+                run_id = runner(['tty', 'run', *capabilities.AGENTS['opus'], '--no-accept', '-C', str(directory), str(directory / 'index.md'), *capabilities.VENDOR_ARGS['opus'], '--exclude-dynamic-system-prompt-sections', '--append-system-prompt', stable])
             except (OSError, StateError, subprocess.SubprocessError) as exc:
                 run_id = getattr(exc, 'run_id', None)
                 status = 'failed'
@@ -611,9 +646,10 @@ def wake(root, clock=now_utc, runner=harness, settings=None, prompt=None, sender
 def archive_attempt(archiver, *args, **kwargs):
     # A failed copy must not change the completed run's outcome. Tick retries it.
     try:
-        return 'complete' if archiver(*args, **kwargs)['complete'] else 'pending'
-    except (OSError, ValueError, KeyError, TypeError):
-        return 'error'
+        meta = archiver(*args, **kwargs)
+        return 'complete' if meta['complete'] else meta.get('reason', 'unknown: transcript collection incomplete')
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return 'unknown: transcript collection ' + type(exc).__name__
 
 
 def learned_cost(manifest, directory=None):
@@ -639,6 +675,15 @@ def learned_cost(manifest, directory=None):
             continue
     # Jobs without tty report weighted_tokens; validate each key, not the whole record's cost.
     if directory is not None:
+        # An interrupted tty may have no final usage result; its native transcript does.
+        meta_path = directory / 'transcript-meta.json'
+        if not tokens and meta_path.exists():
+            from .summary import tokens as native_tokens
+            meta = json.loads(meta_path.read_text())
+            for session in meta['sessions']:
+                _, total = native_tokens(directory / 'sessions' / session['file'], session['agent'])
+                if total:
+                    tokens.append(sum(total.values()))
         reported, _ = records.inspect(directory)
         tokens.extend(reported)
     return dict(cost_minutes=minutes, cost_tokens=sum(tokens) if tokens else None)

@@ -1,5 +1,6 @@
 """Owner messages, rituals and delivery, independent of model availability."""
 from .settings import local_zone
+from .memory import local_day
 import json
 import re
 import subprocess
@@ -175,7 +176,7 @@ def poll(db, now, settings, sender=telegram_sender, fetcher=updates, telegram=No
                 is_draft = db.execute('SELECT 1 FROM drafts WHERE change_id=?', (original,)).fetchone()
                 if is_draft:
                     from . import drafts
-                    restored = drafts.undo(db, settings, original, actor='owner', now=now)
+                    restored = drafts.undo(db, original, actor='owner', now=now)
                 elif db.execute('SELECT 1 FROM blocks WHERE change_id=? UNION SELECT 1 FROM demands WHERE change_id=?', (original, original)).fetchone():
                     restored = calendar_b.undo(db, settings, original, now, 'owner')
                 else:
@@ -206,7 +207,7 @@ def fallback(db, now):
     events = []
     for e in cal.get('data', {}).get('events', []):
         start = e['start'].get('dateTime', e['start'].get('date', ''))
-        if start[:10] == str(now.astimezone(local_zone()).date()):
+        if start[:10] == str(local_day(now)):
             clock = owner_time(jobs.instant(start), '%H:%M') if 'T' in start else 'All day'
             events.append((start, clock + ' ' + (e.get('summary') or 'Busy')))
     if cal['verdict'] != 'fresh':
@@ -222,7 +223,7 @@ def fallback(db, now):
         priorities = gsd.get('data', {}).get(key)
         lines += ([str(i.get('title') or i['id'])[:140] for i in priorities] or [empty]) if priorities is not None else ['Unknown: refresh gsd sense']
     lines += ['Compute today']
-    runs = [r for r in jobs.current(db, 'runs') if r['state'] == 'planned' and jobs.instant(r['planned_for']).astimezone(local_zone()).date() == now.astimezone(local_zone()).date()]
+    runs = [r for r in jobs.current(db, 'runs') if r['state'] == 'planned' and local_day(jobs.instant(r['planned_for'])) == local_day(now)]
     lines += [(owner_time(jobs.instant(r['planned_for']), '%H:%M') + ' ' + r['job'] + ': ' + r['reason'])[:160] for r in sorted(runs, key=lambda r:r['planned_for'])[:5]] or ['No planned jobs']
     lines += ['Finds waiting', str(queued(db)) + ' queued', 'Next actions', 'Review Today; send instructions in Talk.']
     from .notify import TODAY_CHARACTERS
@@ -297,5 +298,5 @@ def alerts(db, now, sender, settings):
     if len(wakes) == 2 and all(r['status'] == 'failed' for r in wakes):
         problems.append(('wake', 'harness', wakes[-1]['started_at'], 'Check tty/Codex authentication and harness availability.'))
     for kind, subject, since, action in problems:
-        key = f'alert:{kind}:{subject}:{now.astimezone(local_zone()).date()}'
+        key = f'alert:{kind}:{subject}:{local_day(now)}'
         notify(db, 'Alerts', 'alert', f'{subject}: {kind} problem since {since}. {action}', key, sender, now, 'tick', settings=settings)

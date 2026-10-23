@@ -1,5 +1,6 @@
 from contextlib import redirect_stdout
 import io
+import os
 import json
 from pathlib import Path
 import sqlite3
@@ -7,11 +8,11 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-from steward import drafts, messages
+from steward import drafts, jobs, messages
 from steward.cli import main
 from steward.state import StateError, writer
 import test_jobs
-from test_jobs import NOW
+from test_jobs import NOW, spec
 
 
 class DraftTests(unittest.TestCase):
@@ -71,7 +72,7 @@ class DraftTests(unittest.TestCase):
         result = self.create(to=['a@example.com'], subject='subject')
         calls = []
         with writer(self.root) as store:
-            undo = drafts.undo(store.db, {}, result['change_id'], actor='model',
+            undo = drafts.undo(store.db, result['change_id'], actor='model',
                                runner=lambda argv: calls.append(argv), now=NOW)
             self.assertEqual(calls[0][:7], ['gog', '--enable-commands-exact=gmail.drafts.delete',
                              '--gmail-no-send', '-j', 'gmail', 'drafts', 'delete'])
@@ -82,7 +83,7 @@ class DraftTests(unittest.TestCase):
             self.assertEqual(row['actor'], 'model')
             self.assertEqual(store.db.execute('SELECT state FROM drafts').fetchone()[0], 'deleted')
             with self.assertRaises(StateError):
-                drafts.undo(store.db, {}, result['change_id'], runner=lambda a: self.fail('repeat delete'))
+                drafts.undo(store.db, result['change_id'], runner=lambda a: self.fail('repeat delete'))
         for argv in [self.argv[0][0], *calls]:
             self.assertNotIn('send', argv)
             self.assertNotIn('gmail.send', ' '.join(argv))
@@ -137,7 +138,97 @@ class DraftTests(unittest.TestCase):
         result = self.create(reply_to='abc')
         with patch('steward.drafts.undo', return_value={'status': 'deleted'}) as undo, redirect_stdout(io.StringIO()):
             self.assertEqual(main(['undo', '--state', str(self.root), result['change_id']]), 0)
-            self.assertEqual(undo.call_args.args[2], result['change_id'])
+            self.assertEqual(undo.call_args.args[1], result['change_id'])
+
+    def job_context(self, permits):
+        meta = dict(name='sample', reads=[], calls=['steward'], record=['key'], permits=permits)
+        path = Path(self.tmp.name) / 'mind/capabilities/sample.md'
+        path.write_text('---\n' + '\n'.join(k + ': ' + json.dumps(v) for k, v in meta.items()) + '\n---\nFixture task')
+        test_jobs.JobsTests.add(self, capability='sample')
+        rid = test_jobs.JobsTests.run_now(self)
+        test_jobs.JobsTests.tick(self)
+        return dict(STEWARD_ACTOR='model', STEWARD_JOB='test', STEWARD_RUN_ID=rid,
+                    STEWARD_RUN_DIR=str(self.data / 'runs/test' / rid))
+
+    def draft_env(self, context):
+        env = {k: v for k, v in os.environ.items()
+               if k not in ('STEWARD_ACTOR', 'STEWARD_JOB', 'STEWARD_RUN_ID', 'STEWARD_RUN_DIR')}
+        return patch.dict(os.environ, dict(env, **context), clear=True)
+
+    def check_cli_draft(self, context, error=None):
+        output = io.StringIO()
+        with self.draft_env(context), patch('steward.drafts.create', return_value={'status': 'created'}) as create, \
+             patch('sys.stdin', io.StringIO('body')), redirect_stdout(output):
+            code = main(['draft', '--state', str(self.root), '--reply-to', 'abc', '--body-file', '-'])
+        if error:
+            self.assertEqual(code, 2, output.getvalue())
+            self.assertIn(error, json.loads(output.getvalue())['error'])
+            create.assert_not_called()
+        else:
+            self.assertEqual(code, 0, output.getvalue())
+            create.assert_called_once()
+
+    def test_cli_capability_without_draft_permit_cannot_claim_authority(self):
+        context = self.job_context([])
+        # Neither the actor nor a self-declared capability grants this run a permit.
+        context.update(STEWARD_ACTOR='owner', STEWARD_CAPABILITY='prepare')
+        self.check_cli_draft(context, 'lacks draft permit')
+
+    def test_cli_permitted_job_reaches_draft_only_provider(self):
+        context = self.job_context(['draft'])
+        output = io.StringIO()
+        with self.draft_env(context), patch('subprocess.run', return_value=subprocess.CompletedProcess(
+                [], 0, '{"draftId":"r-123"}')) as provider, \
+             patch('steward.drafts.notify'), patch('sys.stdin', io.StringIO('body')), redirect_stdout(output):
+            self.assertEqual(main(['draft', '--state', str(self.root), '--reply-to', 'abc', '--body-file', '-']), 0)
+        self.assertEqual(json.loads(output.getvalue())['status'], 'created')
+        provider.assert_called_once()
+        self.assertEqual(provider.call_args.args[0][:7], ['gog', '--enable-commands-exact=gmail.drafts.create',
+                         '--gmail-no-send', '-j', 'gmail', 'drafts', 'create'])
+        with writer(self.root) as store:
+            self.assertEqual(store.db.execute('SELECT state FROM drafts').fetchone()[0], 'created')
+
+    def test_cli_draft_missing_unknown_or_mismatched_job_context_refuses(self):
+        context = self.job_context(['draft'])
+        test_jobs.JobsTests.add(self, 'other')
+        for keys in (('STEWARD_RUN_ID',), ('STEWARD_JOB',), ('STEWARD_RUN_ID', 'STEWARD_JOB')):
+            with self.subTest(missing=keys):
+                self.check_cli_draft({k: v for k, v in context.items() if k not in keys},
+                                     'requires STEWARD_RUN_ID and STEWARD_JOB')
+        self.check_cli_draft(dict(context, STEWARD_RUN_ID='missing'), 'unknown runs')
+        self.check_cli_draft(dict(context, STEWARD_JOB='missing'), 'unknown jobs')
+        self.check_cli_draft(dict(context, STEWARD_JOB='other'), 'invalid draft job context')
+        with writer(self.root) as store:
+            row = jobs.get(store.db, 'runs', context['STEWARD_RUN_ID'])
+            jobs.append(store.db, 'runs', dict(row, state='succeeded'), row['change_id'])
+            store.db.commit()
+        self.check_cli_draft(context, 'invalid draft job context')
+
+    def test_cli_draft_uses_captured_run_capability_not_edited_job(self):
+        context = self.job_context([])
+        path = Path(self.tmp.name) / 'mind/capabilities/permitted.md'
+        path.write_text('---\nname: "permitted"\nreads: []\ncalls: []\nrecord: []\npermits: ["draft"]\n---\nFixture')
+        with writer(self.root) as store:
+            jobs.job_verb(store.db, 'edit', 'test', spec(capability='permitted'), now=NOW)
+        self.check_cli_draft(context, 'lacks draft permit')
+
+    def test_cli_draft_invalid_or_absent_capability_refuses(self):
+        context = self.job_context(['draft'])
+        path = Path(self.tmp.name) / 'mind/capabilities/sample.md'
+        path.write_text('invalid frontmatter')
+        self.check_cli_draft(context, 'invalid capability frontmatter')
+        with writer(self.root) as store:
+            row = jobs.get(store.db, 'runs', context['STEWARD_RUN_ID'])
+            captured = json.loads(row['spec_json'])
+            captured.pop('capability')
+            jobs.append(store.db, 'runs', dict(row, spec_json=json.dumps(captured)), row['change_id'])
+            store.db.commit()
+        self.check_cli_draft(context, 'requires a capability job')
+
+    def test_cli_owner_and_wake_drafts_keep_authority_without_job_context(self):
+        for context in ({}, {'STEWARD_ACTOR': 'model'}):
+            with self.subTest(context=context):
+                self.check_cli_draft(context)
 
     def test_telegram_reply_undo_dispatch(self):
         result = self.create(reply_to='abc')
@@ -147,7 +238,7 @@ class DraftTests(unittest.TestCase):
         with writer(self.root) as store, patch('steward.drafts.undo', return_value={'change_id': 'f' * 32}) as undo:
             messages.poll(store.db, NOW, {}, sender=lambda topic, text, **kw: sent.append(text) or 43,
                           fetcher=lambda offset: [update], telegram={'chat_id': 1, 'owner_user_id': 2, 'topics': {'Talk': 6}})
-            self.assertEqual(undo.call_args.args[2], result['change_id'])
+            self.assertEqual(undo.call_args.args[1], result['change_id'])
             self.assertIn('Deleted Gmail draft', sent[0])
             self.assertNotIn('undo ', sent[0])
 

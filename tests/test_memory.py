@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from fixture_mind import SOURCE
 from steward import memory, jobs, cli
 from steward.state import writer, StateError
 
@@ -30,11 +31,11 @@ class MemoryTests(unittest.TestCase):
 
     def test_caps_bytes_and_periods(self):
         self.file()
-        for layer,key in [('day','2027-02-01'),('week','2027-W04'),('month','2027-01'),('lessons','lessons')]:
+        for layer,key in [('day','2027-02-01'),('week','2027-01-24'),('month','2027-01'),('lessons','lessons')]:
             memory.write(self.db,layer,key,'x'*memory.CAPS[layer],now=self.now)
             with self.assertRaises(StateError):
                 memory.write(self.db,layer,key,'é'*(memory.CAPS[layer]//2+1),now=self.now)
-        for layer,key in [('day','2027-02-02'),('week','2027-W05'),('month','2027-02'),('day','2026-10-15')]:
+        for layer,key in [('day','2027-02-02'),('week','2027-01-31'),('month','2027-02'),('day','2026-10-15')]:
             with self.assertRaises(StateError):
                 memory.write(self.db,layer,key,'no',now=self.now)
 
@@ -42,7 +43,7 @@ class MemoryTests(unittest.TestCase):
         self.file()
         for layer, key, label in [
             ('day', '2027-02-01', 'day memory Mon 01 Feb 2027'),
-            ('week', '2027-W04', 'week memory 2027-W04'),
+            ('week', '2027-01-24', 'week memory 2027-01-24'),
             ('month', '2027-01', 'month memory Jan 2027'),
             ('lessons', 'lessons', 'lessons'),
             ('synthesis', 'current', 'synthesis'),
@@ -71,15 +72,126 @@ class MemoryTests(unittest.TestCase):
         self.file('2026-12-01T00:00:00+02:00')
         due=memory.due(self.db,self.now)
         pairs={(r['layer'],r['key']) for r in due}
-        self.assertIn(('week','2026-W44'),pairs)  # Oct 26 through Nov 1
+        self.assertIn(('week','2026-11-01'),pairs)  # Nov 1 through Nov 7
         self.assertIn(('month','2026-11'),pairs)
-        self.assertNotIn(('month','2026-10'),pairs)
-        self.assertNotIn(('week','2026-W42'),pairs)
-        self.assertEqual([memory.period(r['layer'],r['key'])[1] for r in due],sorted(memory.period(r['layer'],r['key'])[1] for r in due))
+        self.assertIn(('month','2026-10'),pairs)  # A partial launch month still closes.
+        self.assertNotIn(('week','2026-10-11'),pairs)
+        ends = [memory.period('month', r['month'])[1] if r['layer'] == 'lessons' else
+                memory.period(r['layer'], r['key'])[1] for r in due]
+        self.assertEqual(ends, sorted(ends))
         (self.files/'journal/2026-11-01.json').unlink()
         pairs={(r['layer'],r['key']) for r in memory.due(self.db,self.now)}
-        self.assertNotIn(('month','2026-11'),pairs)
-        self.assertNotIn(('week','2026-W44'),pairs)
+        self.assertIn(('month','2026-11'),pairs)  # A gap below never blocks the month.
+        self.assertNotIn(('week','2026-11-01'),pairs)
+
+    def test_sunday_week_due_after_saturday_filing_across_dst(self):
+        from datetime import date, timedelta
+        from steward.settings import local_zone
+        key = '2026-10-18'
+        expected = list(memory.days(date(2026, 10, 18), date(2026, 10, 25)))
+        def weeks(at):
+            return [r for r in memory.due(self.db, datetime.fromisoformat(at)) if r['layer'] == 'week']
+        self.file('2026-10-24T23:59:59+03:00')
+        self.assertEqual(weeks('2026-10-24T23:59:59+03:00'), [])
+        self.assertEqual(weeks('2026-10-25T00:00:00+03:00'), [])  # Saturday not filed yet.
+        self.file('2026-10-25T00:00:00+03:00')
+        for at in ['2026-10-24T21:00:00+00:00', '2026-10-25T03:30:00+03:00',
+                   '2026-10-25T03:30:00+02:00', '2026-10-25T06:00:00+02:00']:
+            with self.subTest(at=at):
+                self.assertEqual(weeks(at), [dict(layer='week', key=key, day_memories=expected)])
+        for at in ['2026-10-24T23:59:59+03:00', '2026-10-25T03:30:00+03:00',
+                   '2026-10-25T03:30:00+02:00']:
+            day = datetime.fromisoformat(at).astimezone(local_zone()).date()
+            self.assertEqual(memory.week_start(day).isoformat(), key if day.day == 24 else '2026-10-25')
+        # Week keys remain dates across year boundaries, not ISO year/week pairs.
+        self.assertEqual(memory.week_start(date(2027, 1, 1)), date(2026, 12, 27))
+        for invalid in ['2026-W43', '2026-10-19', '20261018']:
+            with self.subTest(invalid=invalid), self.assertRaises((StateError, ValueError)):
+                memory.period('week', invalid)
+        for day in expected:
+            memory.write(self.db, 'day', day, day, now=self.now)
+        memory.write(self.db, 'day', '2026-10-17', 'outside', now=self.now)
+        self.assertEqual([r['key'] for r in memory.show(self.db, 'day', week=key)], expected)
+        memory.write(self.db, 'week', key, 'first week', now=self.now)
+        self.assertEqual(memory.show(self.db, 'week', key)[0]['content'], 'first week')
+        self.assertEqual(weeks('2026-10-25T06:00:00+02:00'), [])
+
+    def test_nested_month_boundaries_and_dst(self):
+        from datetime import date
+        from steward.settings import local_zone
+        self.assertEqual(memory.period('month', '2026-10'),
+                         (date(2026, 9, 27), date(2026, 11, 1)))
+        self.assertEqual(memory.period('month', '2026-11'),
+                         (date(2026, 11, 1), date(2026, 11, 29)))
+        for day, key in [('2026-09-27', '2026-10'), ('2026-10-31', '2026-10'),
+                         ('2026-11-01', '2026-11'), ('2026-11-28', '2026-11'),
+                         ('2026-11-29', '2026-12')]:
+            self.assertEqual(memory.month_key(date.fromisoformat(day)), key)
+        at = datetime(2026, 10, 25, 4, tzinfo=local_zone())
+        self.assertEqual(at.utcoffset().total_seconds(), 7200)
+        self.assertEqual(memory.local_day(at).isoformat(), '2026-10-25')
+        self.assertEqual(memory.week_start(memory.local_day(at)), date(2026, 10, 25))
+
+    def test_month_due_on_last_saturday_filing_not_week_success(self):
+        self.file('2026-10-31T23:59:59+02:00')
+        self.assertFalse(any(r['layer'] == 'month' for r in memory.due(self.db, self.now)))
+        self.file('2026-11-01T00:00:00+02:00')
+        self.assertIn(dict(layer='month', key='2026-10'), memory.due(self.db, self.now))
+        # No week memories exist, and even a missing day journal is fail-soft.
+        (self.files / 'journal/2026-10-25.json').unlink()
+        memory.write(self.db, 'month', '2026-10', 'partial month; missing week', now=self.now)
+        self.assertEqual(memory.show(self.db, 'month')[0]['key'], '2026-10')
+        self.assertFalse(any(r['layer'] == 'month' for r in memory.due(self.db, self.now)))
+
+    def test_month_night_due_order_and_independent_lessons_clock(self):
+        before = datetime.fromisoformat('2026-10-31T23:59:59+02:00')
+        night = datetime.fromisoformat('2026-11-01T04:00:00+02:00')
+        self.file(before.isoformat())
+        memory.write(self.db, 'lessons', 'lessons', 'early review', now=before)
+        self.assertFalse(any(r['layer'] in ('lessons', 'month') for r in memory.due(self.db, before)))
+        self.file(night.isoformat())
+        expected = [dict(layer='day', key='2026-10-31'),
+                    dict(layer='week', key='2026-10-25', day_memories=[f'2026-10-{d}' for d in range(25, 32)]),
+                    dict(layer='lessons', key='lessons', month='2026-10'),
+                    dict(layer='month', key='2026-10')]
+        self.assertEqual(memory.due(self.db, night)[-4:], expected)
+        # A failed week write cannot block either monthly step.
+        with self.assertRaises(StateError):
+            memory.write(self.db, 'week', '2026-10-25', 'x' * (memory.CAPS['week'] + 1), now=night)
+        self.assertEqual(memory.due(self.db, night)[-4:], expected)
+        # The month may even be written first; lessons remain independently due.
+        memory.write(self.db, 'month', '2026-10', 'missing week; lessons not reviewed', now=night)
+        self.assertIn(expected[2], memory.due(self.db, night))
+        memory.write(self.db, 'lessons', 'lessons', 'month review', now=night)
+        self.assertFalse(any(r['layer'] in ('month', 'lessons') for r in memory.due(self.db, night)))
+        # November closes early, on Sat 28, not at calendar-month end.
+        self.file('2026-11-28T23:59:59+02:00')
+        self.assertFalse(any(r['layer'] == 'lessons' for r in memory.due(self.db, datetime.fromisoformat('2026-11-28T23:59:59+02:00'))))
+        self.file('2026-11-29T04:00:00+02:00')
+        next_night = datetime.fromisoformat('2026-11-29T04:00:00+02:00')
+        self.assertEqual(memory.due(self.db, next_night)[-2:],
+                         [dict(layer='lessons', key='lessons', month='2026-11'), dict(layer='month', key='2026-11')])
+        # Successful lessons do not require any successful month memory.
+        memory.write(self.db, 'lessons', 'lessons', 'November review', now=next_night)
+        self.assertEqual(memory.due(self.db, next_night)[-1], dict(layer='month', key='2026-11'))
+
+    def test_cli_sunday_week_write_show_and_filter(self):
+        self.file('2026-10-25T00:00:00+03:00')
+        # CLI opens its own writer.
+        self.ctx.__exit__(None, None, None)
+        self._cleanups.pop()
+        for args, content in [
+            (['memory', 'write', 'day', '2026-10-24'], 'Saturday'),
+            (['memory', 'write', 'week', '2026-10-18'], 'First Sunday week'),
+            (['memory', 'show', 'week', '2026-10-18'], None),
+            (['memory', 'show', 'day', '--week', '2026-10-18'], None),
+        ]:
+            output = io.StringIO()
+            with patch('sys.stdin', io.StringIO(content or '')), patch.object(jobs, 'now_utc', return_value=self.now), contextlib.redirect_stdout(output):
+                self.assertEqual(cli.main([*args, '--state', str(self.root)]), 0)
+            if args[1] == 'show':
+                rows = json.loads(output.getvalue())
+                self.assertEqual(rows[0]['key'], '2026-10-18' if args[2] == 'week' else '2026-10-24')
 
     def test_undo_and_mirror(self):
         first=memory.write(self.db,'lessons','lessons','one',now=self.now)
@@ -100,15 +212,15 @@ class MemoryTests(unittest.TestCase):
 
     def test_recall_and_state_truncation(self):
         # Use fixture rows to cover months before launch without manufacturing filed history.
-        for layer,key in [('lessons','lessons'),('day','2027-01-26'),('day','2027-02-01'),('day','2027-01-25'),('week','2027-W03'),('week','2026-W53'),('week','2027-W04'),('month','2026-11'),('month','2026-06'),('month','2026-05'),('synthesis','current')]:
+        for layer,key in [('lessons','lessons'),('day','2027-01-26'),('day','2027-02-01'),('day','2027-01-25'),('week','2027-01-17'),('week','2026-12-27'),('week','2027-01-24'),('month','2026-11'),('month','2026-07'),('month','2026-06'),('synthesis','current')]:
             with self.db:
                 cid=jobs.change(self.db,'fixture',self.now)
                 self.db.execute('INSERT INTO memories VALUES (?,?,?,?,?)',(layer,key,1,cid,'REMEMBER '+key))
         # The fading view is for consolidation and tool calls.
         recalled=memory.recall(self.db,self.now)
-        for key in ['lessons','2027-01-26','2027-02-01','2027-W03','2026-W53','2026-11','2026-06']:
+        for key in ['lessons','2027-01-26','2027-02-01','2027-01-17','2026-12-27','2026-11','2026-07']:
             self.assertIn('REMEMBER '+key,recalled)
-        for key in ['2027-01-25','2027-W04','2026-05']:
+        for key in ['2027-01-25','2027-01-24','2026-06']:
             self.assertNotIn('REMEMBER '+key,recalled)
         # A wake carries only the synthesis and an index of what is on file.
         text=memory.briefing(self.db,self.now,{'huge':'x'*200000})
@@ -119,7 +231,7 @@ class MemoryTests(unittest.TestCase):
         self.assertNotIn('"huge"',text)
         self.assertNotIn('truncated',text)
         self.assertLessEqual(len(text.encode()),memory.BRIEFING_BYTES)
-        self.assertNotIn("# Steward's soul", text)
+        self.assertNotIn('SYNTHETIC_SOUL_MARKER', text)
         self.assertNotIn('PROMPT', text)
         self.assertLess(text.index('## What I carry'), text.index('## Now ['))
         with self.assertRaises(Exception):
@@ -142,15 +254,17 @@ class MemoryTests(unittest.TestCase):
         self.assertTrue(receipt['complete'])
         self.assertLessEqual(len(text.encode()), memory.BRIEFING_BYTES)
 
-    def test_provocation_persisted_from_soul(self):
+    def test_provocation_persisted_from_reference(self):
         self.file('2026-10-26T00:00:00+02:00')
-        with patch('steward.memory.secrets.choice',side_effect=lambda values:values[-1]) as choice:
+        with patch('steward.memory.secrets.choice',side_effect=lambda values:values[-1]) as choice, \
+             patch.object(memory.mind, 'read', return_value='Provocations (code draws one per week memory):\n99. Reference-only question') as read:
             draw=memory.provocations(self.db,self.now)
             again=memory.provocations(self.db,self.now)
         self.assertEqual(draw,again)
         self.assertEqual(choice.call_count,1)
-        self.assertEqual(draw[0]['week'],'2026-W43')
-        self.assertIn(f"{draw[0]['number']}. {draw[0]['text']}",memory.mind.read('soul.md'))
+        self.assertEqual(draw[0]['week'],'2026-10-18')
+        self.assertIn(f"{draw[0]['number']}. {draw[0]['text']}",'99. Reference-only question')
+        read.assert_called_with('reference/provocations.md', None)
 
     def test_journal_bounds_and_owner_signals(self):
         with self.db:
@@ -218,12 +332,15 @@ class MemoryTests(unittest.TestCase):
         self._cleanups.pop()
         directory=Path(self.tmp.name)/'run'
         with patch.dict(os.environ, STEWARD_RUN_DIR=str(directory), STEWARD_STATE=str(self.root), STEWARD_JOB='consolidate'), patch('sys.argv',['agent-run','consolidate']), patch.object(runtime,'harness',return_value='fixture-session'), patch.object(jobs,'now_utc',return_value=self.now), contextlib.redirect_stdout(io.StringIO()):
-            runpy.run_path(str(memory.SOURCE/'jobs/agent-run'),run_name='__main__')
+            runpy.run_path(str(SOURCE/'jobs/agent-run'),run_name='__main__')
         packet=(directory/'packet.md').read_text()
         self.assertIn('memory_due',packet)
         self.assertIn('day_memories',packet)
         self.assertIn('provocation',packet)
-        self.assertIn("# Steward's soul",packet)
+        self.assertIn('SYNTHETIC_CONSOLIDATE_TASK', packet)
+        self.assertNotIn('SYNTHETIC_SOUL_MARKER', packet)
+        self.assertNotIn('SYNTHETIC_CHARTER_MARKER', packet)
+        self.assertIn("~/.local/share/steward/mind/reference/memory.md",packet)
         self.assertIn('memory show|due|recall|write',packet)
         self.assertEqual(capabilities.load('consolidate')[0]['context'],['memory_due','provocation'])
 

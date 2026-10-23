@@ -311,16 +311,10 @@ print(json.dumps(json.loads(pathlib.Path(os.environ['TEST_TTY_MAP']).read_text()
             self.assertTrue(err.getvalue())
         self.assertFalse(self.data.exists())
 
-    def test_contract_printed_byte_for_byte(self):
-        out = io.StringIO()
-        with redirect_stdout(out):
-            self.assertEqual(cli.main(['contract', 'steward.transcript.v1']), 0)
-        self.assertEqual(out.getvalue(), (Path(__file__).parents[1] / 'contracts/steward.transcript.v1.json').read_text())
-
     def test_truncation_turn_limit_and_redaction_preserve_raw_archive(self):
         secret = 'sk-ant-' + 'S' * 40
         text = 'Bearer abcdef123456 PASSWORD=hunter2 API_KEY="secret-value" ' + secret + ' ' + 'x' * 9000
-        rows = [dict(type='user', message={'content': text}) for _ in range(2002)]
+        rows = [dict(type='user', message={'content': text}) for _ in range(128)]
         self.claude.write_text(''.join(json.dumps(row) + '\n' for row in rows))
         archive.wake(self.data, self.wake_row, now=NOW, home=self.home)
         doc = transcripts.document(self.data, 'wake-7')

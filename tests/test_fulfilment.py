@@ -59,7 +59,18 @@ class FulfilmentTests(unittest.TestCase):
     def test_current_week_only_and_past_only(self):
         result = f.fulfilment(dict(kind='gym', minutes=30, count=3),
                              [session(day=18), session(), session(hour=10)], NOW)
-        self.assertEqual(result['done'], [session()])
+        self.assertEqual(result['done'], [session(day=18), session()])
+
+    def test_saturday_and_sunday_are_different_weeks(self):
+        from steward.memory import local_day, week_start
+        sessions = [session(day=24, hour=20), session(day=25, hour=1)]
+        for at, expected in [('2026-10-24T23:00:00+03:00', sessions[:1]),
+                             ('2026-10-25T04:00:00+02:00', sessions[1:])]:
+            now = datetime.fromisoformat(at)
+            dose = f.fulfilment(dict(kind='gym', count=3, minutes=50), sessions, now)
+            self.assertEqual(dose['done'], expected)
+            self.assertEqual(week_start(local_day(now)).isoformat(),
+                             '2026-10-18' if len(expected) and expected[0]['start'][8:10] == '24' else '2026-10-25')
 
     def test_kinds_validate(self):
         for kind in ('movement', 'gym', 'vo2max', 'anaerobic', 'endurance'):
@@ -74,7 +85,7 @@ class FulfilmentReaderTests(unittest.TestCase):
 
     def health(self, week=None, unknown=None, now=NOW):
         observation = dict(status='unknown', reason=unknown) if unknown else dict(
-            status='ok', data=dict(date=NOW.date().isoformat(), auth='ok', watch_uploaded_at=NOW.isoformat(), week=week or [],
+            status='ok', data=dict(date=NOW.date().isoformat(), week_start='2026-10-18', auth='ok', watch_uploaded_at=NOW.isoformat(), week=week or [],
                                   watch_fresh_until=(NOW + timedelta(days=1)).isoformat()))
         senses.save(self.db, {'health': observation}, now,
                     b.change(self.db, 'fixture', now, 'owner'))
@@ -94,7 +105,7 @@ class FulfilmentReaderTests(unittest.TestCase):
                                 if c['action'] == 'place'))
 
     def legacy(self, kind='gym'):
-        key = kind + ':2026-10-19:0'
+        key = kind + ':2026-10-18:0'
         e = fixtures.event('legacy', '2026-10-20T14:00:00+03:00',
             '2026-10-20T15:30:00+03:00',
             extendedProperties={'private': {'event_key': key, 'steward': '1'}})
@@ -105,6 +116,17 @@ class FulfilmentReaderTests(unittest.TestCase):
             b.change(self.db, 'fixture', NOW, 'owner'))
         return key
 
+    def test_old_monday_cache_is_unknown_until_sunday_week_read(self):
+        self.program()
+        self.health([session()])
+        row = self.db.execute("SELECT id,payload FROM senses WHERE name='health' ORDER BY id DESC LIMIT 1").fetchone()
+        payload = json.loads(row['payload'])
+        del payload['data']['week_start']
+        self.db.execute('UPDATE senses SET payload=? WHERE id=?', (json.dumps(payload), row['id']))
+        self.assertIn('Sunday week', b.fulfilments(self.db, NOW)['gym']['unknown'])
+        self.health([session(day=18), session()])
+        self.assertEqual(len(b.fulfilments(self.db, NOW)['gym']['done']), 2)
+
     def test_movement_four_two_hour_blocks_and_inventory(self):
         self.program()
         self.gog.events['main'] = [fixtures.event(f'busy-{i}',
@@ -114,13 +136,13 @@ class FulfilmentReaderTests(unittest.TestCase):
                            '2026-10-25T21:00:00+02:00')]
         plan = self.plan()
         self.assertEqual(len(plan['context']['tasks']), 1)
-        self.assertEqual(len(plan['candidates']['choices']), 70)
+        self.assertEqual(len(plan['candidates']['choices']), 60)  # Monday–Saturday remain.
         for i in range(4):
             plan = self.plan()
             choices = plan['candidates']['choices']
             self.assertLessEqual(len(choices), 150)
             places = [c for c in choices if c['action'] == 'place']
-            self.assertEqual({c['task_id'] for c in places}, {f'movement:2026-10-19:{i}'})
+            self.assertEqual({c['task_id'] for c in places}, {f'movement:2026-10-18:{i}'})
             c = next(c for c in places if c['start'][11:16] == '09:00'
                      and c['start'][:10] == f'2026-10-{19+i}')
             self.choose(c)
@@ -142,7 +164,7 @@ class FulfilmentReaderTests(unittest.TestCase):
         self.choose(drop)
         places = [c for c in self.plan()['candidates']['choices'] if c['action'] == 'place']
         self.assertTrue(places)
-        self.assertEqual({c['task_id'] for c in places}, {'movement:2026-10-19:4'})
+        self.assertEqual({c['task_id'] for c in places}, {'movement:2026-10-18:4'})
         self.choose(places[0])
         self.gog.events['schedule'].pop()  # Owner deletion is a suggestion, not a consumed slot.
         self.assertTrue(any(c['action'] == 'place' for c in self.plan()['candidates']['choices']))
@@ -249,7 +271,7 @@ class FulfilmentReaderTests(unittest.TestCase):
                          if c['action'] == 'place' and c['start'].startswith('2026-10-20')))
         expiry = NOW + timedelta(seconds=1)
         senses.save(self.db, {'health': dict(status='ok', data=dict(
-            date=NOW.date().isoformat(), auth='ok', watch_uploaded_at=NOW.isoformat(), week=[],
+            date=NOW.date().isoformat(), week_start='2026-10-18', auth='ok', watch_uploaded_at=NOW.isoformat(), week=[],
             watch_fresh_until=expiry.isoformat(), watch_upload_age_s=43199))}, NOW,
             b.change(self.db, 'fixture', NOW, 'owner'))
         self.assertIsNone(self.plan()['movement']['unknown'])
@@ -302,7 +324,7 @@ class FulfilmentReaderTests(unittest.TestCase):
         self.assertEqual(self.gog.events['schedule'][0]['description'], text)
         self.assertEqual(self.plan()['description_refreshes'], {})
         sent = []
-        messages.changes(self.db, NOW, lambda topic, text:
+        messages.changes(self.db, NOW, lambda topic, text, **options:
                          sent.append((topic, text)) or {'message_id': 1}, fixtures.SETTINGS)
         self.assertEqual(len(sent), 1)
         self.assertIn('options updated at ' + b.block_time(*(t.isoformat() for t in old_span)), sent[0][1])
@@ -341,7 +363,7 @@ class FulfilmentReaderTests(unittest.TestCase):
         choices = self.plan()['candidates']['choices']
         self.assertEqual({c['action'] for c in choices}, {'keep', 'drop'})
         self.assertEqual({c['task_id'] for c in choices if c['action'] == 'drop'},
-                         {'gym:2026-10-19:0', e['extendedProperties']['private']['event_key']})
+                         {'gym:2026-10-18:0', e['extendedProperties']['private']['event_key']})
         self.assertFalse(self.plan()['description_refreshes'])
         self.assertEqual(len(self.gog.events['schedule']), 2)
 
@@ -382,7 +404,7 @@ class FulfilmentReaderTests(unittest.TestCase):
         self.program()
         self.gog.events['main'].append(fixtures.event('owner-movement',
             '2026-10-19T07:00:00+03:00', '2026-10-19T08:00:00+03:00',
-            extendedProperties={'private': {'event_key': 'movement:2026-10-19:0'}}))
+            extendedProperties={'private': {'event_key': 'movement:2026-10-18:0'}}))
         plan = self.plan()
         self.assertEqual(plan['fulfilment']['movement']['remaining'], 4)
         self.assertEqual(plan['fulfilment']['gym']['remaining'], 3)

@@ -6,8 +6,8 @@ from pathlib import Path
 import unittest
 from fixture_mind import TEST_ZONE
 
-from steward.scheduler import (InvalidPlan, check, choice, context, dry_run, generate,
-                               instant, propose)
+from steward.scheduler import (InvalidPlan, check, choice, context, generate,
+                               instant)
 
 
 class SchedulerTests(unittest.TestCase):
@@ -31,15 +31,17 @@ class SchedulerTests(unittest.TestCase):
     def test_deterministic_pipeline_pinned_manual_deleted(self):
         self.assertEqual(self.data["timezone"], "Europe/Athens")
         self.assertIs(self.data["timezone_confirmed"], True)
-        first = dry_run(self.data)
-        self.assertEqual(first, dry_run(copy.deepcopy(self.data)))
-        plan = first["checkedplan"]
+        candidates = generate(self.data)
+        self.assertEqual(candidates, generate(copy.deepcopy(self.data)))
+        selections = [self.pick(candidates)]
+        plan = self.checked(candidates, selections)
+        self.assertEqual(plan, self.checked(generate(copy.deepcopy(self.data)), selections))
         for block in self.data["blocks"]:
             self.assertIn(block, plan["blocks"])
         self.assertNotIn("deleted", [b["task_id"] for b in plan["blocks"]])
         self.assertEqual(plan["pending_task_ids"], [])
-        self.assertEqual(first["candidates"]["week_key"], "2026-10-19")
-        self.assertEqual(first["candidates"]["horizon_end"], "2026-10-27T00:00:00+02:00")
+        self.assertEqual(candidates["week_key"], "2026-10-18")
+        self.assertEqual(candidates["horizon_end"], "2026-10-27T00:00:00+02:00")
 
     def test_dst_horizon_elapsed(self):
         for date, offset, end, expected in (("2026-03-28", "+02:00", "2026-03-31T00:00:00+03:00", 71),
@@ -76,7 +78,7 @@ class SchedulerTests(unittest.TestCase):
             for item in c["choices"]:
                 self.assertEqual(instant(item["end"], zone) - instant(item["start"], zone), timedelta(hours=1))
             self.assertTrue(c["choices"])
-            check(data, c, propose(data, c), data["now"])
+            check(data, c, {"schema_version": 1, "selections": [self.pick(c)]}, data["now"])
 
     def test_unknown_expired_unconfirmed_and_bounds(self):
         for key, value in (("external_state", "unknown"), ("timezone_confirmed", False),

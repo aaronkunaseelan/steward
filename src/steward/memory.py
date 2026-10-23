@@ -11,7 +11,6 @@ from .state import atomic_file, StateError
 
 CAPS = dict(day=2048, week=3072, month=4096, lessons=6144, synthesis=2048)
 FIRST = date(2026, 10, 16)
-SOURCE = Path(__file__).resolve().parents[2]
 
 
 def home(root=None):
@@ -28,19 +27,40 @@ def storage(db, root=None):
     return home() if database == production else database.parent / 'memory'
 
 
+def local_day(instant):
+    """Steward's calendar uses Europe/Athens dates, including across DST."""
+    return instant.astimezone(local_zone()).date()
+
+
+def week_start(day):
+    """Steward weeks run Sunday through Saturday, keyed by their Sunday."""
+    return day - timedelta(days=(day.weekday() + 1) % 7)
+
+
+def month_key(day):
+    """A week belongs to the month in which its Saturday falls."""
+    return (week_start(day) + timedelta(days=6)).strftime('%Y-%m')
+
+
+def shift_month(key, offset):
+    first = date.fromisoformat(key + '-01')
+    year, month = divmod(first.year * 12 + first.month - 1 + offset, 12)
+    return f'{year:04d}-{month + 1:02d}'
+
+
 def period(layer, key):
     if layer == 'day':
         start = date.fromisoformat(key)
         end = start + timedelta(days=1)
         jobs.require(start.isoformat() == key, 'invalid day key')
     elif layer == 'week':
-        jobs.require(bool(re.fullmatch(r'\d{4}-W\d{2}', key)), 'invalid week key')
-        start = date.fromisocalendar(int(key[:4]), int(key[6:]), 1)
+        start = date.fromisoformat(key)
+        jobs.require(start.isoformat() == key and start == week_start(start), 'week key must be a Sunday date (YYYY-MM-DD)')
         end = start + timedelta(days=7)
     else:
         jobs.require(bool(re.fullmatch(r'\d{4}-\d{2}', key)), 'invalid month key')
-        start = date.fromisoformat(key + '-01')
-        end = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
+        start = week_start(date.fromisoformat(key + '-01'))
+        end = week_start(date.fromisoformat(shift_month(key, 1) + '-01'))
     return start, end
 
 
@@ -144,7 +164,7 @@ def file_days(db, now=None, root=None):
     directory = storage(db, root) / 'journal'
     directory.mkdir(parents=True, mode=0o700, exist_ok=True)
     done = []
-    for key in days(FIRST, now.astimezone(local_zone()).date()):
+    for key in days(FIRST, local_day(now)):
         path = directory / (key + '.json')
         if not path.exists():
             atomic_file(path, json.dumps(journal(db, day=key, root=root)).encode())
@@ -155,7 +175,7 @@ def file_days(db, now=None, root=None):
 
 
 def due(db, now=None, root=None):
-    today = (now or jobs.now_utc()).astimezone(local_zone()).date()
+    today = local_day(now or jobs.now_utc())
     records = filed(db, root)
     have = {(r['layer'],r['key']) for r in latest(db) if r['content'] is not None}
     if not records:
@@ -164,17 +184,32 @@ def due(db, now=None, root=None):
     candidates = {('day', k) for k in records}
     for k in records:
         d = date.fromisoformat(k)
-        candidates.add(('week', f'{d.isocalendar().year}-W{d.isocalendar().week:02}'))
-        candidates.add(('month', k[:7]))
+        candidates.add(('week', week_start(d).isoformat()))
+        candidates.add(('month', month_key(d)))
     result = []
     for layer, key in candidates:
         start, end = period(layer, key)
-        if start.isoformat() >= first and end <= today and set(days(start,end)) <= records and (layer,key) not in have:
+        ready = ((end - timedelta(days=1)).isoformat() in records if layer == 'month' else
+                 start.isoformat() >= first and set(days(start, end)) <= records)
+        if ready and end <= today and (layer,key) not in have:
             item = dict(layer=layer,key=key)
             if layer == 'week':
                 item['day_memories'] = list(days(start,end))
             result.append(item)
-    return sorted(result, key=lambda r: (period(r['layer'],r['key'])[1], list(CAPS).index(r['layer'])))
+    # Lessons are one current document, reviewed at the latest filed month boundary.
+    # Their clock is independent of whether any week or month memory succeeded.
+    months = [(key, period('month', key)[1]) for layer, key in candidates if layer == 'month']
+    closed = [(key, end) for key, end in months
+              if end <= today and (end - timedelta(days=1)).isoformat() in records]
+    if closed:
+        key, end = max(closed, key=lambda item: item[1])
+        review = db.execute("SELECT c.at FROM memories m JOIN changes c ON c.id=m.change_id "
+                            "WHERE m.layer='lessons' AND m.key='lessons' ORDER BY m.version DESC LIMIT 1").fetchone()
+        if ('lessons', 'lessons') not in have or jobs.instant(review[0]) < datetime.combine(end, time.min, local_zone()):
+            result.append(dict(layer='lessons', key='lessons', month=key))
+    order = ('day', 'week', 'lessons', 'month')
+    return sorted(result, key=lambda r: (period('month', r['month'])[1] if r['layer'] == 'lessons' else
+                                         period(r['layer'], r['key'])[1], order.index(r['layer'])))
 
 
 def mirror(db, root=None):
@@ -195,14 +230,15 @@ def write(db, layer, key, content, actor='owner', now=None, root=None):
         jobs.require(key == {'lessons': 'lessons', 'synthesis': 'current'}[layer], 'invalid ' + layer + ' key')
     else:
         start,end = period(layer,key)
-        jobs.require(end <= now.astimezone(local_zone()).date(), 'period incomplete')
-        jobs.require(set(days(start,end)) <= filed(db,root), 'period not filed')
+        jobs.require(end <= local_day(now), 'period incomplete')
+        required = {(end - timedelta(days=1)).isoformat()} if layer == 'month' else set(days(start, end))
+        jobs.require(required <= filed(db,root), 'period not filed')
     with db:
         cid = jobs.change(db, 'memory write', now, actor)
         label = layer
         if layer in ('day', 'week', 'month'):
             label += ' memory ' + (start.strftime('%a %d %b %Y') if layer == 'day' else
-                                   start.strftime('%b %Y') if layer == 'month' else key)
+                                   date.fromisoformat(key + '-01').strftime('%b %Y') if layer == 'month' else key)
         db.execute('UPDATE changes SET summary=? WHERE id=?', ('Memory write: ' + label, cid))
         version = db.execute('SELECT coalesce(max(version),0)+1 FROM memories WHERE layer=? AND key=?', (layer,key)).fetchone()[0]
         db.execute('INSERT INTO memories VALUES (?,?,?,?,?)', (layer,key,version,cid,content))
@@ -240,16 +276,12 @@ def show(db, layer=None, key=None, week=None, month=None):
 
 
 def recall(db, now):
-    today = now.astimezone(local_zone()).date()
+    today = local_day(now)
     earliest = today - timedelta(days=7)
-    week_end = earliest - timedelta(days=earliest.weekday())
+    week_end = week_start(earliest)
     weeks = [week_end-timedelta(weeks=i) for i in range(1,5)]
-    month_end = min(weeks).replace(day=1)
-    months=[]
-    for _ in range(6):
-        month_end=(month_end-timedelta(days=1)).replace(day=1)
-        months.append(month_end.strftime('%Y-%m'))
-    keys = [('lessons','lessons')] + [('day',k) for k in days(earliest,today)] + [('week',f'{d.isocalendar().year}-W{d.isocalendar().week:02}') for d in reversed(weeks)] + [('month',k) for k in reversed(months)]
+    months = [shift_month(month_key(min(weeks)), -i) for i in range(1, 7)]
+    keys = [('lessons','lessons')] + [('day',k) for k in days(earliest,today)] + [('week',d.isoformat()) for d in reversed(weeks)] + [('month',k) for k in reversed(months)]
     available={(r['layer'],r['key']):r['content'] for r in latest(db) if r['content'] is not None}
     return '\n\n'.join(f'### {layer} {key}\n{available[layer,key]}' for layer,key in keys if (layer,key) in available)
 
@@ -281,8 +313,8 @@ def system_prompt(prompt, source=None):
 
 def briefing(db, now, state, receipt=None):
     carried = next((r['content'] for r in latest(db) if r['layer'] == 'synthesis' and r['content'] is not None), None)
-    memory_text = ('## What I carry\n' + (carried or '(no synthesis yet: consolidation writes the first one)') +
-                   '\n\n## Memories on file\n' + index(db) +
+    carried_text = '## What I carry\n' + (carried or '(no synthesis yet: consolidation writes the first one)')
+    memory_text = (carried_text + '\n\n## Memories on file\n' + index(db) +
                    '\nRecall one with `steward memory show LAYER KEY`; the fading view with `steward memory recall`.')
     from . import briefing as page
     receipt = receipt if receipt is not None else {}
@@ -292,6 +324,13 @@ def briefing(db, now, state, receipt=None):
     if 'day_close' in state.get('rituals', []):
         state['day_close'] = page.day_close(db, now)
     text = memory_text + '\n\n' + page.render(state, now, receipt)
+    prefix = len(memory_text) + 2
+    memory_start = len(carried_text) + 2
+    receipt['section_spans'] = {
+        'What I carry': dict(start=0, end=memory_start),
+        'Memories on file': dict(start=memory_start, end=len(memory_text) + 2),
+        **{name: dict(start=span['start'] + prefix, end=span['end'] + prefix)
+           for name, span in receipt['section_spans'].items()}}
     receipt['bytes'] = len(text.encode())
     if receipt['bytes'] > BRIEFING_BYTES:
         receipt['error'] = f"briefing page exceeds {BRIEFING_BYTES} byte limit ({receipt['bytes']} bytes)"
@@ -301,9 +340,9 @@ def briefing(db, now, state, receipt=None):
 
 
 def provocations(db, now=None, root=None, source=None):
-    text=mind.read('soul.md', source).split('Provocations (code draws one per week memory):',1)[1].split('\n## ',1)[0]
+    text=mind.read('reference/provocations.md', source).split('Provocations (code draws one per week memory):',1)[1].split('\n## ',1)[0]
     options=[(int(n),t) for n,t in re.findall(r'^(\d+)\. (.+)$',text,re.M)]
-    jobs.require(bool(options), 'no provocations in soul')
+    jobs.require(bool(options), 'no provocations in reference/provocations.md')
     for item in due(db,now,root):
         if item['layer']=='week' and not db.execute('SELECT 1 FROM provocations WHERE week=?',(item['key'],)).fetchone():
             number,text=secrets.choice(options)

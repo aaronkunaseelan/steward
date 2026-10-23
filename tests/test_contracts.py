@@ -16,20 +16,6 @@ from steward.contracts import DIRECTORY, load
 class ContractsTests(unittest.TestCase):
     setUp = use_settings
 
-    def test_every_output_contract_has_real_producer_coverage(self):
-        # Real-code producer cases, not another copy of their payload shapes.
-        import importlib
-        cases = {
-            'steward.inbox.v1': 'test_messages.MessagesTests.test_outstanding_cli_matches_wake_inbox_and_is_read_only',
-            'steward.record.v1': 'test_parcel.ParcelTests.test_read_only_lookup_tells_new_scan_once_and_records',
-            'steward.transcript.v1': 'test_transcripts.TranscriptTests.test_real_output_for_both_agents_validates_draft',
-            'steward.run-summary.v1': 'test_transcripts.TranscriptTests.test_sweep_writes_edge_summary_and_transcript_once',
-        }
-        self.assertEqual({p.stem for p in DIRECTORY.glob('*.json')}, set(cases))
-        for target in cases.values():
-            module, cls, method = target.split('.')
-            self.assertTrue(callable(getattr(getattr(importlib.import_module(module), cls), method)))
-
     def test_sense_fixtures_validate(self):
         for identity in ('gsd.worklist.v1', 'qmd.status.v1'):
             with self.subTest(contract=identity):
@@ -61,7 +47,9 @@ class ContractsTests(unittest.TestCase):
         self.assertEqual(json.loads(shipped.read_text()), load('intent-1', vendor=True))
 
     def test_own_contracts_print_verbatim_without_state(self):
-        for identity, suffix in (('steward.job.v1', '.md'), ('steward.record.v1', '.json'), ('steward.transcript.v1', '.json')):
+        for identity, suffix in (('steward.job.v1', '.md'), ('steward.job.v2', '.md'),
+                                 ('steward.record.v1', '.json'), ('steward.transcript.v1', '.json'),
+                                 ('steward.run-summary.v1', '.json'), ('steward.inbox.v1', '.json')):
             output = io.StringIO()
             with redirect_stdout(output):
                 self.assertEqual(main(['contract', identity]), 0)

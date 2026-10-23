@@ -47,7 +47,11 @@ class SenseVerdictTests(unittest.TestCase):
         with writer(self.root) as st:
             self.healthy(st.db, self.now)
             jobs.job_verb(st.db, 'add', 'gsd-steady', dict(justification='fixture', argv=[command()],
-                          needs={'ready_by': ['06:30']}), now=self.now)
+                          needs={'ready_by': ['06:30']}), now=self.now - timedelta(days=1))
+            measured = (self.now - timedelta(hours=20)).isoformat()
+            jobs.append(st.db, 'runs', dict(run_id='measured', job='gsd-steady', state='succeeded',
+                        planned_for=measured, started_at=measured, ended_at=measured, reason='fixture',
+                        spec_json=json.dumps(dict(argv=[command()]))), jobs.change(st.db, 'fixture', self.now))
             senses.save(st.db, {'gsd': dict(status='ok', data=dict(
                 digest='fixture', waiting_on_you=[dict(id='external', title='Unverified old priority')],
                 cut={'until': self.now.isoformat(), 'committed_at': self.now.isoformat()}))},

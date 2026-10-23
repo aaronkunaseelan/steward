@@ -152,7 +152,7 @@ class BundleTests(unittest.TestCase):
 
         def state(done):
             raw = dict(self.worklist, done=done)
-            senses.save(self.db, {'gsd': dict(status='ok', data=senses.gsd({}, NOW, lambda argv: json.dumps(raw)))},
+            senses.save(self.db, {'gsd': dict(status='ok', data=senses.gsd(NOW, lambda argv: json.dumps(raw)))},
                         NOW, b.change(self.db, 'fixture', NOW, 'tick'))
             result = jobs.snapshot(self.db, now=NOW)
             result.update(calendar_b=b.briefing(self.db, NOW), live_pages=pages.live(self.db, NOW),

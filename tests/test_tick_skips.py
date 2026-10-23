@@ -34,17 +34,21 @@ class SkipTests(unittest.TestCase):
             result = {name: dict(status='ok', data={}) for name in senses.INTERVALS
                       if name not in ('health', 'place')}
             result['calendars']['data'] = dict(events=[], digest='unchanged')
-            result['gsd']['data'] = dict(cut=dict(until=now.isoformat(), committed_at=now.isoformat()), digest='unchanged')
+            result['gsd']['data'] = dict(cut=dict(until=now.isoformat(), committed_at=now.isoformat()),
+                                         waiting_on_you=[], notion_urls={}, digest='unchanged')
             result['qmd']['data'] = dict(alive=True, sources={'files': dict(
                 cadence_s=1200, current=True, fresh_through=now.timestamp(), valid_until=now.timestamp() + 1800)})
             result['sol']['data'] = dict(observed_at=now.isoformat())
             return result
-        self.add('gsd-steady', needs={'ready_by': ['00:01']})
+        with writer(self.root) as store:
+            jobs.job_verb(store.db, 'add', 'gsd-steady', test_jobs.spec(needs={'ready_by': ['00:01']}),
+                          now=at - timedelta(days=1))
         with writer(self.root) as store, store.db:
             cid = jobs.change(store.db, 'fixture', at)
             served = at.astimezone(TEST_ZONE).replace(hour=0, minute=1).isoformat()
             jobs.append(store.db, 'runs', dict(run_id='kept', job='gsd-steady', state='succeeded',
-                planned_for=served, started_at=served, ended_at=served, reason='fixture', spec_json='{}'), cid)
+                planned_for=served, started_at=served, ended_at=served, reason='fixture',
+                spec_json=jobs.get(store.db, 'jobs', 'gsd-steady')['spec_json']), cid)
             senses.save(store.db, readings(at), at, cid)
         wakes = []
         with patch('steward.senses.collect', return_value=readings(later)) as collect:

@@ -4,6 +4,7 @@ import shutil
 import tomllib
 from steward.settings import zone
 
+SOURCE = Path(__file__).resolve().parents[1]
 TEST_CONFIG = (Path(__file__).parent / 'fixtures/config.toml').read_text()
 TEST_ZONE = zone(tomllib.loads(TEST_CONFIG)['timezone'])
 from unittest.mock import patch

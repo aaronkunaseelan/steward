@@ -1,5 +1,7 @@
 # steward.job.v1: the job runtime protocol
 
+Legacy protocol (retained unchanged below for old runtimes). New launches use `steward.job.v2`; its measured limit changes the meaning of `max_minutes`, requiring a version bump rather than an additive v1 edit.
+
 Owner: Steward. Implemented by every job Steward runs (gsd steady, jobs/agent-run, jobs/backup, ...). Exact values; change them only with a version bump.
 
 1. **Launch.**

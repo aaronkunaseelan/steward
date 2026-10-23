@@ -66,12 +66,12 @@ def bundles(db, lo, hi, now, events):
         if not (lo <= start < hi and end <= now):
             continue
         elapsed += 1
-        day = start.astimezone(local_zone()).date()
+        day = memory.local_day(start)
         page = db.execute('SELECT opened_at FROM pages WHERE slug=?', (f"prep-{r['demand']}-{day:%Y%m%d}",)).fetchone()
         opened += bool(page and page['opened_at'] and jobs.instant(page['opened_at']) < start)
         if events is None:
             continue
-        closed = any(e['id'] in items and e['state'] == 'done' and jobs.instant(e['at']).astimezone(local_zone()).date() == day
+        closed = any(e['id'] in items and e['state'] == 'done' and memory.local_day(jobs.instant(e['at'])) == day
                      for e in events)
         used += closed
         if r['state'] == 'applied':
@@ -90,8 +90,7 @@ def bundles(db, lo, hi, now, events):
 
 def weekly(db, week=None, now=None, runner=senses.run):
     now = now or jobs.now_utc()
-    iso = now.astimezone(local_zone()).isocalendar()
-    week = week or f'{iso.year}-W{iso.week:02}'
+    week = week or memory.week_start(memory.local_day(now)).isoformat()
     start, end = memory.period('week', week)
     lo = datetime.combine(start, time(), local_zone())
     hi = datetime.combine(end, time(), local_zone())

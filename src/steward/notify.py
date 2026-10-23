@@ -10,6 +10,7 @@ import urllib.request
 import uuid
 
 from .jobs import change, now_utc, require
+from .memory import local_day
 from .runtime import config_dir
 from .timing import moments, moment_at
 
@@ -68,9 +69,9 @@ def interrupt_records(db):
 def interrupt_status(db, now, cap=3):
     from .settings import local_zone
     require(type(cap) is int and cap >= 0, 'interrupt_cap must be a non-negative integer')
-    day = now.astimezone(local_zone()).date()
+    day = local_day(now)
     records = [r for r in interrupt_records(db)
-               if datetime.fromisoformat(r['at']).astimezone(local_zone()).date() == day]
+               if local_day(datetime.fromisoformat(r['at'])) == day]
     return dict(day=day.isoformat(), cap=cap, used=sum(not r['over_cap'] for r in records),
                 over_cap=sum(r['over_cap'] for r in records), records=records)
 
@@ -187,12 +188,7 @@ def send_rows(db, rows, sender, now, settings):
         options = dict(disable_notification=not interrupt, parse_mode='HTML')
         if rows[0]['thread_id'] is not None:
             options['thread_id'] = rows[0]['thread_id']
-        # Legacy two-argument injected senders remain supported.
-        import inspect
-        if any(p.kind == p.VAR_KEYWORD for p in inspect.signature(sender).parameters.values()):
-            mid = sender(rows[0]['topic'], text, **options)
-        else:
-            mid = sender(rows[0]['topic'], text)
+        mid = sender(rows[0]['topic'], text, **options)
         require(type(mid) is int, 'invalid message id')
     except Exception:
         return False

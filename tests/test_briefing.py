@@ -185,7 +185,7 @@ class FreshnessTests(unittest.TestCase):
         raw['priorities']['mine'] = [dict(id=str(i), title='task ' + str(i), priority=str(i * 10),
             due_at=None if i % 2 else template['due_at'], project=raw['projects'][0]['name'])
             for i in (6, 5, 4, 3, 2, 1, 0)]
-        data = senses.gsd({}, NOW, lambda argv: json.dumps(raw))
+        data = senses.gsd(NOW, lambda argv: json.dumps(raw))
         self.assertEqual([i['priority'] for i in data['waiting_on_you']], ['60', '50', '40', '30', '20', '10', '0'])
         self.assertIsNone(data['waiting_on_you'][1]['due_at'])
         self.assertEqual(data['waiting_on_you'][0]['project'], raw['projects'][0]['name'])
@@ -199,12 +199,12 @@ class FreshnessTests(unittest.TestCase):
                        dict(event, id='athens-today', at='2026-10-19T21:00:00Z'),
                        dict(event, id='later-today', at='2026-10-20T09:01:00Z'),
                        dict(event, id='canceled', state='canceled', at='2026-10-20T08:00:00Z')]
-        data = senses.gsd({}, NOW, lambda argv: json.dumps(raw))
+        data = senses.gsd(NOW, lambda argv: json.dumps(raw))
         self.assertEqual([event['id'] for event in data['done']], ['athens-today'])
         self.assertEqual([event['id'] for event in data['canceled_today']], ['canceled'])
         raw['done'][0]['at'] = 'invalid'
         with self.assertRaisesRegex(ValueError, 'done.at'):
-            senses.gsd({}, NOW, lambda argv: json.dumps(raw))
+            senses.gsd(NOW, lambda argv: json.dumps(raw))
 
     def test_gsd_missing_done_is_unknown_and_distant_deadlines_are_kept(self):
         import json
@@ -214,9 +214,9 @@ class FreshnessTests(unittest.TestCase):
         missing = dict(raw)
         missing.pop('done', None)
         with self.assertRaisesRegex(ContractError, 'done'):
-            senses.gsd({}, NOW, lambda argv: json.dumps(missing))
+            senses.gsd(NOW, lambda argv: json.dumps(missing))
         raw['items'] = [dict(raw['items'][0], due_at='2027-01-01T12:00:00Z')]
-        data = senses.gsd({}, NOW, lambda argv: json.dumps(raw))
+        data = senses.gsd(NOW, lambda argv: json.dumps(raw))
         self.assertEqual(data['horizon_deadlines'][0]['due_at'], '2027-01-01T12:00:00Z')
         self.assertEqual(data['deadlines'], [])
 
@@ -227,7 +227,8 @@ class FreshnessTests(unittest.TestCase):
         job = dict(name='gsd-steady', state='active', spec_json=json.dumps({'needs': {'ready_by': ['06:30', '18:30']}}))
         run = dict(job='gsd-steady', state='succeeded', started_at='2026-10-19T14:40:00Z',
                    ended_at='2026-10-19T15:00:00Z')
-        with patch('steward.jobs.current', side_effect=lambda db, table: [job] if table == 'jobs' else [run]):
+        with patch('steward.jobs.current', side_effect=lambda db, table: [job] if table == 'jobs' else [run]), \
+             patch('steward.jobs.execution_profile', return_value={'measured_at': '2026-01-01T00:00:00+00:00'}):
             before_morning = latest_job_obligation(None, GSD_JOB, datetime.fromisoformat('2026-10-20T02:00:00Z'))
             self.assertEqual(before_morning['target'], '2026-10-19T18:30:00+03:00')
             self.assertEqual(datetime.fromisoformat(before_morning['started_at']), datetime.fromisoformat(run['started_at']))

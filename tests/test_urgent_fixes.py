@@ -23,6 +23,15 @@ class UrgentFixTests(unittest.TestCase):
             code = cli.main([*args, '--state', str(root)])
         return code, json.loads(output.getvalue())
 
+    def test_init_reports_the_created_schema(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            code, result = self.invoke(root, 'init-state')
+            with writer(root) as store:
+                schema = store.db.execute('PRAGMA user_version').fetchone()[0]
+            self.assertEqual(code, 0)
+            self.assertEqual(result, {'status': 'initialized', 'schema': schema})
+
     def test_missing_spec_names_exception(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -94,4 +103,4 @@ class UrgentFixTests(unittest.TestCase):
         self.assertNotIn('12:30–18:00', prompt)
         self.assertNotIn('90-minute', prompt)
         self.assertNotIn('weak evidence about timing', prompt)  # the charter holds the rule, once
-        self.assertIn('the charter says how much weight they carry', prompt)
+        self.assertIn('planning.md before scheduling', prompt)  # pull judgement; do not duplicate it

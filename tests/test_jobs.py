@@ -230,27 +230,27 @@ class JobsTests(unittest.TestCase):
             current.symlink_to(release.parents[1])
             with patch.object(jobs, 'RELEASE_ROOT', lib, create=True), patch.dict('os.environ', PATH=str(installed.parent) + ':' + os.environ['PATH']):
                 for command in [str(release), str(current / 'jobs/check'), 'check']:
-                    self.assertEqual(jobs.validate_spec(store.db, spec(argv=[command]), 'test')['argv'], [command])
+                    self.assertEqual(jobs.validate_spec(spec(argv=[command]), 'test')['argv'], [command])
                 foreign = lib / 'gsd/releases/def/bin/gsd'
                 foreign.parent.mkdir(parents=True)
                 foreign.write_text('#!/bin/sh\nexit 0\n')
                 foreign.chmod(0o755)
-                self.assertEqual(jobs.validate_spec(store.db, spec(argv=[str(foreign)]), 'test')['argv'], [str(foreign)])
+                self.assertEqual(jobs.validate_spec(spec(argv=[str(foreign)]), 'test')['argv'], [str(foreign)])
                 escape = release.parent / 'escape'
                 escape.symlink_to('/bin/true')
                 for command in ['/bin/true', '/usr/bin/python3', str(base / 'scratch.py'), str(escape), str(lib / 'steward/releases-evil/check'), 'not-installed']:
                     with self.subTest(command=command), self.assertRaisesRegex(StateError, 'Every job runs from a release'):
-                        jobs.validate_spec(store.db, spec(argv=[command]), 'test')
+                        jobs.validate_spec(spec(argv=[command]), 'test')
 
-    def test_cap_and_justification_and_validation_are_atomic(self):
+    def test_spec_validation_is_atomic(self):
         with writer(self.root) as store:
             for bad in (spec(justification=''), spec(model='unknown'), spec(heavy=1), spec(needs={'every': {'min': '2d', 'max': '4h'}}), spec(env_file='relative')):
                 with self.assertRaises(StateError):
                     jobs.job_verb(store.db, 'add', 'bad', bad, now=NOW)
-            for number in range(8):
-                jobs.job_verb(store.db, 'add', f'j{number}', spec(), now=NOW)
-            jobs.job_verb(store.db, 'add', 'ninth', spec(), now=NOW)
-            self.assertEqual(store.db.execute('SELECT count(*) FROM changes WHERE actor!=\'migration\'').fetchone()[0], 9)
+                self.assertEqual(store.db.execute('SELECT count(*) FROM jobs').fetchone()[0], 0)
+                self.assertEqual(store.db.execute('SELECT count(*) FROM changes WHERE actor!=\'migration\'').fetchone()[0], 0)
+            jobs.job_verb(store.db, 'add', 'j0', spec(), now=NOW)
+            self.assertEqual(store.db.execute('SELECT count(*) FROM changes WHERE actor!=\'migration\'').fetchone()[0], 1)
             jobs.job_verb(store.db, 'pause', 'j0', now=NOW)
             jobs.job_verb(store.db, 'resume', 'j0', now=NOW)
 
@@ -264,20 +264,18 @@ class JobsTests(unittest.TestCase):
             self.assertEqual(json.loads(jobs.get(db, 'jobs', 'test')['spec_json'])['justification'], 'keeps a test input fresh')
             self.assertEqual([tuple(r) for r in db.execute('SELECT * FROM jobs WHERE version<=2 ORDER BY version')], before)
 
-    def test_plan_frozen_and_heavy_overlap(self):
+    def test_plan_moves_keep_heavy_exclusion(self):
         self.add(heavy=True)
         self.add('other', heavy=True)
         with writer(self.root) as store:
             db = store.db
             first = jobs.run_verb(db, 'plan', 'test', 'reserve', NOW.isoformat(), now=NOW)
-            with self.assertRaises(StateError):
-                jobs.run_verb(db, 'plan', 'test', 'move', (NOW + timedelta(hours=4)).isoformat(), now=NOW)
             with self.assertRaisesRegex(StateError, 'heavy overlap'):
                 jobs.run_verb(db, 'plan', 'other', 'overlap', (NOW + timedelta(minutes=20)).isoformat(), now=NOW)
             jobs.run_verb(db, 'cancel', first['run_id'], 'explicit', now=NOW)
             late = jobs.run_verb(db, 'plan', 'test', 'late', (NOW + timedelta(hours=4)).isoformat(), now=NOW)
-            with self.assertRaises(StateError):
-                jobs.run_verb(db, 'plan', 'test', 'into frozen', (NOW + timedelta(minutes=20)).isoformat(), now=NOW)
+            near = jobs.run_verb(db, 'plan', 'test', 'near term', (NOW + timedelta(minutes=20)).isoformat(), now=NOW)
+            self.assertEqual(late['run_id'], near['run_id'])
             moved = jobs.run_verb(db, 'plan', 'test', 'move', (NOW + timedelta(hours=5)).isoformat(), now=NOW)
             self.assertEqual(late['run_id'], moved['run_id'])
 
@@ -456,14 +454,14 @@ class JobsTests(unittest.TestCase):
 
     def test_notify_intent_precedes_effect_and_told_dedup(self):
         with writer(self.root) as store:
-            def send(topic, text):
+            def send(topic, text, **options):
                 other = sqlite3.connect(self.root / 'state.sqlite')
                 self.assertEqual(other.execute('SELECT state FROM outbox').fetchone()[0], 'pending')
                 self.assertEqual(other.execute('SELECT count(*) FROM changes WHERE actor!=\'migration\'').fetchone()[0], 1)
                 other.close()
                 return 42
             first = notify(store.db, 'Finds', 'result', 'useful source', 'https://example.org', sender=send, now=NOW, deliver='immediate')
-            second = notify(store.db, 'Finds', 'result', 'again', 'https://example.org', sender=lambda *args: self.fail('duplicate send'), now=NOW)
+            second = notify(store.db, 'Finds', 'result', 'again', 'https://example.org', sender=lambda *args, **options: self.fail('duplicate send'), now=NOW)
             self.assertEqual(first['message_id'], 42)
             self.assertEqual(second['status'], 'already_told')
             self.assertEqual(store.db.execute('SELECT message_id FROM told').fetchone()[0], 42)
@@ -471,7 +469,7 @@ class JobsTests(unittest.TestCase):
                 jobs.undo(store.db, first['change_id'], now=NOW)
 
     def test_notify_failure_keeps_pending_and_no_secret_in_report(self):
-        def fail(*args):
+        def fail(*args, **options):
             raise OSError('SECRET_TOKEN')
         with writer(self.root) as store:
             result = notify(store.db, 'Alerts', 'alert', 'delivery test', sender=fail, now=NOW)
@@ -519,14 +517,25 @@ class JobsTests(unittest.TestCase):
         self.assertEqual(runtime.wake(self.root, settings={'wake_model': True}, **kwargs)['model_calls'], 0)
         self.assertEqual(len(calls), 1)
         args = calls[0]
+        self.assertEqual(args[2:6], ['-a', 'claude', '-m', 'claude-opus-5-5'])
+        self.assertEqual(args[args.index('--effort') + 1], 'medium')
+        self.assertEqual(args[args.index('--permission-mode') + 1], 'bypassPermissions')
+        self.assertIn('--exclude-dynamic-system-prompt-sections', args)
+        self.assertEqual(args.count('--'), 1)
+        self.assertLess(args.index('--'), args.index('--effort'))
         stable = args[args.index('--append-system-prompt') + 1]
         self.assertIn('fixture prompt', stable)
-        self.assertIn("# Steward's soul", stable)
+        self.assertIn('SYNTHETIC_SOUL_MARKER', stable)
+        self.assertIn('SYNTHETIC_CHARTER_MARKER', stable)
         page_path = Path(args[args.index('-C') + 2])
         page = page_path.read_text()
         self.assertNotIn('fixture prompt', page)
-        self.assertNotIn("# Steward's soul", page)
-        self.assertIn('## What I carry', page)
+        self.assertNotIn('SYNTHETIC_SOUL_MARKER', page)
+        self.assertNotIn('SYNTHETIC_CHARTER_MARKER', page)
+        self.assertEqual(page_path.name, 'index.md')
+        self.assertIn('- What I carry:', page)
+        self.assertNotIn('## What I carry', page)
+        self.assertIn('## What I carry', page_path.with_name('briefing.md').read_text())
         self.assertIn('## Now [', page)
 
     def test_only_failed_runs_are_news(self):
@@ -680,6 +689,18 @@ class JobsTests(unittest.TestCase):
         with writer(self.root) as store:
             self.assertEqual(jobs.get(store.db, 'runs', rid)['state'], 'failed')
 
+    def test_default_placement_visits_unplaceable_job_once(self):
+        self.add('blocked')
+        self.add('good')
+        placement = runtime.placement
+        def choose(job, runs, now):
+            return (None, 'not feasible') if job['name'] == 'blocked' else placement(job, runs, now)
+        with patch('steward.runtime.placement', side_effect=choose) as calls:
+            self.tick()
+        self.assertEqual([call.args[0]['name'] for call in calls.call_args_list], ['blocked', 'good'])
+        with writer(self.root) as store:
+            self.assertEqual([r['job'] for r in jobs.current(store.db, 'runs')], ['good'])
+
     def test_heavy_default_placement_has_no_overlap_and_started_lane_defers(self):
         self.add('first', heavy=True, max_minutes=30)
         self.add('second', heavy=True, max_minutes=30)
@@ -687,7 +708,7 @@ class JobsTests(unittest.TestCase):
         with writer(self.root) as store:
             runs = jobs.current(store.db, 'runs')
             second = next(r for r in runs if r['job'] == 'second')
-            # New reservations may sit inside the frozen horizon; heavy ones still queue.
+            # New reservations may start now; heavy ones still queue.
             self.assertEqual(jobs.instant(second['planned_for']), NOW + timedelta(minutes=40))
         self.tick(at=NOW + timedelta(minutes=40), unit_reader=lambda unit: True)
         self.assertEqual(len(self.launched), 1)

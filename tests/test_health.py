@@ -15,6 +15,11 @@ def fixture():
     return json.loads((Path(__file__).parent / 'fixtures/garmin.today.v1.json').read_text())
 
 
+def response(argv, value):
+    # Dated Garmin reads carry the selected day's metrics and current sync metadata.
+    return json.dumps(dict(value, date=argv[-1]) if '--date' in argv else value)
+
+
 class HealthTests(unittest.TestCase):
     def setUp(self):
         use_settings(self)
@@ -26,11 +31,11 @@ class HealthTests(unittest.TestCase):
 
     def collect(self, value=None, output=None, error=None, now=NOW):
         def runner(argv):
-            if argv != ['garmin', 'today', '--json']:
+            if argv[:3] != ['garmin', 'today', '--json']:
                 raise FileNotFoundError
             if error:
                 raise error
-            return output if output is not None else json.dumps(value if value is not None else fixture())
+            return output if output is not None else response(argv, value if value is not None else fixture())
         return senses.collect(self.root, {}, now, runner, Path(self.tmp.name) / 'rollouts')['health']
 
     def save(self, observation, now=NOW):
@@ -71,7 +76,7 @@ class HealthTests(unittest.TestCase):
             with self.subTest(upload=upload, sleep_date=sleep_date, duration=duration):
                 value.update(watch_uploaded_at=upload)
                 value['sleep'].update(date=sleep_date, duration_s=duration, end=end)
-                data = senses.health({}, NOW, lambda argv: json.dumps(value))
+                data = senses.health(NOW, lambda argv: response(argv, value))
                 self.assertFalse(data['morning_synced'])
                 self.assertNotEqual(data['value_times']['body_battery']['period'], 'today')
                 self.save(dict(status='ok', data=data))
@@ -79,7 +84,7 @@ class HealthTests(unittest.TestCase):
                     cached = senses.snapshot(store.db, NOW + timedelta(days=1))['health']['data']
                 self.assertFalse(cached['morning_synced'])
         # A fresh cached sense must lose its morning claim at the next Athens midnight.
-        self.save(dict(status='ok', data=senses.health({}, NOW, lambda argv: json.dumps(fixture()))))
+        self.save(dict(status='ok', data=senses.health(NOW, lambda argv: response(argv, fixture()))))
         with writer(self.root) as store:
             cached = senses.snapshot(store.db, NOW + timedelta(hours=10))['health']['data']
         self.assertFalse(cached['morning_synced'])
@@ -152,6 +157,68 @@ class HealthTests(unittest.TestCase):
         value['week'] = [session('running', day=16)]
         self.assertEqual(self.collect(value)['data']['week'], value['week'])
 
+    def test_sunday_evidence_survives_monday_through_saturday_without_duplicates(self):
+        from test_fulfilment import session
+        from steward.fulfilment import fulfilment
+        for day in range(19, 25):
+            now = datetime.fromisoformat(f'2026-10-{day}T12:00:00+03:00')
+            calls = []
+            value = dict(fixture(), date=now.date().isoformat(),
+                         watch_uploaded_at=now.isoformat(),
+                         watch_fresh_until=(now + timedelta(hours=12)).isoformat())
+            def runner(argv):
+                calls.append(argv)
+                # Sunday occurs in both fixtures to exercise disjoint bucketing.
+                week = [session(day=17), session(day=18)] if '--date' in argv else [session(day=18), session(day=19)]
+                return response(argv, dict(value, week=week))
+            data = senses.health(now, runner)
+            self.assertEqual(calls, [['garmin', 'today', '--json'],
+                                     ['garmin', 'today', '--json', '--date', '2026-10-18']])
+            self.assertEqual(data['week'], [session(day=18), session(day=19)])
+            dose = fulfilment(dict(kind='gym', count=3, minutes=50), data['week'], now)
+            self.assertEqual(dose['done'], data['week'])
+            self.assertEqual(dose['remaining'], 1)
+
+    def test_sunday_read_alone_and_dst_calendar_window(self):
+        from test_fulfilment import session
+        now = datetime.fromisoformat('2026-10-25T04:00:00+02:00')
+        calls = []
+        def runner(argv):
+            calls.append(argv)
+            return response(argv, dict(fixture(), week=[session(day=24), session(day=25, hour=1)]))
+        self.assertEqual(senses.health(now, runner)['week'], [session(day=25, hour=1)])
+        self.assertEqual(calls, [['garmin', 'today', '--json']])
+        windows = []
+        def calendar(argv):
+            windows.append(argv)
+            return '[]'
+        data = senses.calendars(dict(schedule_calendar_id='b', main_calendar_ids=['a']), now, calendar)
+        self.assertEqual(data['from'], '2026-10-25T00:00:00+03:00')
+        self.assertEqual(data['to'], '2026-11-01T00:00:00+02:00')
+
+    def test_dated_sunday_read_is_validated_and_keeps_its_freshness(self):
+        from test_fulfilment import session
+        for bad in ('schema', 'session', 'timestamp', 'date', 'missing'):
+            value = dict(fixture(), date='2026-10-11')
+            if bad == 'schema':
+                value['schema'] = 'wrong'
+            elif bad == 'session':
+                value['week'] = [dict(session(day=11), start='no offset')]
+            elif bad == 'timestamp':
+                value['watch_fresh_until'] = '2026-10-16T12:00:00'
+            elif bad == 'date':
+                value['date'] = '2026-10-12'
+            else:
+                del value['week']
+            with self.subTest(bad=bad), self.assertRaises(contracts.ContractError):
+                senses.health(NOW, lambda argv: json.dumps(value if '--date' in argv else fixture()))
+        for fields, verdict in [({'auth': 'signed_out'}, 'stale'),
+                                ({'watch_fresh_until': '2026-10-16T11:59:59Z'}, 'stale'),
+                                ({'watch_uploaded_at': None}, 'unknown')]:
+            value = dict(fixture(), date='2026-10-11', **fields)
+            data = senses.health(NOW, lambda argv: json.dumps(value if '--date' in argv else fixture()))
+            self.assertEqual(senses.freshness('health', dict(status='ok', at=NOW.isoformat(), data=data), NOW)['verdict'], verdict)
+
     def test_missing_binary_is_unknown(self):
         result = self.collect(error=FileNotFoundError('private'))
         self.assertEqual(result['status'], 'unknown')
@@ -177,7 +244,7 @@ class HealthTests(unittest.TestCase):
         self.save(self.collect())
         value = fixture()
         value['body_battery']['now'] = 10
-        changed = dict(status='ok', data=senses.health({}, NOW, lambda argv: json.dumps(value)))
+        changed = dict(status='ok', data=senses.health(NOW, lambda argv: response(argv, value)))
         self.save(changed)
         self.save(dict(status='unknown', reason='unavailable'))
         with writer(self.root) as store:
@@ -193,7 +260,7 @@ class HealthTests(unittest.TestCase):
         def observe(auth, now):
             value = fixture()
             value['auth'] = auth
-            observation = dict(status='ok', data=senses.health({}, now, lambda argv: json.dumps(value)))
+            observation = dict(status='ok', data=senses.health(now, lambda argv: response(argv, value)))
             self.save(observation, now)
             with writer(self.root) as store:
                 messages.alerts(store.db, now, sender, {})

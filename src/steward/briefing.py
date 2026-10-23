@@ -1,6 +1,84 @@
 """The wake's decision page. Raw state is available through the CLI, not embedded."""
 from datetime import datetime, timedelta, time
+import hashlib
 import json
+from pathlib import Path
+import re
+
+from .state import StateError
+from . import memory
+
+
+def sections(text, spans=None):
+    """Slice the archived render, including its original whitespace; never re-render."""
+    if spans is not None:
+        return {name: text[item['start']:item['end']] for name, item in spans.items()}
+    # Older wakes have no recorded boundaries.
+    headings = list(re.finditer(r'^## (.+?)(?: \[(?:fresh|stale|unknown)\])?$', text, re.M))
+    return {heading[1]: text[heading.start():headings[i + 1].start() if i + 1 < len(headings) else len(text)]
+            for i, heading in enumerate(headings)}
+
+
+# A sense's observation time changes every tick; the verdict in the heading carries freshness.
+AS_OF = re.compile(r'^[a-z_]+: (?:fresh|stale|unknown) — .*; as of .*\n?', re.M)
+
+
+def section_info(text, receipt):
+    spans = receipt['section_spans']
+    return {name: dict(**spans[name], digest=hashlib.sha256(AS_OF.sub('', body).encode()).hexdigest(),
+                       lines=len(body.splitlines()),
+                       unknown=receipt.get('section_unknowns', {}).get(name) or
+                       next((line.strip() for line in body.splitlines()
+                             if re.search(r'(?:^|: )unknown(?:$|:)', line)), None))
+            for name, body in sections(text, spans).items()}
+
+
+# These are the inputs the existing rituals explicitly ask the model to read.
+RITUAL_SECTIONS = {
+    'orientation': {'Schedule', 'Limits', 'Calendar', 'Movement', 'Blocks', 'Your items',
+                    'Waiting on others', 'Deadlines', 'Compute', 'Finds waiting', 'Inbox'},
+    'day_close': {'Schedule', 'Limits', 'Calendar', 'Blocks', 'Deadlines', 'Compute',
+                  'Finds waiting', 'Inbox'},
+}
+
+
+def wake_index(text, info, previous, trigger, rituals):
+    parts = sections(text, info)
+    output = ['# Steward wake index', 'Trigger: ' + trigger, '', parts['Now'].rstrip(), '',
+              '## Sections (change since last model wake)']
+    for name, item in info.items():
+        if name == 'Now':
+            continue
+        old = previous.get(name)
+        change = ('unknown (' + ' '.join(item['unknown'].split()) + ')' if item['unknown'] else
+                  'no model baseline' if old is None else
+                  'unchanged' if item['digest'] == old['digest'] else 'changed')
+        required = [ritual for ritual in rituals if name in RITUAL_SECTIONS.get(ritual, ()) or
+                    (ritual == 'day_close' and name.startswith('Day close — '))]
+        output.append(f"- {name}: {item['lines']} lines · {change}" +
+                      (' · required for ' + ', '.join(required) if required else ''))
+    return '\n'.join(output) + '\n'
+
+
+def pull(data, wake_id=None, names=(), list_only=False):
+    root = Path(data) / 'wakes'
+    if wake_id is None:
+        ids = [int(p.parent.name) for p in root.glob('*/briefing.md') if p.parent.name.isdecimal()]
+        if not ids:
+            raise StateError('no archived briefing')
+        wake_id = max(ids)
+    path = root / str(wake_id) / 'briefing.md'
+    if not path.is_file():
+        raise StateError(f'no briefing for wake {wake_id}')
+    text = path.read_text()
+    manifest = path.with_name('briefing-sections.json')
+    parts = sections(text, json.loads(manifest.read_text()) if manifest.is_file() else None)
+    if list_only:
+        return '\n'.join(parts) + '\n'
+    missing = [name for name in names if name not in parts]
+    if missing:
+        raise StateError('unknown briefing section: ' + ', '.join(missing))
+    return ''.join(parts[name] for name in names) if names else text
 
 from .senses import freshness
 from .settings import local_zone
@@ -43,8 +121,7 @@ def lines(value, depth=0):
 
 def day_close(db, now):
     """Own-store evidence for the evening; never infer delivery from a successful run."""
-    from . import memory
-    journal = memory.journal(db, day=now.astimezone(local_zone()).date().isoformat(), full=True)
+    journal = memory.journal(db, day=memory.local_day(now).isoformat(), full=True)
     def hm(value):
         return owner_time(datetime.fromisoformat(value), '%H:%M') if value else 'unknown'
 
@@ -64,7 +141,7 @@ def blocks(b, gsd, live_pages, now, end):
     pages = {p['slug']: p for p in live_pages}
     done = gsd.get('done')  # today's closures, each at gsd's own closure time
     closed = {row['id']: row['at'] for row in done or []}
-    today = now.astimezone(local_zone()).date()
+    today = memory.local_day(now)
     rows = []
     for r in sorted(b.get('blocks', []), key=lambda r: json.loads(r['payload'])['start']):
         p = json.loads(r['payload'])
@@ -82,7 +159,7 @@ def blocks(b, gsd, live_pages, now, end):
                 closed_today=('unknown: gsd done not supplied' if done is None else
                               [f"{datetime.fromisoformat(closed[i]).astimezone(local_zone()):%H:%M} {i}" for i in items if i in closed]),
                 used=('unknown: gsd done not supplied' if done is None else
-                      'yes' if start.astimezone(local_zone()).date() == today and any(i in closed for i in items) else
+                      'yes' if memory.local_day(start) == today and any(i in closed for i in items) else
                       'open' if datetime.fromisoformat(p['end']) > now else
                       'not yet known: gsd learns closures at its runs'))
         rows.append(row)
@@ -93,6 +170,8 @@ def render(state, now, receipt):
     senses = state.get('senses', {})
     verdicts = {name: freshness(name, sense, now) for name, sense in senses.items()}
     unknown = []
+    section_unknowns = {}
+    starts = {}
     output = ['# Steward wake · ' + local_zone().key]
 
     def section(title, value, names=()):
@@ -101,6 +180,8 @@ def render(state, now, receipt):
                    'stale' if any(f['verdict'] == 'stale' for f in facts) else 'fresh')
         if verdict == 'unknown':
             unknown.append(title)
+            section_unknowns[title] = '; '.join(f['reason'] for f in facts if f['verdict'] == 'unknown')
+        starts[title] = sum(len(line) + 1 for line in output) + 1
         output.append('\n## ' + title + ' [' + verdict + ']')
         for name, fact in zip(names, facts):
             output.append(f"{name}: {fact['verdict']} — {fact['reason']}; as of {local(fact['as_of'])}")
@@ -124,7 +205,7 @@ def render(state, now, receipt):
     section('Limits', dict(today_characters=TODAY_CHARACTERS, longer_detail='Put the detail on a page.'))
     section('Inbox', dict(unhandled=state.get('inbox', []), poll=state.get('inbound_poll'),
                           live_pages=state.get('live_pages', [])))
-    start = datetime.combine(now.astimezone(local_zone()).date(), time.min, local_zone())
+    start = datetime.combine(memory.local_day(now), time.min, local_zone())
     end = start + timedelta(days=3)
 
     def instant(value):
@@ -146,7 +227,8 @@ def render(state, now, receipt):
     section('Movement', dict(ranked_open_doses=b.get('movement'), fulfilment=b.get('fulfilment')), ('health', 'calendars'))
     block_rows = blocks(b, data('gsd'), state.get('live_pages', []), now, end)
     section('Blocks', block_rows, ('calendars', 'gsd'))
-    section('Your items', data('gsd').get('waiting_on_you', 'unknown: refresh gsd sense'), ('gsd',))
+    section('Your items', dict(page=state.get('your_items_page', 'unknown: not rendered yet'),
+                               items=data('gsd').get('waiting_on_you', 'unknown: refresh gsd sense')), ('gsd',))
     section('Waiting on others', data('gsd').get('waiting_on_others', 'unknown: refresh gsd sense'), ('gsd',))
     section('Deadlines', dict(items=data('gsd').get('deadlines'), older=data('gsd').get('past_due_older')), ('gsd',))
     runs = state.get('runs', state.get('last_runs', []))
@@ -168,7 +250,7 @@ def render(state, now, receipt):
                                 'a completion event is not proof the item is still closed.',
             blocks=[f"{r['title']} {datetime.fromisoformat(r['start']).astimezone(local_zone()):%H:%M}: {r['used']}"
                     for r in block_rows if 'items' in r
-                    and datetime.fromisoformat(r['start']).astimezone(local_zone()).date() == now.astimezone(local_zone()).date()]
+                    and memory.local_day(datetime.fromisoformat(r['start'])) == memory.local_day(now)]
                    or 'no bundles today',
             journal=evidence or 'unknown: day journal not supplied',
             interpretation='Run success is not proof of delivery; correlate records and sent messages. '
@@ -207,5 +289,9 @@ def render(state, now, receipt):
                                    verify=verify, sources=sources, new_items=qmd.get('new_items'))), ('machine', 'qmd'))
     output.append('\nRaw state remains behind `steward state`.')
     text = '\n'.join(output) + '\n'
-    receipt.update(bytes=len(text.encode()), unknown_sections=unknown, verdicts=verdicts, dropped_keys=[])
+    boundaries = list(starts.values()) + [len(text)]
+    receipt.update(bytes=len(text.encode()), unknown_sections=unknown, section_unknowns=section_unknowns,
+                   section_spans={name: dict(start=start, end=boundaries[i + 1])
+                                  for i, (name, start) in enumerate(starts.items())},
+                   verdicts=verdicts, dropped_keys=[])
     return text

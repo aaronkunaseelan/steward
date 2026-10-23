@@ -21,7 +21,7 @@ This is an integration of an existing personal stack, not a standalone hosted as
 
 `steward-wake.service` runs `steward wake`. Scheduled slots and events request wakes; a gate checks for owner instructions, due moments, failures or relevant changes. A passing, enabled wake starts **one model harness invocation**, not a resident agent loop. That invocation can contain model/tool turns; it is not a promise of one provider API request. The wake service has a 40-minute bound. The current wake harness is Opus at medium effort; async agent jobs select Sol, Haiku or Opus through their job spec.
 
-The wake reads `prompts/wake.md`, a rendered decision page, and the live mind. It is instructed to act through `steward` verbs. Writer locks cover individual operations, not the whole model session. `steward tick skip --from ISO --to ISO --reason TEXT` records an undoable window that suppresses wakes, not deterministic sensing, planning or dispatch.
+The wake reads `prompts/wake.md`, its trigger, the full Now section, an index of rendered sections, and the live mind. Index lines report line counts and changes since the last model wake (unknown reads never say unchanged), and name sections required by due rituals. Pull detail with `steward briefing "SECTION" ["SECTION" …] [--wake ID]`; `steward briefing --list` lists the latest wake's sections. The full `briefing.md` remains in each wake archive; section digests and exact text boundaries are recorded with that wake. It is instructed to act through `steward` verbs. Writer locks cover individual operations, not the whole model session. `steward tick skip --from ISO --to ISO --reason TEXT` records an undoable window that suppresses wakes, not deterministic sensing, planning or dispatch.
 
 ### A mind outside the release
 
@@ -30,8 +30,9 @@ The configured `mind_dir` is its own local git repository:
 - `soul.md` supplies purpose, values and how experience should become judgement.
 - `charter.md` supplies current preferences, permission boundaries and scheduling judgement.
 - `capabilities/<name>.md` supplies a job's declared inputs, required CLIs, record fields and policy prose.
+- `reference/<task>.md` holds task detail (planning, messages, compute, memory, browser) that a wake or job pulls only when the task needs it, so the fixed prefix stays small.
 
-Wakes read soul and charter afresh; agent jobs read their capability afresh. Tick commits pending mind edits and records release/mind revisions. `steward state` reports mind history, or unknown if it cannot establish it. `tests/fixtures/mind/` demonstrates the file mechanism with synthetic policy; it is not a production charter or an authoritative list of current limits.
+Wakes read soul and charter afresh; agent jobs read their capability afresh. Tick commits pending mind edits and records release/mind revisions. `steward state` reports mind history, or unknown if it cannot establish it. The public mirror's `mind/` folder carries the live `soul.md` and `charter.md`; the capability and reference files stay private. `tests/fixtures/mind/` demonstrates the file mechanism with synthetic policy; it is not a production charter or an authoritative list of current limits.
 
 `steward memory write|show|due|recall` provides day, week, month, lessons and synthesis layers. Filed journals preserve evidence; synthesis and an index keep each wake from rereading the entire past. `steward journal --wake N --json` identifies the revisions and changes visible to a wake.
 
@@ -71,13 +72,13 @@ Training separates calendar containers from dose targets. `fulfilment.py` is the
 
 Calendar C lives in Steward's versioned state, not a second Google calendar. `steward plan` lists feasible compute starts; `steward run plan JOB --at ISO --reason TEXT` selects a checked reservation. Tick supplies defaults for unreserved recurring jobs.
 
-A job row has a written `justification`, release-bound `argv`, and `needs`: `ready_by`, `max_staleness` or `every {min,max}`. It can declare `min_gap`, `heavy`, `model`, `deliver` and `max_minutes`. Cost is learned from manifests. There is no recurring-job count cap. State shows the job fields, validation failures and capability file version.
+A job row has a written `justification`, release-bound `argv`, and `needs`: `ready_by`, `max_staleness` or `every {min,max}`. It can declare `min_gap`, `heavy`, `model`, `deliver` and `max_minutes`. `max_minutes` is the first-run bound after add or an argv/capability blob change; ready-by targets are measuring, not promised, until a succeeded run. Then the limit is ceil(10 × the longest of the last five succeeded durations since that change), a runaway bound, at least 5 minutes. State shows `limit_minutes`, its source (`first-run bound` or `learned`), the job fields, validation failures and capability file version. There is no recurring-job count cap.
 
-Use `steward job add|edit|pause|resume|rm`, `steward run now JOB` and `steward run cancel RUN`. Calendar C enforces a frozen near-term horizon and a move cap; explicit owner actions have defined exceptions. Host-load/disk guards and the shared heavy lane still constrain dispatch. A failed ready-by run gets one retry, not an unbounded retry loop.
+Use `steward job add|edit|pause|resume|rm`, `steward run now JOB` and `steward run cancel RUN`. Calendar C reservations may be moved or cancelled with a reason, including near-term and repeated changes. Host-load/disk guards and the shared heavy lane still constrain dispatch. A failed ready-by run gets one retry, not an unbounded retry loop.
 
-`steward contract steward.job.v1` prints the runtime protocol: jobs run through `batch-run` and `run-exec`, receive `STEWARD_RUN_DIR` and backlink variables, and write `records.jsonl`. Steward owns `manifest.json`, stdout/stderr tails, process-group deadlines and exit status. `steward contract steward.record.v1` prints record fields and learned-cost meanings.
+`steward contract steward.job.v2` prints the runtime protocol (`steward.job.v1` remains available for old runtimes): jobs run through `batch-run` and `run-exec`, receive `STEWARD_RUN_DIR` and backlink variables, and write `records.jsonl`. Steward owns `manifest.json`, stdout/stderr tails, process-group deadlines and exit status. `steward contract steward.record.v1` prints record fields and learned-cost meanings.
 
-A capability is data plus prose, never an in-process plugin. Its frontmatter uses JSON-valued `name`, `reads`, `calls`, `record`, and optional `context`/`permits`; launch validation checks required tools and qmd sources. The job row owns cadence, model and delivery. Fixed domain logic belongs in its own tool release. `jobs/` contains agent-run, backup and small existing helpers; it is not an ingestion framework.
+A capability is data plus prose, never an in-process plugin. Its frontmatter uses JSON-valued `name`, `reads`, `calls`, `record`, and optional `context`/`permits`; launch validation checks required tools and qmd sources. The job row owns cadence, model and delivery. `calls:` is the model shell's tool vocabulary and PATH (plus basic read tools), not a security boundary; absolute paths remain reachable. `permits` delegates authority, while destructive actions stay guarded in the owning CLI. Packets name `steward state` for interests and `steward told check KEY…` instead of preloading lists; missing tool facts become `unestablished` records, not improvised scripts. Fixed domain logic belongs in its own tool release. `jobs/` contains agent-run, backup and small existing helpers; it is not an ingestion framework.
 
 ### Messages, pages and undo
 
@@ -89,7 +90,7 @@ All delivery is silent unless `notify --interrupt REASON` explicitly requests so
 
 `steward page put --title TITLE FILE` uploads Markdown, HTML or an attachment to the Worker edge in `edge/`, backed by R2. Generated slugs combine descriptive words with randomness; local page metadata expires after 28 days and records read receipts. Configure the R2 bucket lifecycle separately to expire stored objects. Pages are password-protected by default; `--public` is explicit. The upload API uses a separate bearer credential. Notifications require hyperlinks; the message should carry the point and the page the evidence. `bin/deploy-edge` tests and deploys the edge from an exact commit; it does not provision the bucket lifecycle.
 
-`steward draft` creates Gmail drafts only on explicit request. Provider commands use a draft-only allowlist and `--gmail-no-send`; no send verb exists. Undo deletes the draft. After an ambiguous provider failure, inspect Drafts before retrying.
+`steward draft` creates Gmail drafts when the model judges they serve the owner, including during preparation. Capability jobs need the `draft` permit; the CLI checks the stored run and job context before calling the provider. Provider commands use a draft-only allowlist and `--gmail-no-send`; no send verb exists. Undo deletes the draft. After an ambiguous provider failure, inspect Drafts before retrying.
 
 ### Intent, transcripts and outcomes
 
@@ -99,7 +100,7 @@ All delivery is silent unless `notify --interrupt REASON` explicitly requests so
 
 `steward transcript wake-N --json` and `steward transcript run-HEX --json` read Steward's own archives. `steward contract steward.transcript.v1` and `steward contract steward.run-summary.v1` print their schemas. Raw native sessions remain unchanged in private local files; exported views are bounded and credential-redacted. Missing archives are unknown, not empty success. Finalizers and tick sweeps prepare transcript and summary files for the edge shipper; qmd is not this archive.
 
-`steward journal --outcomes --week YYYY-Www --json` computes observations without storing another score ledger: owner moves/deletions, replies to Finds, gsd amendment rates, bundle use, preparation-page opens and closed items. Definitions travel with counts. An unchanged block is not affirmative acceptance, a page open is not proof of reading, and missing denominators or history stay unknown.
+`steward journal --outcomes --week YYYY-MM-DD --json` (the Sunday's date; weeks run Sunday–Saturday in Athens) computes observations without storing another score ledger: owner moves/deletions, replies to Finds, gsd amendment rates, bundle use, preparation-page opens and closed items. Definitions travel with counts. An unchanged block is not affirmative acceptance, a page open is not proof of reading, and missing denominators or history stay unknown.
 
 ## Design decisions
 
@@ -115,7 +116,7 @@ All delivery is silent unless `notify --interrupt REASON` explicitly requests so
 10. **Capability files plus job rows →** extension should reuse existing tools → no plugin platform or per-capability ingestion/timer service.
 11. **Outcomes before activity →** a successful process need not deliver anything useful → no automatic retirement after an arbitrary number of empty runs.
 12. **Honest unknowns and local evidence →** planning needs trustworthy observations → no green view built from failed reads or inferred acceptance.
-13. **Prepare the way without taking over the backlog →** bundling and preparation reduce friction → no autonomous rewrite of gsd's work or proactive mail drafts.
+13. **Prepare the way without taking over the backlog →** bundling and preparation reduce friction → no autonomous rewrite of gsd's work; Gmail drafts are a model decision, never a mail send.
 
 [Detailed decisions](docs/decisions.md) retain the identifiers referenced by code and distinguish runtime enforcement from deployment policy.
 
@@ -170,7 +171,7 @@ cd edge && npm ci && npm test
 
 Release outline: run tests, review the exact commit and configuration changes, back up state before schema changes, wait for active ticks/wakes to finish, archive the commit, atomically switch `current`, reload changed units and verify the observables above. Job entrypoints must resolve inside immutable tool releases; system interpreters or scratch scripts are not job entrypoints. Keep the live mind in its own git history.
 
-`jobs/backup` snapshots SQLite, memory and mind history, records object hashes and sizes, and optionally uploads through rclone; `--no-upload` keeps the snapshot local. `bin/migrate-briefings` is a resumable helper for older layouts; use it only with the wake service idle and the intended state/data paths. Parcel jobs need their dedicated venv with `jobs/requirements.txt`; their source-timezone, route and partner labels are job arguments, not runtime policy.
+`jobs/backup` snapshots SQLite, memory and mind history, records object hashes and sizes, and optionally uploads through rclone; `--no-upload` keeps the snapshot local. Parcel jobs need their dedicated venv with `jobs/requirements.txt`; their source-timezone, route and partner labels are job arguments, not runtime policy.
 
 ## Licence
 

@@ -10,9 +10,10 @@ import sqlite3
 import subprocess
 
 from .contracts import ContractError, read
+from . import memory
 from .settings import local_zone
 from .timing import planning_end, owner_time
-from .jobs import COMPUTE_GRID_MINUTES, current
+from .jobs import COMPUTE_GRID_MINUTES
 
 UTC = timezone.utc
 # gsd is read every tick (0.27 s CPU): a 30-min interval hid a finished gsd-steady from the next ready_by judgement (F-64).
@@ -47,10 +48,11 @@ def calendars(settings, now, runner, deadlines=(), tracked=None):
     ids = [settings['schedule_calendar_id'], *settings['main_calendar_ids']]
     if not all(isinstance(x, str) and x for x in ids):
         raise ValueError('invalid calendar configuration')
-    day = now.astimezone(local_zone()).date()
-    start = datetime.combine(day - timedelta(days=day.weekday()), datetime.min.time(), local_zone())
+    day = memory.local_day(now)
+    first, last = memory.period('week', memory.week_start(day).isoformat())
+    start = datetime.combine(first, datetime.min.time(), local_zone())
     end = max(planning_end(now, local_zone(), deadlines),
-              datetime.combine(day + timedelta(days=7-day.weekday()), datetime.min.time(), local_zone()))
+              datetime.combine(last, datetime.min.time(), local_zone()))
     events, missing = [], []
     for calendar in dict.fromkeys(ids):
         raw = json.loads(runner(['gog', '--enable-commands-exact=calendar.events', '--readonly', '-j', 'cal', 'events', calendar, '--from', start.isoformat(), '--to', end.isoformat(), '--all-pages', '--max', '250']))
@@ -97,8 +99,13 @@ def calendars(settings, now, runner, deadlines=(), tracked=None):
     return dict(events=events, missing_event_keys=missing, schedule_calendar_id=ids[0], digest=digest(news), **{'from': start.isoformat(), 'to': end.isoformat()})
 
 
-def gsd(settings, now, runner):
-    raw = read('gsd.worklist.v1', runner(['gsd', 'worklist', '--json']))
+def worklist(runner=run):
+    """The one validated gsd worklist reader for ticks, blocks and prep pages."""
+    return read('gsd.worklist.v1', runner(['gsd', 'worklist', '--json']))
+
+
+def gsd(now, runner):
+    raw = worklist(runner)
     counts = {key: {} for key in ('state', 'next_actor')}
     projects = {p['id']: p['name'] for p in raw['projects']}
     deadlines, older, horizon = [], [], []
@@ -137,17 +144,18 @@ def gsd(settings, now, runner):
         closures = []
         for event in raw['done']:
             at = timestamp(event['at'], 'done.at')
-            if at.astimezone(local_zone()).date() == now.astimezone(local_zone()).date() and at <= now:
+            if memory.local_day(at) == memory.local_day(now) and at <= now:
                 closures.append(event)
     return dict(counts=counts, deadlines=deadlines, horizon_deadlines=horizon,
                 done=[event for event in closures if event['state'] == 'done'] if closures is not None else None,
                 canceled_today=[event for event in closures if event['state'] == 'canceled'] if closures is not None else None,
                 waiting_on_you=raw['priorities']['mine'], waiting_on_others=raw['priorities']['waiting_on_others'],
+                notion_urls={item['id']: item['notion_url'] for item in raw['items']},
                 past_due_older=past_due_older, cut=cut, cut_age_seconds=cut_age,
                 digest=digest({k: v for k, v in raw.items() if k != 'at'}))
 
 
-def qmd(settings, now, runner, previous):
+def qmd(settings, runner, previous):
     status = read('qmd.status.v1', runner(['qmd', 'status', '--json']))
     # First qmd.feed.v1 deployment; earlier arrivals are unknowable (F23).
     epoch = datetime.fromisoformat('2026-10-17T12:14:40.844838+00:00')
@@ -155,7 +163,7 @@ def qmd(settings, now, runner, previous):
     for source in settings.get('qmd_watch_sources', ['instapaper', 'x']):
         checkpoint = previous.get('feed', {}).get(source, {})
         token = checkpoint.get('token')
-        since = checkpoint.get('since_arrival') or previous.get('cursors', {}).get(source)
+        since = checkpoint.get('since_arrival')
         start = max(datetime.fromisoformat(since), epoch) if since else epoch
         position = ['--after', token] if token is not None else ['--since-arrival', start.isoformat()]
         raw = read('qmd.feed.v1', runner(['qmd', 'feed', '--source', source,
@@ -192,7 +200,7 @@ def watch_current(data, now):
 
 def dated_health(data, now):
     """Date producer values without inventing measurement times or health scores."""
-    today = str(now.astimezone(local_zone()).date())
+    today = str(memory.local_day(now))
     sleep = data.get('sleep', {})
     upload = data.get('watch_uploaded_at')
     end = sleep.get('end')
@@ -204,39 +212,55 @@ def dated_health(data, now):
         value = data.get(key)
         at = (value.get('end') if key == 'sleep' else value.get('start') if key == 'last_activity'
               else value.get('at')) if isinstance(value, dict) else None
-        date = str(datetime.fromisoformat(at).astimezone(local_zone()).date()) if at else (
+        date = str(memory.local_day(datetime.fromisoformat(at))) if at else (
             sleep.get('date') if key in ('sleep', 'hrv') else data.get('date'))
         times[key] = dict(at=at, date=date,
                           period='today' if value is not None and synced and date == today else 'unknown')
     return dict(data, morning_synced=synced, value_times=times)
 
 
-def health(settings, now, runner):
-    raw = read('garmin.today.v1', runner(['garmin', 'today', '--json']))
+def health(now, runner):
     from .fulfilment import validate_week
-    validate_week(raw['week'])
 
-    def age(field):
-        if raw[field] is None:
-            return None
-        try:
-            timestamp = datetime.fromisoformat(raw[field])
-            if timestamp.utcoffset() is None:
-                raise ValueError
-            return max(0, (now - timestamp).total_seconds())
-        except ValueError:
-            raise ContractError('garmin.today.v1: ' + field + ': expected ISO 8601 with offset') from None
+    def reading(argv):
+        raw = read('garmin.today.v1', runner(argv))
+        validate_week(raw['week'])
+        for field in ('at', 'pulled_at', 'watch_uploaded_at', 'watch_fresh_until', 'fresh_through'):
+            if raw[field] is not None:
+                try:
+                    if datetime.fromisoformat(raw[field]).utcoffset() is None:
+                        raise ValueError
+                except ValueError:
+                    raise ContractError('garmin.today.v1: ' + field + ': expected ISO 8601 with offset') from None
+        return raw
 
-    upload_age, pull_age = age('watch_uploaded_at'), age('pulled_at')
-    age('watch_fresh_until')  # Validate offset timestamps, without a consumer-owned limit.
+    raw = reading(['garmin', 'today', '--json'])
+    today = memory.local_day(now)
+    sunday = memory.week_start(today)
     values = {key: raw[key] for key in ('date', 'body_battery', 'sleep', 'stress', 'hrv',
-                                      'resting_hr', 'steps', 'training_readiness', 'last_activity', 'auth', 'week',
+                                      'resting_hr', 'steps', 'training_readiness', 'last_activity', 'auth',
                                       'watch_uploaded_at', 'watch_fresh_until')}
-    return dated_health(dict(values, watch_upload_age_s=upload_age, pulled_age_s=pull_age,
+    def session_day(session):
+        return memory.local_day(datetime.fromisoformat(session['start']))
+    if today == sunday:
+        week = [s for s in raw['week'] if session_day(s) == sunday]
+    else:
+        prior = reading(['garmin', 'today', '--json', '--date', sunday.isoformat()])
+        if prior['date'] != sunday.isoformat():
+            raise ContractError('garmin.today.v1: Sunday date mismatch')
+        # Disjoint dates: never count Sunday twice, even if it appears in both reads.
+        week = [s for s in prior['week'] if session_day(s) == sunday]
+        week += [s for s in raw['week'] if sunday < session_day(s) <= today]
+        values['week_source'] = {key: prior[key] for key in ('auth', 'watch_uploaded_at', 'watch_fresh_until')}
+    values['week_start'] = sunday.isoformat()
+    values['week'] = sorted(week, key=lambda s: datetime.fromisoformat(s['start']))
+    def age(field):
+        return max(0, (now - datetime.fromisoformat(raw[field])).total_seconds()) if raw[field] else None
+    return dated_health(dict(values, watch_upload_age_s=age('watch_uploaded_at'), pulled_age_s=age('pulled_at'),
                              digest=digest(values)), now)
 
 
-def place(settings, now, runner):
+def place(runner):
     raw = read('phone.place.v1', runner(['phone', 'where', '--json']))
 
     def timestamp(value):
@@ -343,9 +367,10 @@ def freshness(name, sense, now):
         verdict, reason = 'unknown', sense.get('reason', 'not yet observed')
     elif name == 'health':
         as_of = data.get('watch_uploaded_at')
-        if not as_of or not data.get('watch_fresh_until'):
+        sources = [data] + ([data['week_source']] if 'week_source' in data else [])
+        if any(not s.get('watch_uploaded_at') or not s.get('watch_fresh_until') for s in sources):
             verdict, reason = 'unknown', 'watch upload or expiry unknown'
-        elif data.get('auth') != 'ok' or not watch_current(data, now):
+        elif any(s.get('auth') != 'ok' or not watch_current(s, now) for s in sources):
             verdict, reason = 'stale', 'watch expired or auth not ok'
         else:
             reason = 'watch within producer expiry; individual values remain dated'
@@ -371,6 +396,8 @@ def freshness(name, sense, now):
         target_label = owner_time(datetime.fromisoformat(promise['target']), '%a %d %b %H:%M') if promise else ''
         if not promise:
             verdict, reason = 'unknown', 'gsd-steady ready_by target unknown'
+        elif promise['state'] == 'measuring':
+            verdict, reason = 'unknown', 'gsd-steady measuring; no ready_by promise yet'
         elif promise['state'] == 'missed':
             verdict, reason = 'stale', 'gsd ready_by missed: ' + target_label
         elif not as_of or not committed or not promise['started_at']:
@@ -419,13 +446,13 @@ def collect(root, settings, now, runner=run, rollout_root=None):
             if name == 'calendars':
                 data = calendars(settings, now, runner, calendar_deadlines, tracked)
             elif name == 'gsd':
-                data = gsd(settings, now, runner)
+                data = gsd(now, runner)
             elif name == 'qmd':
-                data = qmd(settings, now, runner, old.get('data', {}))
+                data = qmd(settings, runner, old.get('data', {}))
             elif name == 'health':
-                data = health(settings, now, runner)
+                data = health(now, runner)
             elif name == 'place':
-                data = place(settings, now, runner)
+                data = place(runner)
             elif name == 'machine':
                 data = machine(runner)
             else:
@@ -458,9 +485,8 @@ def save(db, observations, now, change_id):
                 changed = False
         payload = {k: v for k, v in observation.items() if k != 'status'}
         # Checkpoints share the observation's atomic write; unknown never consumes arrivals.
-        # Retain legacy time cursors only until the first successful feed migration.
         if name == 'qmd' and observation['status'] == 'unknown' and old_payload.get('data'):
-            payload['data'] = {k: old_payload['data'][k] for k in ('feed', 'cursors')
+            payload['data'] = {k: old_payload['data'][k] for k in ('feed',)
                                if k in old_payload['data']}
         db.execute('INSERT INTO senses(name,at,status,payload,change_id,event) VALUES (?,?,?,?,?,?)',
                    (name, now.isoformat(), observation['status'], json.dumps(payload), change_id, int(bool(changed))))

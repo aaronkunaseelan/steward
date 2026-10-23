@@ -58,7 +58,7 @@ class CadenceRecoveryTests(unittest.TestCase):
             self.assertEqual(row['missed_at'], (self.now - timedelta(days=1)).isoformat())
 
 
-    def test_recovery_keeps_safety_and_frozen_constraints(self):
+    def test_recovery_keeps_min_gap_and_heavy_constraints(self):
         from fixture_mind import command
         with writer(self.root) as st:
             spec = dict(justification='fixture', argv=[command()], heavy=True, min_gap='3d',
@@ -78,4 +78,4 @@ class CadenceRecoveryTests(unittest.TestCase):
             self.assertEqual(planner.rule(job, [run, busy], self.now, self.now), 'heavy overlap')
             self.assertIsNone(planner.rule(job, [run, busy], self.now + timedelta(hours=1), self.now))
             reserved = dict(run, state='planned', planned_for=(self.now + timedelta(hours=1)).isoformat())
-            self.assertEqual(planner.rule(job, [run], self.now + timedelta(hours=3), self.now, reserved), 'frozen horizon')
+            self.assertIsNone(planner.rule(job, [run], self.now + timedelta(hours=3), self.now, reserved))

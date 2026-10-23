@@ -86,7 +86,7 @@ def create(db, settings, body, reply_to=None, reply_all=False, to=None, subject=
     return dict(change_id=cid, draft_id=identity, url=url, status='created')
 
 
-def undo(db, settings, identity, actor='owner', runner=run, now=None):
+def undo(db, identity, actor='owner', runner=run, now=None):
     now = now or jobs.now_utc()
     row = db.execute('SELECT * FROM drafts WHERE change_id=?', (identity,)).fetchone()
     jobs.require(row is not None and row['state'] == 'created', 'draft is not available for undo')

@@ -58,10 +58,23 @@ def get(db, table, identity):
     return view_row(db, table, row)
 
 
+def is_extra(run):
+    """Run-local metadata, not a job setting; retained across all run versions."""
+    return json.loads(run.get('spec_json') or '{}').get('_extra', False)
+
+
 def view_row(db, table, row):
     row = dict(row)
     if table == 'runs' and row['state'] == 'planned':
+        extra = is_extra(row)
         row['spec_json'] = get(db, 'jobs', row['job'])['spec_json']
+        if extra:
+            try:
+                spec = json.loads(row['spec_json'])
+            except ValueError:
+                spec = None
+            # Invalid job specs are quarantined by the tick, including extra runs.
+            row['spec_json'] = json.dumps(dict(spec if isinstance(spec, dict) else {}, _extra=True), sort_keys=True)
     return row
 
 
@@ -78,7 +91,7 @@ def append(db, table, row, change_id):
     return row
 
 
-def validate_spec(db, spec, name, qmd_status=None):
+def validate_spec(spec, name, qmd_status=None):
     require(isinstance(name, str) and re.fullmatch('[a-z0-9-]{1,40}', name), 'invalid job name')
     require(isinstance(spec, dict), 'invalid spec')
     allowed = {'justification', 'argv', 'needs', 'heavy', 'deliver', 'max_minutes', 'recurring', 'capability', 'cwd', 'env_file', 'min_gap', 'model'}
@@ -90,7 +103,7 @@ def validate_spec(db, spec, name, qmd_status=None):
     command = str(entry) if entry.is_absolute() and entry.is_file() and os.access(entry, os.X_OK) else shutil.which(argv[0])
     resolved = Path(command).resolve() if command else None
     parts = resolved.relative_to(RELEASE_ROOT).parts if resolved and resolved.is_relative_to(RELEASE_ROOT) else ()
-    require(len(parts) >= 4 and parts[1] == 'releases', 'Every job runs from a release (X-19.4): argv[0] must resolve inside an immutable release directory')
+    require(len(parts) >= 4 and parts[1] == 'releases', 'Every job runs from a release: argv[0] must resolve inside an immutable release directory')
     needs = spec.get('needs')
     require(isinstance(needs, dict) and len(needs) == 1 and set(needs) <= {'ready_by', 'max_staleness', 'every'}, 'one need required')
     if 'ready_by' in needs:
@@ -134,7 +147,7 @@ def job_verb(db, verb, name, spec=None, now=None, actor='owner'):
             row = get(db, 'jobs', name)
             require(row['state'] != 'removed', 'job removed')
         if verb in ('add', 'edit'):
-            row['spec_json'] = json.dumps(validate_spec(db, spec, name), sort_keys=True)
+            row['spec_json'] = json.dumps(validate_spec(spec, name), sort_keys=True)
         else:
             row['state'] = {'pause': 'paused', 'resume': 'active', 'rm': 'removed'}[verb]
         cid = change(db, 'job ' + verb, now, actor)
@@ -163,24 +176,26 @@ def job_verb(db, verb, name, spec=None, now=None, actor='owner'):
         return {'change_id': cid, 'job': name, 'status': row['state']}
 
 
-def check_overlap(db, spec, at, exclude=None):
+def check_overlap(db, name, spec, at, exclude=None):
     if not spec['heavy']:
         return
-    end = at + timedelta(minutes=spec['max_minutes'])
-    for r in current(db, 'runs'):
+    runs = current(db, 'runs')
+    end = at + timedelta(minutes=execution_profile(db, name, spec, runs)['limit_minutes'])
+    for r in runs:
         if r['run_id'] == exclude or r['state'] not in ('planned', 'started'):
             continue
         other = json.loads(r['spec_json'])
         start = instant(r['started_at'] or r['planned_for'])
         if other['heavy']:
-            require(not (at < start + timedelta(minutes=other['max_minutes']) and start < end), 'heavy runs overlap')
+            limit = other.get('_limit_minutes') if r['state'] == 'started' else execution_profile(db, r['job'], other, runs)['limit_minutes']
+            require(not (at < start + timedelta(minutes=limit or other['max_minutes']) and start < end), 'heavy runs overlap')
 
 
-def plan(db, name, at, reason, now, cid, explicit=False, move=True, churn_cap=6, retry_of=None):
+def plan(db, name, at, reason, now, cid, explicit=False, move=True, retry_of=None, extra=False):
     job = get(db, 'jobs', name)
     require(job['state'] == 'active', 'job is not active')
     spec = json.loads(job['spec_json'])
-    old = next((r for r in current(db, 'runs') if r['job'] == name and r['state'] == 'planned'), None) if move else None
+    old = next((r for r in current(db, 'runs') if r['job'] == name and r['state'] == 'planned' and not is_extra(r)), None) if move else None
     require(at >= now, 'cannot plan in the past')
     require(isinstance(reason, str) and reason.strip(), 'reason required')
     if retry_of:
@@ -191,15 +206,16 @@ def plan(db, name, at, reason, now, cid, explicit=False, move=True, churn_cap=6,
         # X-24 authorises a new reservation now; dispatch still enforces host/heavy guards.
     elif not explicit:
         from .planner import check
-        check(db, job, at, now, old, churn_cap)
+        check(db, job, at, now, old)
     else:
-        check_overlap(db, spec, at, old['run_id'] if old else None)
+        check_overlap(db, name, spec, at, old['run_id'] if old else None)
     row = dict(old) if old else dict(run_id=uuid.uuid4().hex, version=0, job=name, started_at=None, ended_at=None, unit=None, exit_code=None, manifest=None)
-    row.update(state='planned', planned_for=at.isoformat(), reason=reason, spec_json='{}', retry_of=retry_of)
+    row.update(state='planned', planned_for=at.isoformat(), reason=reason,
+               spec_json=json.dumps({'_extra': True} if extra else {}), retry_of=retry_of)
     return append(db, 'runs', row, cid)
 
 
-def run_verb(db, verb, identity, reason, at=None, now=None, actor='owner', churn_cap=6):
+def run_verb(db, verb, identity, reason, at=None, now=None, actor='owner'):
     now = now or now_utc()
     with db:
         cid = change(db, 'run ' + verb, now, actor)
@@ -207,13 +223,17 @@ def run_verb(db, verb, identity, reason, at=None, now=None, actor='owner', churn
             row = get(db, 'runs', identity)
             require(row['state'] == 'planned', 'only planned runs can be cancelled')
             require(isinstance(reason, str) and reason.strip(), 'reason required')
-            if actor != 'owner':
-                from .planner import check
-                check(db, get(db, 'jobs', row['job']), None, now, row, churn_cap, cancel=True)
             row.update(state='cancelled', reason=reason, ended_at=now.isoformat())
             row = append(db, 'runs', row, cid)
         else:
-            row = plan(db, identity, now if verb == 'now' else instant(at), reason, now, cid, explicit=verb == 'now' and actor == 'owner', churn_cap=churn_cap)
+            extra = verb == 'now' and any(r['job'] == identity and r['state'] == 'planned'
+                                         for r in current(db, 'runs'))
+            if extra:
+                require(actor != 'model', 'extra runs require a non-model actor')
+                require(isinstance(reason, str) and reason.strip(), 'reason required')
+                reason = 'extra run: ' + reason
+            row = plan(db, identity, now if verb == 'now' else instant(at), reason, now, cid,
+                       explicit=verb == 'now' and (actor == 'owner' or extra), move=not extra, extra=extra)
         return {'change_id': cid, 'run_id': row['run_id'], 'status': row['state']}
 
 
@@ -246,8 +266,60 @@ def undo(db, identity, now=None, actor='owner'):
         for table, row in affected:
             if table == 'runs' and row['state'] == 'planned':
                 spec = json.loads(get(db, 'jobs', row['job'])['spec_json'])
-                check_overlap(db, spec, instant(row['planned_for']), row['run_id'])
+                check_overlap(db, row['job'], spec, instant(row['planned_for']), row['run_id'])
         return {'change_id': cid, 'undo_of': identity}
+
+
+def capability_sha(spec):
+    """Git blob identity of the capability read by a run; missing stays unknown."""
+    from . import mind
+    import hashlib
+    name = spec.get('capability')
+    if not isinstance(name, str) or not re.fullmatch('[a-z0-9-]{1,40}', name):
+        return None
+    try:
+        content = (mind.directory() / 'capabilities' / (name + '.md')).read_bytes()
+    except OSError:
+        return None
+    return hashlib.sha1(b'blob ' + str(len(content)).encode() + b'\0' + content).hexdigest()
+
+
+# The limit only stops a true runaway, not a slow run (owner X-35).
+RUNAWAY_FACTOR = 10
+
+
+def execution_profile(db, name, spec=None, runs=None):
+    """One measured epoch and limit, shared by dispatch, state and promise readers."""
+    import math
+    spec = spec if spec is not None else json.loads(get(db, 'jobs', name)['spec_json'])
+    sha = capability_sha(spec)
+    since, previous, previous_state = None, None, None
+    for row in db.execute('SELECT j.spec_json, j.state, c.at FROM jobs j JOIN changes c ON c.id=j.change_id '
+                          'WHERE j.name=? ORDER BY j.version', (name,)):
+        old = json.loads(row['spec_json'])
+        identity = (old.get('argv'), old.get('capability'))
+        if previous is None or identity != previous or previous_state == 'removed':
+            since = instant(row['at'])
+        previous, previous_state = identity, row['state']
+    history = []
+    for run in current(db, 'runs') if runs is None else runs:
+        if run['job'] != name or not run['started_at'] or (since and instant(run['started_at']) < since):
+            continue
+        bound = json.loads(run.get('spec_json') or '{}')
+        matches = (bound.get('argv') == spec.get('argv') and bound.get('capability') == spec.get('capability')
+                   and (not spec.get('capability') or sha is not None and bound.get('_capability_sha') == sha))
+        history.append((run, matches))
+    # Returning to an earlier capability blob does not resurrect its old measurements.
+    changed_at = max((instant(r['started_at']) for r, matches in history if not matches), default=None)
+    succeeded = sorted((r for r, matches in history if matches and r['state'] == 'succeeded' and r['ended_at']
+                        and (changed_at is None or instant(r['started_at']) > changed_at)),
+                       key=lambda r: instant(r['ended_at']))
+    minutes = [(instant(r['ended_at']) - instant(r['started_at'])).total_seconds() / 60 for r in succeeded[-5:]]
+    return dict(capability_sha=sha,
+                measured_at=succeeded[0]['ended_at'] if succeeded else None,
+                measurement='measured' if succeeded else 'measuring',
+                limit_minutes=max(5, math.ceil(RUNAWAY_FACTOR * max(minutes))) if minutes else spec.get('max_minutes', SPEC_DEFAULTS['max_minutes']),
+                limit_source='learned' if minutes else 'first-run bound')
 
 
 def spec_errors(db):
@@ -272,20 +344,12 @@ def snapshot(db, now=None, interrupt_cap=3):
             planned = [r['planned_for'] for r in runs if r['job'] == row['name'] and r['state'] == 'planned']
             from .planner import cost, cadence_deadline
             deadline = cadence_deadline(row['name'], spec, runs) if row['name'] not in errors else None
-            from . import mind
-            import hashlib
-            capability_sha = None
-            if isinstance(spec.get('capability'), str) and re.fullmatch('[a-z0-9-]{1,40}', spec['capability']):
-                path = mind.directory() / 'capabilities' / (spec['capability'] + '.md')
-                try:
-                    content = path.read_bytes()
-                    capability_sha = hashlib.sha1(b'blob ' + str(len(content)).encode() + b'\0' + content).hexdigest()
-                except OSError:
-                    pass  # Missing capability is unknown, never a fabricated version.
+            profile = execution_profile(db, row['name'], spec, runs) if row['name'] not in errors else dict(
+                capability_sha=capability_sha(spec), measured_at=None, measurement='unknown', limit_minutes=None, limit_source=None)
             fields = dict.fromkeys(('argv', 'capability', 'min_gap', 'env_file'))
             fields.update(SPEC_DEFAULTS, cwd=str(Path.home()))
             fields.update(spec)
-            jobs.append(dict(fields, spec='unknown: ' + errors[row['name']] if row['name'] in errors else 'ok', capability_sha=capability_sha, missed_at=deadline.isoformat() if deadline and deadline < now else None, cost=cost(runs, row['name']), name=row['name'], next_planned=min(planned, default=None)))
+            jobs.append(dict(fields, spec='unknown: ' + errors[row['name']] if row['name'] in errors else 'ok', **profile, missed_at=deadline.isoformat() if deadline and deadline < now else None, cost=cost(runs, row['name']), name=row['name'], next_planned=min(planned, default=None)))
     from . import calendar_b
     fulfilment = calendar_b.fulfilments(db, now)
     live = calendar_b.live_demands(db, now)

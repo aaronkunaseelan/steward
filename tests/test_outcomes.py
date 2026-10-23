@@ -26,7 +26,22 @@ class OutcomeTests(unittest.TestCase):
             if 'contract' in argv:
                 return json.dumps({'$id':'gsd.runs.v1'})
             return json.dumps(payload or dict(schema='gsd.runs.v1', since='2026-10-19', runs=[]))
-        return {r['metric']: r for r in weekly(self.db, '2026-W43', now=NOW, runner=runner)['rows']}
+        return {r['metric']: r for r in weekly(self.db, '2026-10-18', now=NOW, runner=runner)['rows']}
+
+    def test_default_week_uses_athens_sunday_including_dst_overlap(self):
+        from steward.outcomes import weekly
+        for at, key, since in [
+            ('2026-10-24T20:59:59+00:00', '2026-10-18', '2026-10-18T00:00:00+03:00'),
+            ('2026-10-24T21:00:00+00:00', '2026-10-25', '2026-10-25T00:00:00+03:00'),
+            ('2026-10-25T00:30:00+00:00', '2026-10-25', '2026-10-25T00:00:00+03:00'),
+            ('2026-10-25T01:30:00+00:00', '2026-10-25', '2026-10-25T00:00:00+03:00'),
+        ]:
+            with self.subTest(at=at):
+                report = weekly(self.db, now=datetime.fromisoformat(at), runner=lambda argv: '{}')
+                self.assertEqual((report['week'], report['since']), (key, since))
+        report = weekly(self.db, '2026-10-18', now=datetime.fromisoformat('2026-10-25T06:00:00+02:00'),
+                        runner=lambda argv: '{}')
+        self.assertEqual(report['until'], '2026-10-25T00:00:00+03:00')
 
     def test_reply_is_find_action_but_questions_and_kept_are_unknown(self):
         cid = jobs.change(self.db, 'notify', NOW)
@@ -71,8 +86,8 @@ class OutcomeTests(unittest.TestCase):
         self.db.execute('PRAGMA user_version=13')
         output = io.StringIO()
         with patch('steward.outcomes.r1', return_value=dict(metric='r1_amendment_rate',status='unknown',reason='no contract')), redirect_stdout(output):
-            self.assertEqual(main(['journal','--state',str(self.store.root),'--outcomes','--week','2026-W43','--json']), 0)
-        self.assertEqual(json.loads(output.getvalue())['week'], '2026-W43')
+            self.assertEqual(main(['journal','--state',str(self.store.root),'--outcomes','--week','2026-10-18','--json']), 0)
+        self.assertEqual(json.loads(output.getvalue())['week'], '2026-10-18')
         self.assertEqual(self.db.execute('PRAGMA user_version').fetchone()[0], 13)
         from steward.outcomes import r1
         self.assertEqual(r1('2026-10-19', NOW-timedelta(days=1), NOW, NOW, lambda argv: '{}')['reason'], 'no contract')
@@ -96,12 +111,12 @@ class OutcomeTests(unittest.TestCase):
             if argv[:2] == ['gsd', 'closures']:
                 if not view:
                     raise ValueError('external command failed')
-                self.assertEqual(argv[2:], ['--since', '2026-10-19T00:00:00+03:00', '--json'])
+                self.assertEqual(argv[2:], ['--since', '2026-10-18T00:00:00+03:00', '--json'])
                 return json.dumps(dict(schema='gsd.closures.v1', at=NOW.isoformat(), since=argv[3],
                                        cut=dict(until=NOW.isoformat(), change_set_id='x', committed_at=NOW.isoformat()),
                                        closures=closures))
             return json.dumps(dict(schema='gsd.runs.v1', since='2026-10-19', runs=[]))
-        return {r['metric']: r for r in weekly(self.db, '2026-W43', now=NOW, runner=runner)['rows']}
+        return {r['metric']: r for r in weekly(self.db, '2026-10-18', now=NOW, runner=runner)['rows']}
 
     def test_bundles_used_ignored_pages_and_items_closed_by_gsd_closure_time(self):
         from steward import pages
@@ -143,6 +158,6 @@ class OutcomeTests(unittest.TestCase):
 
     def test_before_archive_start_is_unknown_not_zero(self):
         from steward.outcomes import weekly
-        report = weekly(self.db, '2026-W30', now=NOW, runner=lambda argv: '{}')
+        report = weekly(self.db, '2026-07-19', now=NOW, runner=lambda argv: '{}')
         for row in report['rows']:
             self.assertEqual(row['status'], 'unknown')

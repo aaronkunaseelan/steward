@@ -309,11 +309,11 @@ class MessagesTests(unittest.TestCase):
                 self.assertEqual(result['wake'], 'event' if expected else None)
 
     def test_week_gist_does_not_suppress_orientation_fallback(self):
-        # First week gist, Monday 26 Oct (Athens has switched to UTC+2).
+        # Week gist after the first Sunday–Saturday week (Athens has switched to UTC+2).
         from fixture_mind import TEST_ZONE
         morning = datetime(2026, 10, 26, 7, tzinfo=TEST_ZONE)
         with writer(self.root) as st:
-            notify(st.db, 'Today', 'result', 'Week gist', 'week:2026-W43',
+            notify(st.db, 'Today', 'result', 'Week gist', 'week:2026-10-18',
                    self.send, morning - timedelta(hours=2))
             self.assertEqual(runtime.gate(st.db, morning), 'orientation')
         runtime.wake(self.root, clock=lambda:morning, settings={'wake_model':False},
@@ -321,8 +321,8 @@ class MessagesTests(unittest.TestCase):
         self.assertEqual(len(self.sent), 2)
         self.assertIn('(fallback)', self.sent[-1][1])
         with writer(self.root) as st:
-            from steward.timing import moment_kept
-            self.assertTrue(moment_kept(st.db, 'orientation', morning))
+            from steward.timing import moment_obligation
+            self.assertEqual(moment_obligation(st.db, jobs.get(st.db, 'moments', 'orientation'), morning)['state'], 'kept')
 
     def test_orientation_fallback_and_model_orientation(self):
         runtime.wake(self.root, clock=lambda:ORIENT,settings={'wake_model':False},prompt='test',sender=self.send)

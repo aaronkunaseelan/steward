@@ -54,7 +54,7 @@ class SensesTests(unittest.TestCase):
         self.assertEqual(result['gsd']['status'], 'unknown')
         self.assertIn('read failed', result['gsd']['reason'])
 
-    def test_sunday_calendar_read_reaches_wednesday_midnight(self):
+    def test_sunday_calendar_read_covers_whole_new_week(self):
         sunday = datetime(2026, 10, 18, 23, 30, tzinfo=TEST_ZONE)
         calls = []
         def runner(argv):
@@ -62,8 +62,8 @@ class SensesTests(unittest.TestCase):
             return '{"events": []}'
         result = senses.calendars({'schedule_calendar_id': 'b',
                                    'main_calendar_ids': ['main']}, sunday, runner)
-        self.assertEqual(result['from'], '2026-10-12T00:00:00+03:00')
-        self.assertEqual(result['to'], '2026-10-21T00:00:00+03:00')
+        self.assertEqual(result['from'], '2026-10-18T00:00:00+03:00')
+        self.assertEqual(result['to'], '2026-10-25T00:00:00+03:00')
         self.assertEqual(len(calls), 2)
         for argv in calls:
             self.assertEqual(argv[argv.index('--to') + 1], result['to'])
@@ -117,7 +117,7 @@ class SensesTests(unittest.TestCase):
             calls.append(argv)
             return json.dumps(payload)
         def read():
-            return senses.gsd({}, NOW, runner)
+            return senses.gsd(NOW, runner)
         first = read()
         self.assertEqual(calls, [['gsd', 'worklist', '--json']])
         self.assertEqual([d['id'] for d in first['deadlines']], ['overdue', 'boundary'])
@@ -166,7 +166,7 @@ class SensesTests(unittest.TestCase):
                                 ('lower-boundary', -timedelta(days=7)),
                                 ('beyond-upper', timedelta(days=7, seconds=1))]:
             payload['items'].append(dict(base, id=identity, due_at=(NOW + delta).isoformat()))
-        data = senses.gsd({}, NOW, lambda argv: json.dumps(payload))
+        data = senses.gsd(NOW, lambda argv: json.dumps(payload))
         expected_ids = ['11'] + [str(i) for i in range(11)] + ['12']
         self.assertEqual([d['id'] for d in data['deadlines']], expected_ids)
         self.assertEqual(data['past_due_older'], {'count': 2, 'oldest_due_at': (NOW - timedelta(days=8)).isoformat()})
@@ -301,7 +301,7 @@ class SensesTests(unittest.TestCase):
         page['items'][1]['tombstone'] = True
         page['items'][2].update(id='x:0', version='v2', reparse=True)
         calls = []
-        result = senses.qmd({'qmd_watch_sources': ['x']}, NOW,
+        result = senses.qmd({'qmd_watch_sources': ['x']},
                             self.feed_runner({'x': page}, calls), {})
         self.assertEqual(result['new_items']['x'], dict(count=2, at_least=False))
         self.assertEqual(calls[0], ['qmd', 'status', '--json'])
@@ -320,19 +320,19 @@ class SensesTests(unittest.TestCase):
         calls = []
         runner = self.feed_runner(pages, calls)
         settings = {'qmd_watch_sources': ['x']}
-        first = senses.qmd(settings, NOW, runner, {})
+        first = senses.qmd(settings, runner, {})
         self.assertEqual(first['new_items']['x'], dict(count=100, at_least=True))
         self.save({'qmd': dict(status='ok', data=first)})
         # Reload through SQLite, including JSON's tuple-to-list conversion.
         with writer(self.root) as store:
             prior = senses.snapshot(store.db, NOW)['qmd']['data']
         pages['x'] = self.feed_page(count=3, start=99)
-        second = senses.qmd(settings, NOW, runner, prior)
+        second = senses.qmd(settings, runner, prior)
         self.assertEqual(second['new_items']['x'], dict(count=2, at_least=False))
         self.assertEqual(calls[-1][calls[-1].index('--after') + 1], 't99')
         self.assertEqual(len(second['feed']['x']['seen']), 100)
         self.assertEqual(len([c for c in calls if c[1] == 'feed']), 2)
-        again = senses.qmd(settings, NOW, runner, second)
+        again = senses.qmd(settings, runner, second)
         self.assertEqual(again['new_items']['x']['count'], 0)
         self.save({'qmd': dict(status='ok', data=second)})
         with writer(self.root) as store:
@@ -341,7 +341,7 @@ class SensesTests(unittest.TestCase):
 
     def test_qmd_complete_is_not_inferred_from_page_size(self):
         calls = []
-        result = senses.qmd({'qmd_watch_sources': ['x']}, NOW,
+        result = senses.qmd({'qmd_watch_sources': ['x']},
             self.feed_runner({'x': self.feed_page(count=100)}, calls), {})
         self.assertEqual(result['new_items']['x'], dict(count=100, at_least=False))
 
@@ -365,10 +365,8 @@ class SensesTests(unittest.TestCase):
                               (epoch, epoch)]:
             with self.subTest(cut=cut):
                 calls = []
-                # Old numeric offsets/windows must not skip the arrival backlog.
-                old = dict(cursors={'x': cut} if cut else {}, offsets={'x': 100},
-                           windows={'x': '2026-10-19T00:00:00Z'})
-                result = senses.qmd({'qmd_watch_sources': ['x']}, NOW,
+                old = dict(feed={'x': dict(since_arrival=cut, token=None, seen=[])} if cut else {})
+                result = senses.qmd({'qmd_watch_sources': ['x']},
                     self.feed_runner({'x': self.feed_page()}, calls), old)
                 self.assertEqual(calls[-1][calls[-1].index('--since-arrival') + 1], expected)
                 self.assertEqual(result['new_items']['x']['count'], 1)
@@ -406,20 +404,6 @@ class SensesTests(unittest.TestCase):
                     saved = senses.snapshot(store.db, NOW)['qmd']
                     self.assertEqual(saved['data'], original)
                     self.assertEqual(senses.events(store.db, 0), [])
-
-    def test_qmd_migration_survives_unknown_before_first_feed(self):
-        old = dict(cursors={'x': '2026-10-18T10:00:00Z'}, offsets={'x': 100}, windows={})
-        self.save({'qmd': dict(status='ok', data=old)})
-        for _ in range(2):
-            self.save({'qmd': dict(status='unknown', reason='read failed')})
-        with writer(self.root) as store:
-            prior = senses.snapshot(store.db, NOW)['qmd']['data']
-        self.assertEqual(prior, {'cursors': old['cursors']})
-        calls = []
-        result = senses.qmd({'qmd_watch_sources': ['x']}, NOW,
-            self.feed_runner({'x': self.feed_page()}, calls), prior)
-        self.assertIn('2026-10-18T10:00:00+00:00', calls[-1])
-        self.assertEqual(result['new_items']['x']['count'], 1)
 
     def test_qmd_mismatch_is_unknown_and_health_never_wakes(self):
         payload = fixture('qmd.status.v1')

@@ -1,11 +1,12 @@
 """Watch facts fulfil doses; calendar placements only reserve future sessions."""
-from datetime import datetime, time, timedelta
+from datetime import datetime, time
 from math import ceil
 from fractions import Fraction
 
 from .contracts import ContractError, issues, load
 from .settings import local_zone
 from .jobs import instant
+from . import memory
 
 MOVEMENT_KINDS = ('gym', 'vo2max', 'anaerobic', 'endurance')
 MOVEMENT_MIN_MINUTES = 90
@@ -66,10 +67,9 @@ def fulfilment(spec, week, now, planned=(), unknown=None, week_start=None):
     done/planned contain the supporting facts, not just totals. remaining is unknown
     (None) on a held reading. Future weeks have no completed watch sessions yet.
     """
-    monday = now.astimezone(local_zone()).date()
-    monday -= timedelta(days=monday.weekday())
-    start = datetime.combine(week_start or monday, time.min, local_zone())
-    end = start + timedelta(days=7)
+    first, last = memory.period('week', (week_start or memory.week_start(memory.local_day(now))).isoformat())
+    start = datetime.combine(first, time.min, local_zone())
+    end = datetime.combine(last, time.min, local_zone())
     placements = [{k: p[k] for k in ('start', 'end', 'event_key')} for p in planned
                   if start <= instant(p['start']) < end]
     future = [p for p in placements if now <= instant(p['start'])]

@@ -4,7 +4,7 @@ import json
 import re
 import subprocess
 
-from . import contracts, jobs, pages, scheduler, senses
+from . import jobs, memory, pages, scheduler, senses
 from .fulfilment import (MOVEMENT_KINDS, MOVEMENT_MIN_MINUTES,
                          MOVEMENT_QUIET_MINUTES, movement_options)
 from .settings import local_zone
@@ -42,8 +42,10 @@ def fulfilments(db, now, observed=None, week_start=None):
         unknown = unknown or 'Garmin health unknown'
     elif health['verdict'] != 'fresh':
         unknown = 'Garmin health ' + health['verdict']
-    elif data.get('date') != now.astimezone(local_zone()).date().isoformat():
+    elif data.get('date') != memory.local_day(now).isoformat():
         unknown = 'Garmin health is not for today'
+    elif data.get('week_start') != memory.week_start(memory.local_day(now)).isoformat():
+        unknown = 'Garmin Sunday week has not been read'
     week = data.get('week')
     if not unknown:
         try:
@@ -84,7 +86,7 @@ def movement_ranking(db, now, doses=None):
 
 
 def briefing(db, now):
-    day_start = datetime.combine(now.astimezone(local_zone()).date(), time.min, local_zone())
+    day_start = datetime.combine(memory.local_day(now), time.min, local_zone())
     doses = fulfilments(db, now)
     return dict(demands=live_demands(db, now), fulfilment=doses,
                 movement=movement_ranking(db, now, doses),
@@ -124,7 +126,7 @@ def validate(spec):
 def worklist(runner, required=False):
     """gsd owns the owner's items; this is Steward's only read of them, through gsd's contract."""
     try:
-        return contracts.read('gsd.worklist.v1', runner(['gsd', 'worklist', '--json']))
+        return senses.worklist(runner)
     except (ValueError, OSError, subprocess.SubprocessError):
         require(not required, 'gsd worklist unknown')
         return None
@@ -230,8 +232,8 @@ def reconcile(db, observation, settings, cid):
 
 
 def deadlines(db, now):
-    day = now.astimezone(local_zone()).date()
-    week_end = datetime.combine(day + timedelta(days=7-day.weekday()), time.min, local_zone())
+    day = memory.local_day(now)
+    week_end = datetime.combine(memory.period('week', memory.week_start(day).isoformat())[1], time.min, local_zone())
     return [spec.get('deadline') or week_end.isoformat() for r in live_demands(db, now)
             if (spec := json.loads(r['spec_json'])).get('deadline') or 'count' in spec]
 
@@ -266,7 +268,7 @@ def bundle_description(db, name, spec, start, worklist, now):
 def build(db, settings, now, observation, restoring=None, accounting=None):
     """Pure scheduler input from read-only rows and a complete calendar observation."""
     cal = target(settings)
-    day = now.astimezone(local_zone()).date()
+    day = memory.local_day(now)
     horizon = planning_end(now, local_zone(), deadlines(db, now))
     dates = [day + timedelta(days=i) for i in range((horizon.date() - day).days + bool(horizon.time() != time.min))]
     rows, observed = projected(db, observation, settings)
@@ -288,7 +290,7 @@ def build(db, settings, now, observation, restoring=None, accounting=None):
     demands = {r['name']: json.loads(r['spec_json']) for r in live_demands(db, now)}
     tasks, blocks, deleted, task_demands = [], [], [], {}
     active_rows = {r['event_key']: r for r in rows}
-    weeks = sorted({date - timedelta(days=date.weekday()) for date in dates})
+    weeks = sorted({memory.week_start(date) for date in dates})
     accounting = accounting if accounting is not None else {}
     accounting.update({str(w): fulfilments(db, now, observed, w) for w in weeks})
     completed = set()
@@ -301,7 +303,7 @@ def build(db, settings, now, observation, restoring=None, accounting=None):
             # Every item closed in gsd: future blocks go, elapsed ones stay as history.
             completed.update(key for key in observed if key.split(':')[0] == name)
             continue
-        # Slots are stable within a Monday-week; owner deletions release their slot.
+        # Slots are stable within a Sunday-week; owner deletions release their slot.
         suffixes = [str(w) for w in weeks] if 'count' in spec else ['once']
         keys = []
         for suffix in suffixes:
@@ -349,7 +351,7 @@ def build(db, settings, now, observation, restoring=None, accounting=None):
             due = instant(spec['deadline']) if spec.get('deadline') else horizon.astimezone(UTC)
             windows = []
             for date in dates:
-                if 'count' in spec and str(date - timedelta(days=date.weekday())) != key.split(':')[1]:
+                if 'count' in spec and str(memory.week_start(date)) != key.split(':')[1]:
                     continue
                 for lo, hi in spec['windows'].get(str(date.weekday()), []):
                     a = datetime.combine(date, time.fromisoformat(lo), local_zone()).astimezone(UTC)
@@ -371,7 +373,7 @@ def build(db, settings, now, observation, restoring=None, accounting=None):
                     a, z = instant(prior['start']), instant(prior['end'])
                     tasks[-1].update(minutes=int((z-a).total_seconds()/60),
                         windows=[dict(start=prior['start'], end=prior['end'])],
-                        day_minutes={a.astimezone(local_zone()).date().isoformat(): int((z-a).total_seconds()/60)})
+                        day_minutes={memory.local_day(a).isoformat(): int((z-a).total_seconds()/60)})
             if event:
                 a, b = event_span(event)
                 blocks.append(dict(id=key, task_id=key, kind='scheduled', pinned=False, start=a.astimezone(local_zone()).isoformat(), end=b.astimezone(local_zone()).isoformat()))
@@ -395,7 +397,7 @@ def build(db, settings, now, observation, restoring=None, accounting=None):
                               deadline=p['end'], windows=[dict(start=p['start'], end=p['end'])]
                               if b <= horizon.astimezone(UTC) else []))
             if key in (restoring or {}) and demands.get(name, {}).get('kind') == 'movement':
-                tasks[-1]['day_minutes'] = {a.astimezone(local_zone()).date().isoformat(): int((b-a).total_seconds()/60)}
+                tasks[-1]['day_minutes'] = {memory.local_day(a).isoformat(): int((b-a).total_seconds()/60)}
             if key not in (restoring or {}):
                 deleted.append(key)
             if e:
@@ -417,7 +419,7 @@ def movement_day_minutes(windows, busy, owner_busy, default):
     days = {}
     for window in windows:
         a, z = instant(window['start']), instant(window['end'])
-        day = a.astimezone(local_zone()).date().isoformat()
+        day = memory.local_day(a).isoformat()
         days.setdefault(day, []).append((a, z))
     result = {}
     for day, spans in days.items():
@@ -442,11 +444,11 @@ def plan(db, settings, now=None, runner=senses.run):
     observation = read(settings, now, runner, db)
     accounting = {}
     data, names = build(db, settings, now, observation, accounting=accounting)
-    day = now.astimezone(local_zone()).date()
+    day = memory.local_day(now)
     return dict(candidates=scheduler.generate(data), demands=names, context=data,
-                fulfilment=accounting[str(day - timedelta(days=day.weekday()))],
+                fulfilment=accounting[str(memory.week_start(day))],
                 fulfilment_weeks=accounting,
-                movement=movement_ranking(db, now, accounting[str(day - timedelta(days=day.weekday()))]),
+                movement=movement_ranking(db, now, accounting[str(memory.week_start(day))]),
                 description_refreshes=description_refreshes(db, settings, now, observation, accounting))
 
 
@@ -463,8 +465,8 @@ def description_refreshes(db, settings, now, observation, accounting):
         if start < now:
             continue
         if spec.get('kind') == 'movement':
-            day = start.astimezone(local_zone()).date()
-            ranking = movement_options(specs, accounting.get(str(day - timedelta(days=day.weekday())), {}))
+            day = memory.local_day(start)
+            ranking = movement_options(specs, accounting.get(str(memory.week_start(day)), {}))
             if ranking['complete']:
                 continue
             text = ranking['description']
@@ -549,8 +551,8 @@ def choose(db, settings, proposal, now=None, actor='owner', runner=senses.run, u
                 spec = dict(spec, title=restoring[key]['title'], transparency=restoring[key]['transparency'])
             p = dict(title=spec['title'], transparency=spec['transparency'], start=c['start'], end=c['end'], event_key=key, reason=selection['reason'])
             if spec.get('kind') == 'movement' and c['action'] != 'drop':
-                day = instant(c['start']).astimezone(local_zone()).date()
-                p['description'] = movement_options(demands, accounting[str(day - timedelta(days=day.weekday()))])['description']
+                day = memory.local_day(instant(c['start']))
+                p['description'] = movement_options(demands, accounting[str(memory.week_start(day))])['description']
             elif spec.get('items') and c['action'] != 'drop':
                 require(observation.get('worklist') is not None, 'gsd worklist unknown')
                 p['description'] = bundle_description(db, names[key], spec, c['start'], observation['worklist'], now)

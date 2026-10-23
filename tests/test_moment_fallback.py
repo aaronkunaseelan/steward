@@ -51,11 +51,11 @@ class MomentFallbackAndDstTests(unittest.TestCase):
 
     def test_unrelated_pending_today_does_not_displace_orientation_fallback(self):
         with writer(self.root) as st:
-            notify(st.db, 'Today', 'result', 'Week gist', 'week:2026-W43', self.network_down, self.now - timedelta(hours=2))
+            notify(st.db, 'Today', 'result', 'Week gist', 'week:2026-10-18', self.network_down, self.now - timedelta(hours=2))
         runtime.wake(self.root, clock=lambda: self.now, settings={'wake_model': True},
                      runner=lambda argv: 'fixture-model', prompt='fixture', sender=self.send)
         with writer(self.root) as st:
-            self.assertTrue(timing.moment_kept(st.db, 'orientation', self.now))
+            self.assertEqual(timing.moment_obligation(st.db, jobs.get(st.db, 'moments', 'orientation'), self.now)['state'], 'kept')
 
     def test_failed_pre_model_briefing_is_not_green(self):
         now = self.now.replace(hour=2)

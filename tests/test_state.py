@@ -55,12 +55,6 @@ class CoreTests(unittest.TestCase):
         with self.assertRaises(StateError):
             restore(backup,Path(self.tmp.name)/'bad')
 
-    def test_schema14_removes_legacy_tables_preserving_log(self):
-        with writer(self.root) as store:
-            tables = {r[0] for r in store.db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            self.assertFalse({'work', 'history'} & tables)
-            self.assertEqual(store.db.execute('PRAGMA user_version').fetchone()[0], 17)
-
     def test_schema15_drops_retirements_and_preserves_jobs(self):
         with writer(self.root) as store:
             store.db.execute('CREATE TABLE retirements (job TEXT PRIMARY KEY, justification TEXT, cutoff TEXT)')

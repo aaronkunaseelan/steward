@@ -31,17 +31,17 @@ class PrioritiesTests(unittest.TestCase):
 
     def test_live_worklist_priority_order_survives_steward(self):
         raw = worklist()
-        result = senses.gsd({}, NOW, lambda argv: json.dumps(raw))
+        result = senses.gsd(NOW, lambda argv: json.dumps(raw))
         self.assertEqual(result['waiting_on_you'], raw['priorities']['mine'])
 
     def test_waiting_on_other_people_survives_steward(self):
         raw = worklist()
-        result = senses.gsd({}, NOW, lambda argv: json.dumps(raw))
+        result = senses.gsd(NOW, lambda argv: json.dumps(raw))
         self.assertEqual(result.get('waiting_on_others'), raw['priorities']['waiting_on_others'])
 
     def test_state_briefing_and_fallback_render_the_same_producer_lists(self):
         raw = worklist()
-        projected = senses.gsd({}, NOW, lambda argv: json.dumps(raw))
+        projected = senses.gsd(NOW, lambda argv: json.dumps(raw))
         with tempfile.TemporaryDirectory() as directory, writer(Path(directory), initialize=True) as st:
             senses.save(st.db, {'gsd': dict(status='ok', data=projected)}, NOW,
                         jobs.change(st.db, 'fixture', NOW, 'tick'))

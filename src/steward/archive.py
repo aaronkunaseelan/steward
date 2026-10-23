@@ -127,8 +127,9 @@ def _archive(directory, header, refs, now=None, home=None):
                 session = resolve(ref, home)
                 if not any((s['agent'], s['thread'], s['label']) == (session['agent'], session['thread'], session['label']) for s in resolved):
                     resolved.append(session)
-            except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+            except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
                 missing += 1
+                header = dict(header, reason='session collection unknown: ' + type(exc).__name__)
         if missing:
             # Keep partial copies, but never publish missing sessions as an empty success.
             header = dict(header, complete=False)
@@ -163,6 +164,7 @@ def _archive(directory, header, refs, now=None, home=None):
                 meta['sessions'].append(previous)
             else:
                 meta['complete'] = False
+                meta['reason'] = 'session copy unknown: source unreadable'
     if not meta['ended_at']:
         meta['ended_at'] = end_from_sessions(directory, meta['sessions'])
     if not meta['ended_at']:
@@ -196,7 +198,7 @@ def job(data, row, manifest=None, now=None, home=None):
     argv = manifest.get('argv') or spec.get('argv', [])
     agent_job = spec.get('capability') or any(Path(a).name in ('agent-run', 'gsd') for a in argv)
     if agent_job and row['started_at'] and not refs:
-        header['complete'] = False
+        header.update(complete=False, reason='session collection unknown: run identity unavailable')
     return archive(directory, header, refs, now, home)
 
 

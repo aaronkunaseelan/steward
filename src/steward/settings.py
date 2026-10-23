@@ -25,7 +25,7 @@ def config_dir():
 def validate_settings(settings):
     strings = {'mind_dir', 'gmail_account', 'schedule_calendar_id', 'timezone', 'pages_host', 'backup_remote'}
     lists = {'main_calendar_ids', 'qmd_watch_sources', 'wake_times'}
-    allowed = strings | lists | {'wake_model', 'load_max', 'churn_cap', 'interrupt_cap'}
+    allowed = strings | lists | {'wake_model', 'load_max', 'interrupt_cap'}
     if not isinstance(settings, dict):
         raise StateError('invalid settings table')
     for key, value in settings.items():

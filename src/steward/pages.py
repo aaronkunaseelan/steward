@@ -8,13 +8,17 @@ import mimetypes
 import os
 import re
 import secrets
+import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
 
 from .jobs import change, instant, now_utc, require
 from .state import StateError
-from . import transcripts
+from . import transcripts, senses
+from .settings import local_zone
+from .memory import local_day
+from .timing import owner_time
 
 from .settings import pages_host
 LIMIT = 10 * 1024 * 1024
@@ -188,8 +192,96 @@ def read_meta(db, key, default=None):
     return json.loads(row[0]) if row else default
 
 
-def put(db, title, data, filename='', slug=None, as_html=False, now=None, actor='owner', transport=None, public=False):
+def cut_line(cut):
+    at = cut.get('until')
+    return 'gsd as of ' + (owner_time(instant(at), '%d %b %Y %H:%M') + ' (Athens)' if at else 'unknown (no landed cut)')
+
+
+def item_line(item, project, notion_url):
+    title = ' '.join(item['title'].split())
+    label = '[' + title + '](' + notion_url + ')' if notion_url else title
+    due = owner_time(instant(item['due_at']), '%d %b %Y %H:%M') + ' (Athens)' if item['due_at'] else 'not dated'
+    return '- ' + label + ' — ' + (project or 'no project') + ' — due ' + due
+
+
+def prep_header(db, items, block, now, runner):
+    """Only block context and live gsd links, never the prose on Notion."""
+    lines = []
+    if block:
+        from .calendar_b import latest
+        demand = next((r for r in latest(db, 'demands') if r['name'] == block), None)
+        require(demand is not None, 'unknown block demand')
+        spec = json.loads(demand['spec_json'])
+        today = local_day(now)
+        applied = [json.loads(r['payload']) for r in latest(db, 'blocks')
+                   if r['demand'] == block and r['state'] == 'applied']
+        applied = sorted((p for p in applied if local_day(instant(p['start'])) == today),
+                         key=lambda p: p['start'])
+        lines.append('## ' + (applied[0]['title'] if applied else spec['title']))
+        for p in applied:
+            lines.append(owner_time(instant(p['start']), '%d %b %H:%M') + '–' +
+                         owner_time(instant(p['end']), '%H:%M') + ' (Athens)')
+        if not applied:
+            lines.append('Block time: unknown (no applied block today)')
+        lines.append('Why together: ' + spec['justification'])
+        lines.append('')
+    try:
+        raw = senses.worklist(runner)
+    except (ValueError, OSError, subprocess.SubprocessError) as exc:
+        reason = str(exc) if isinstance(exc, senses.ContractError) else 'read failed: ' + type(exc).__name__
+        return '\n'.join(lines + ['gsd: unknown (' + reason + ')', 'gsd as of unknown']) + '\n\n'
+    projects = {p['id']: p['name'] for p in raw['projects']}
+    open_items = {i['id']: i for i in raw['items']}
+    for identity in items:
+        item = open_items.get(identity)
+        lines.append(item_line(item, projects.get(item['project_id']), item['notion_url']) if item else
+                     '- ' + identity + ': no longer open in gsd')
+    return '\n'.join(lines + ['', cut_line(raw['cut'])]) + '\n\n'
+
+
+def sync_your_items(db, sense, now, transport=None):
+    """Each tick: render and hash locally; only changed content makes a PUT/read-back."""
+    if not sense:
+        return your_items(db)  # gsd not read this tick (interval not due): the last page stands.
+    if sense.get('status') != 'ok':
+        text = '# Your items\n\ngsd: unknown (' + sense.get('reason', 'not observed') + ')\n'
+    else:
+        data = sense['data']
+        lines = ['# Your items', '', cut_line(data['cut']), '']
+        for item in data['waiting_on_you']:
+            lines.append(item_line(item, item['project'], data.get('notion_urls', {}).get(item['id'])))
+        if not data['waiting_on_you']:
+            lines.append('No open items of yours.')
+        text = '\n'.join(lines) + '\n'
+    rendered, _ = prepare('Your items', text.encode(), 'your-items.md')
+    digest = hashlib.sha256(rendered).hexdigest()
+    slug = read_meta(db, 'your_items_slug')
+    if slug is None:
+        slug = make_slug('Your items')
+        with db:
+            meta(db, 'your_items_slug', slug)
+    row = db.execute('SELECT sha256,state FROM pages WHERE slug=?', (slug,)).fetchone()
+    if row and row['sha256'] == digest and row['state'] == 'live':
+        return dict(slug=slug, url=pages_host() + '/' + slug, state='live', changed=False)
+    return put(db, 'Your items', text.encode(), 'your-items.md', slug=slug,
+               now=now, actor='tick', transport=transport)
+
+
+def your_items(db):
+    slug = read_meta(db, 'your_items_slug')
+    row = db.execute('SELECT state FROM pages WHERE slug=?', (slug,)).fetchone() if slug else None
+    return dict(slug=slug, url=pages_host() + '/' + slug, state=row['state']) if row else 'unknown: not rendered yet'
+
+
+def put(db, title, data, filename='', slug=None, as_html=False, now=None, actor='owner', transport=None, public=False,
+        items=None, block=None, runner=senses.run):
     now, transport = now or now_utc(), transport or request
+    require(not block or items is not None, '--block requires --items')
+    if items is not None:
+        require(bool(items) and all(isinstance(i, str) and i.strip() for i in items), '--items needs gsd ids')
+        require(not as_html and filename.lower().endswith('.md'), '--items requires Markdown (.md)')
+        require(len(data) <= LIMIT, 'page exceeds 10 MiB')
+        data = (prep_header(db, items, block, now, runner) + data.decode('utf-8')).encode('utf-8')
     data, content_type = prepare(title, data, filename, as_html)
     if slug is not None:
         require(valid_slug(slug), 'invalid page slug')

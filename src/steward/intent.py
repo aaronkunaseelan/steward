@@ -10,7 +10,7 @@ from .settings import local_zone
 from .jobs import now_utc, current, run_severity
 from .notify import interrupt_data, notification_status
 from .messages import poll_status
-from .runtime import DEFAULT_WAKE_TIMES, data_root, manifest_path, finished_manifest, failure_reason
+from .runtime import wake_times, data_root, manifest_path, finished_manifest, failure_reason
 from .senses import snapshot
 from .state import StateError
 from .timing import moments, moment_obligation, job_obligation, model_called, clock_on, owner_time
@@ -41,9 +41,7 @@ def sounded(row):
     data = interrupt_data(row)
     if data is None or data.get('over_cap') is not False:
         return False
-    # S6 rows predate the explicit successful-send flag. An immediate successful
-    # send has the same timestamp as its reservation; a later silent retry does not.
-    return data.get('buzz', data.get('at') is not None and data['at'] == row['sent_at']) is True
+    return data.get('buzz') is True
 
 
 def chain(db, now, inbound=None, runs=None):
@@ -117,8 +115,8 @@ def document(state, settings, now=None, data=None):
         db.close()
 
 
-def schedule(runs, now, owner_moments=()):
-    from .planner import cost
+def schedule(runs, now, settings, owner_moments=()):
+    from .planner import observed_minutes
     runs = [dict(r) for r in runs]
     end = now + timedelta(hours=36)
     items = []
@@ -127,21 +125,14 @@ def schedule(runs, now, owner_moments=()):
         if row['state'] != 'planned' or not now <= at <= end:
             continue
         spec = json.loads(row['spec_json'])
-        learned = cost(runs, row['job'])['median_minutes']
-        if learned is None:
-            durations = [(when(r['ended_at']) - when(r['started_at'])).total_seconds() / 60
-                         for r in runs if r['job'] == row['job'] and r['state'] in ('succeeded', 'failed')
-                         and r['started_at'] and r['ended_at']]
-            if durations:
-                from statistics import median
-                learned = median(durations)
+        learned = observed_minutes(runs, row['job'])
         items.append(dict(at=at.astimezone(timezone.utc).isoformat(), kind='job', job=clip(row['job'], 200),
                           est_min=learned, heavy=bool(spec.get('heavy')), reason=clip(row['reason'], 200) if row['reason'] else None,
                           run_id=row['run_id']))
     day = now.astimezone(local_zone()).replace(hour=0, minute=0, second=0, microsecond=0)
     wake_slots = set()
     for offset in range(3):
-        for clock in set(DEFAULT_WAKE_TIMES) | {m['start'] for m in owner_moments}:
+        for clock in set(wake_times(settings)) | {m['start'] for m in owner_moments}:
             for fold in (0, 1):
                 slot = clock_on((day + timedelta(days=offset)).date(), clock, fold)
                 if slot is not None and now <= slot <= end:
@@ -195,7 +186,7 @@ def steward_doc(db, now, settings, data=None):
     day0 = local.replace(hour=0, minute=0, second=0, microsecond=0)
     day1 = day0 + timedelta(days=1)
     today = lambda dt: dt is not None and day0 <= dt < day1
-    from .jobs import spec_errors
+    from .jobs import spec_errors, execution_profile
     invalid_specs = spec_errors(db)
     jobs = {r['name']: json.loads(r['spec_json']) for r in latest(db, 'jobs', 'name')
             if r['state'] == 'active' and r['name'] not in invalid_specs}
@@ -241,11 +232,16 @@ def steward_doc(db, now, settings, data=None):
     promises = []
     for name, spec in jobs.items():
         since = activated(name)
+        profile = execution_profile(db, name, spec, runs)
         for target in spec.get('needs', {}).get('ready_by', []):
             if since is not None and at(target) < since:
                 continue
-            promises.append(promise(name, target, job_obligation(runs, name, at(target), now),
-                                    'Finished at {}.', f'{name} is reserved to finish before {target}.'))
+            if profile['measured_at'] is None or at(target) < when(profile['measured_at']):
+                promises.append(dict(at=target, label=name, state='quiet', met_at=None,
+                                     why=f'{name}: measuring; no ready_by promise before a succeeded measured run.'))
+            else:
+                promises.append(promise(name, target, job_obligation(runs, name, at(target), now),
+                                        'Finished at {}.', f'{name} is reserved to finish before {target}.'))
     for moment in moments(db):
         result = moment_obligation(db, moment, now)
         item = promise(moment['name'].replace('_', ' ').capitalize(), moment['deadline'],
@@ -368,7 +364,7 @@ def steward_doc(db, now, settings, data=None):
          'memory': clip(f"day memory {memories[0] if memories else 'none yet'} · synthesis {(synth[0] if synth and synth[0] else 0) / 1024:.1f} KB", 80)},
         chain(db, now, inbound, runs=runs),
         {'kind': 'ticks', 'layer': 'process', **ticks(now, db=db)},
-        schedule(runs, now, moments(db)),
+        schedule(runs, now, settings, moments(db)),
         recent_runs(db, runs, now, data_root(data)),
     ]
     kept = sum(p['state'] == 'kept' for p in promises)

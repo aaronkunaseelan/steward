@@ -19,7 +19,6 @@ qmd_watch_sources = ["instapaper", "x"]  # sources to watch
 wake_times = ["07:00", "18:30"]          # configured timezone, HH:MM
 wake_model = false                     # whether model wakes are enabled
 load_max = 3.0                         # positive 5-minute load ceiling
-churn_cap = 6                          # nonnegative calendar C move cap
 interrupt_cap = 3                      # nonnegative daily audible message cap
 ```
 
@@ -47,7 +46,6 @@ different host and install the matching run-tools launcher. They use
 Job context: `STEWARD_RUN_DIR` (output dir), `STEWARD_STATE` (state),
 `STEWARD_JOB`, `STEWARD_RUN_ID`, `STEWARD_WAKE_ID` (backlinks),
 `STEWARD_ACTOR` (default owner), `STEWARD_DELIVER` (default digest).
-`STEWARD_TRIAL` makes agent-run prepare its prompt without launching a model.
 `STEWARD_BIN` selects the parcel helper CLI (default `/home/ubuntu/.local/bin/steward`).
 Parcel job argv supplies `--source-timezone`, `--source-label`, `--route`;
 optional `--partner-label`, `--partner-url`, `--partner-link-label` format delivery info.

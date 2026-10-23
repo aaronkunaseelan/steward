@@ -41,7 +41,7 @@ class ManyToldKeys(unittest.TestCase):
         self.assertEqual(code, 0)
         with writer(self.root) as st:
             self.assertEqual(told_check(st.db, ['a', 'b']), {'a':True, 'b':True})
-            notify(st.db, 'Talk', 'result', 'legacy caller', 'legacy', sender=lambda *a: 8, now=NOW)
+            notify(st.db, 'Talk', 'result', 'legacy caller', 'legacy', sender=lambda *a, **options: 8, now=NOW)
             self.assertEqual(st.db.execute("SELECT message_id FROM told WHERE key='legacy'").fetchone()[0], 8)
 
     def test_v12_pending_message_survives_migration(self):

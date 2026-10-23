@@ -364,9 +364,10 @@ class IntegrationTests(unittest.TestCase):
                 telegram=dict(chat_id=1, owner_user_id=2, topics={'Talk':6}), wake_starter=lambda: None)
         self.assertTrue(result['pages_poll_ok'])
         self.assertIn('skipping', result)
-        self.assertEqual(transport.call_count, 1)
+        self.assertEqual(sum(call.args[1].startswith('/_api/opens?') for call in transport.call_args_list), 1)
+        self.assertIn('your_items', result)
         with writer(self.root) as st:
-            self.assertEqual(st.db.execute('SELECT opens FROM pages').fetchone()[0], 1)
+            self.assertEqual(st.db.execute('SELECT opens FROM pages WHERE slug=?', (self.page['slug'],)).fetchone()[0], 1)
 
     def test_wake_briefing_includes_live_pages_and_receipts(self):
         (Path(self.tmp.name)/'data/wakes/1/sessions').mkdir(parents=True)

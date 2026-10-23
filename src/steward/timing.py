@@ -2,6 +2,7 @@
 from datetime import datetime, time, timedelta, timezone
 import json
 from .settings import local_zone
+from .memory import local_day
 
 
 def owner_time(dt, fmt='%a %d %b %Y %H:%M'):
@@ -82,30 +83,50 @@ def job_obligation(runs, name, target, now):
 
 def latest_job_obligation(db, name, now, runs=None):
     """Newest passed target, including yesterday before today's first deadline."""
-    from .jobs import current
+    from .jobs import current, execution_profile
     job = next((r for r in current(db, 'jobs') if r['name'] == name and r['state'] == 'active'), None)
     clocks = json.loads(job['spec_json'])['needs'].get('ready_by', []) if job else []
-    day = now.astimezone(local_zone()).date()
+    day = local_day(now)
     targets = [target for offset in (-1, 0) for clock in clocks
                if (target := clock_on(day + timedelta(days=offset), clock)) is not None]
     target = max((t for t in targets if t <= now), default=None)
+    if target is None:
+        return None
+    profile = execution_profile(db, name, json.loads(job['spec_json']), runs)
+    if profile['measured_at'] is None or target < datetime.fromisoformat(profile['measured_at']):
+        return dict(target=target.isoformat(), state='measuring', completed_at=None, started_at=None)
     return job_obligation(current(db, 'runs') if runs is None else runs,
-                          name, target.astimezone(local_zone()), now) if target else None
-
-
-def job_kept(runs, name, target):
-    result = job_obligation(runs, name, target, target)
-    return datetime.fromisoformat(result['completed_at']) if result['state'] == 'kept' else None
+                          name, target.astimezone(local_zone()), now)
 
 
 def moment_at(moment, now, field):
-    return clock_on(now.astimezone(local_zone()).date(), moment[field])
+    return clock_on(local_day(now), moment[field])
+
+
+def moment_due_at(db, moment, now):
+    """Day close also waits for the evening prepare finish, or its ready_by."""
+    from .jobs import current
+    start = moment_at(moment, now, 'start')
+    if moment['name'] != 'day_close':
+        return start
+    prepare = next((j for j in current(db, 'jobs') if j['name'] == 'prepare' and j['state'] == 'active'), None)
+    if prepare is None:
+        return start
+    day = local_day(now)
+    clocks = json.loads(prepare['spec_json'])['needs'].get('ready_by', [])
+    target = max((at for clock in clocks if (at := clock_on(day, clock)) is not None), default=None)
+    # The same freshness window as prepare's scheduler excludes its morning/yesterday run.
+    fresh = deadline_window(target)[0] if target else clock_on(day, '00:00')
+    finishes = [datetime.fromisoformat(r['ended_at']) for r in current(db, 'runs')
+                if r['job'] == 'prepare' and r['state'] in ('succeeded', 'failed') and r['ended_at']]
+    ready = min([at for at in finishes if fresh <= at <= now] + ([target] if target else []), default=None)
+    return max(start, ready) if ready else None
 
 
 def moment_key(db, name, now):
     from .jobs import get
     get(db, 'moments', name)  # Refuse unknown names before any notification effect.
-    return name + ':' + str(now.astimezone(local_zone()).date())
+    return name + ':' + str(local_day(now))
 
 
 def moment_receipts(db, name, now):
@@ -117,16 +138,10 @@ def moment_receipts(db, name, now):
 def moment_obligation(db, moment, now):
     result = obligation(moment_at(moment, now, 'deadline'),
                         [(at, None) for at in moment_receipts(db, moment['name'], now)], now,
-                        start=clock_on(now.astimezone(local_zone()).date(), '00:00'))
+                        start=clock_on(local_day(now), '00:00'))
     if result['state'] == 'due' and completed_moment_wake(db, moment, now):
         result['state'] = 'missed'
     return result
-
-
-def moment_kept(db, name, now):
-    from .jobs import get
-    result = moment_obligation(db, get(db, 'moments', name), now)
-    return datetime.fromisoformat(result['completed_at']) if result['state'] == 'kept' else None
 
 
 def model_called(row):
@@ -135,18 +150,21 @@ def model_called(row):
 
 def completed_moment_wake(db, moment, now):
     # By start, not finish: a wake's briefing (and its rituals) is built when it starts.
+    start = moment_due_at(db, moment, now)
+    if start is None or now < start:
+        return None
     starts = (datetime.fromisoformat(r['started_at'])
               for r in db.execute("SELECT * FROM wakes WHERE status='completed'") if model_called(r))
-    return kept(starts, now, moment_at(moment, now, 'start'))
+    return kept(starts, now, start)
 
 
 def undelivered(db, now):
     """Moments that have started today and have no keyed message yet: what a wake should post."""
     # A late receipt is delivered and recovers its promise, but never counts as kept.
     return [m['name'] for m in moments(db)
-            if moment_at(m, now, 'start') <= now
+            if (start := moment_due_at(db, m, now)) is not None and start <= now
             and not kept(moment_receipts(db, m['name'], now), now,
-                         clock_on(now.astimezone(local_zone()).date(), '00:00'))]
+                         clock_on(local_day(now), '00:00'))]
 
 
 def due(db, now):

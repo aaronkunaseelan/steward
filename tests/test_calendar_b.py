@@ -72,7 +72,7 @@ class CalendarBTests(unittest.TestCase):
         self.gog = Gog()
         from steward import senses
         senses.save(self.db, {'health': dict(status='ok', data=dict(
-            date=NOW.date().isoformat(), week=[], auth='ok', watch_uploaded_at=NOW.isoformat(),
+            date=NOW.date().isoformat(), week_start='2026-10-18', week=[], auth='ok', watch_uploaded_at=NOW.isoformat(),
             watch_fresh_until=(NOW + timedelta(days=1)).isoformat()))}, NOW,
             b.change(self.db, 'fixture', NOW, 'owner'))
         b.demand(self.db, 'add', 'focus', SPEC, NOW)
@@ -101,14 +101,14 @@ class CalendarBTests(unittest.TestCase):
                                     if t['id'] == 'distant:once:0')['windows']), 32)
         self.assertLessEqual(len(plan['candidates']['choices']), 2048)
         self.assertEqual({c['task_id'] for c in plan['candidates']['choices']},
-                         {'distant:once:0', 'focus:2026-10-19:0'})
+                         {'distant:once:0', 'focus:2026-10-18:0'})
         for i in range(40):
             b.demand(self.db, 'add', f'near-{i}', dict(SPEC, kind='other'), NOW)
         plan = self.plan()
         self.assertGreater(len(plan['context']['tasks']), 32)
         self.assertLessEqual(len(plan['candidates']['choices']), 2048)
         represented = {c['task_id'] for c in plan['candidates']['choices']}
-        self.assertTrue({f'near-{i}:2026-10-19:0' for i in range(40)} <= represented)
+        self.assertTrue({f'near-{i}:2026-10-18:0' for i in range(40)} <= represented)
         self.choose(plan['candidates']['choices'][0])
 
     def test_sunday_late_tuesday_window_has_candidate(self):
@@ -130,12 +130,12 @@ class CalendarBTests(unittest.TestCase):
                        day: [['14:00', '16:00']] for day in ('1', '3', '4')})
         b.demand(self.db, 'add', 'gym', gym, NOW)
         result = self.plan()
-        self.assertEqual(result['candidates']['horizon_end'], '2026-10-26T00:00:00+02:00')
+        self.assertEqual(result['candidates']['horizon_end'], '2026-10-25T00:00:00+03:00')
         places = [c for c in result['candidates']['choices'] if c['action'] == 'place']
         self.assertEqual({c['start'][:10] for c in places},
                          {'2026-10-20', '2026-10-22', '2026-10-23'})
         self.assertEqual({t['id'] for t in result['context']['tasks']},
-                         {f'gym:2026-10-19:{i}' for i in range(3)})
+                         {f'gym:2026-10-18:{i}' for i in range(3)})
         reads = [call for call in self.gog.calls if 'events' in call]
         self.assertTrue(reads)
         self.assertTrue(all(call[call.index('--to')+1] ==
@@ -144,15 +144,15 @@ class CalendarBTests(unittest.TestCase):
     def test_weekly_deadline_preserves_sunday_planning_minimum(self):
         sunday = datetime(2026, 10, 25, 23, 30, tzinfo=TEST_ZONE)
         result = self.plan(sunday)
-        self.assertEqual(b.deadlines(self.db, sunday), ['2026-10-26T00:00:00+02:00'])
-        self.assertEqual(result['candidates']['horizon_end'], '2026-10-28T00:00:00+02:00')
+        self.assertEqual(b.deadlines(self.db, sunday), ['2026-11-01T00:00:00+02:00'])
+        self.assertEqual(result['candidates']['horizon_end'], '2026-11-01T00:00:00+02:00')
 
-    def test_weekly_deadline_does_not_extend_into_next_week(self):
+    def test_weekly_deadline_does_not_cut_off_minimum_horizon(self):
         friday = datetime(2026, 10, 23, 9, tzinfo=TEST_ZONE)
         result = self.plan(friday)
         self.assertEqual(result['candidates']['horizon_end'], '2026-10-26T00:00:00+02:00')
         self.assertEqual({t['id'] for t in result['context']['tasks']},
-                         {'focus:2026-10-19:0'})
+                         {'focus:2026-10-18:0', 'focus:2026-10-25:0'})
 
     def test_third_horizon_day_new_week_count_keys(self):
         saturday = datetime(2026, 10, 17, 23, 30, tzinfo=TEST_ZONE)
@@ -160,10 +160,10 @@ class CalendarBTests(unittest.TestCase):
                  windows={'0': [['14:00', '16:00']]}), saturday)
         result = self.plan(saturday)
         self.assertEqual({t['id'] for t in result['context']['tasks']},
-                         {'focus:2026-10-12:0', 'focus:2026-10-19:0'})
+                         {'focus:2026-10-11:0', 'focus:2026-10-18:0'})
         places = [c for c in result['candidates']['choices'] if c['action'] == 'place']
         self.assertTrue(places)
-        self.assertTrue(all(c['task_id'] == 'focus:2026-10-19:0' and
+        self.assertTrue(all(c['task_id'] == 'focus:2026-10-18:0' and
                             c['start'][:10] == '2026-10-19' for c in places))
 
     def test_changes_names_moved_block_old_and_new_times(self):
@@ -176,7 +176,7 @@ class CalendarBTests(unittest.TestCase):
             {'candidate_id': move['id'], 'reason': 'A real change'}]},
             NOW, actor='model', runner=self.gog)
         sent = []
-        messages.changes(self.db, NOW, lambda topic, text: sent.append((topic, text)) or
+        messages.changes(self.db, NOW, lambda topic, text, **options: sent.append((topic, text)) or
                          {'message_id': 1}, SETTINGS)
         self.assertEqual(len(sent), 1)
         topic, text = sent[0]
@@ -196,7 +196,7 @@ class CalendarBTests(unittest.TestCase):
             {'candidate_id': drop['id'], 'reason': 'Demand retired'}]},
             NOW, actor='model', runner=self.gog)
         sent = []
-        messages.changes(self.db, NOW, lambda topic, text: sent.append(text) or
+        messages.changes(self.db, NOW, lambda topic, text, **options: sent.append(text) or
                          {'message_id': 1}, SETTINGS)
         self.assertEqual(len(sent), 1)
         for expected in ('Focus', 'deleted from', 'Mon 19 Oct 10:00 EEST–11:00 EEST', 'Demand retired'):
@@ -264,7 +264,7 @@ class CalendarBTests(unittest.TestCase):
         first = self.gog.events['schedule'][0]
         second = copy.deepcopy(first)
         second.update(id='another', summary='Another')
-        second['extendedProperties']['private']['event_key'] = 'focus:2026-10-19:1'
+        second['extendedProperties']['private']['event_key'] = 'focus:2026-10-18:1'
         self.gog.events['schedule'].append(second)
         drops = [c for c in self.plan()['candidates']['choices'] if c['action'] == 'drop']
         result = b.choose(self.db, SETTINGS, {'schema_version': 1, 'selections': [
@@ -360,7 +360,7 @@ class CalendarBTests(unittest.TestCase):
         b.demand(self.db, 'edit', 'focus', spec, NOW)
         self.gog.events['main'] = [dict(id='birthday', start={'date':'2026-10-19'}, end={'date':'2026-10-20'}, transparency='transparent')]
         for i in range(2):
-            self.gog.events['schedule'].append(event('old'+str(i), '2026-10-18T12:30:00+03:00', '2026-10-18T13:30:00+03:00', extendedProperties={'private': {'event_key':f'focus:2026-10-19:{i}'}}))
+            self.gog.events['schedule'].append(event('old'+str(i), '2026-10-18T12:30:00+03:00', '2026-10-18T13:30:00+03:00', extendedProperties={'private': {'event_key':f'focus:2026-10-18:{i}'}}))
         result = self.plan()
         # Containers use normal keyed-count accounting; occupied keys stay consumed.
         self.assertEqual(len(result['context']['tasks']), 1)
@@ -491,8 +491,8 @@ class CalendarBTests(unittest.TestCase):
                  deadline=(NOW + timedelta(days=16)).isoformat(), source='charter',
                  justification='Known ahead'), NOW)
         keys = set(self.plan()['demands'])
-        self.assertTrue({'focus:2026-10-19:0', 'focus:2026-10-26:0',
-                         'focus:2026-11-02:0'} <= keys)
+        self.assertTrue({'focus:2026-10-18:0', 'focus:2026-10-25:0',
+                         'focus:2026-11-01:0'} <= keys)
 
     def test_undo_restores_and_created_block_deletes(self):
         first = self.place()
@@ -531,7 +531,7 @@ class CalendarBTests(unittest.TestCase):
             self.assertIn(name, timing.due(self.db, retry))
             self.assertIn(name, runtime.gate(self.db, retry))
             key = name + ':' + str(start.date())
-            notify(self.db, 'Today', 'result', name, key, lambda *a: 1, retry)
+            notify(self.db, 'Today', 'result', name, key, lambda *a, **options: 1, retry)
             self.assertNotIn(name, timing.due(self.db, retry))
 
     def test_demand_undo(self):
@@ -579,7 +579,7 @@ class CalendarBEdgeTests(unittest.TestCase):
         result = self.plan(sunday)
         places = [c for c in result['candidates']['choices'] if c['action']=='place']
         self.assertTrue(places)
-        self.assertTrue(all('2026-10-19' in c['task_id'] and c['start'][:10]=='2026-10-19' for c in places))
+        self.assertTrue(all('2026-10-18' in c['task_id'] and c['start'][:10]=='2026-10-19' for c in places))
 
     def test_keys_from_previous_week_count_in_actual_week(self):
         spec = dict(SPEC, kind='other', count=1)

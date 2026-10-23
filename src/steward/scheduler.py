@@ -10,6 +10,8 @@ from zoneinfo import ZoneInfoNotFoundError
 from .settings import zone as configured_zone
 
 from .timing import planning_end
+from .memory import week_start
+from .fulfilment import MOVEMENT_MIN_MINUTES, MOVEMENT_QUIET_MINUTES
 
 UTC = timezone.utc
 MAX_CANDIDATES = 2048
@@ -102,7 +104,7 @@ def context(data):
                     'invalid daily durations')
             for day, minutes in task['day_minutes'].items():
                 require(isinstance(day, str) and len(day) == 10, 'invalid duration date')
-                require(minutes is None or type(minutes) is int and 90 <= minutes <= 150,
+                require(minutes is None or type(minutes) is int and MOVEMENT_MIN_MINUTES <= minutes <= MOVEMENT_QUIET_MINUTES,
                         'invalid movement duration')
         if "windows" in task:
             require(isinstance(task["windows"], list), "invalid task windows")
@@ -198,7 +200,7 @@ def generate(data):
                     if not old or (start, finish) != spans[old["id"]]:
                         result.append(choice(task_id, "place", old["id"] if old else None, a, b))
 
-    return {"schema_version": 1, "week_key": (now.astimezone(zone).date() - timedelta(days=now.astimezone(zone).weekday())).isoformat(),
+    return {"schema_version": 1, "week_key": week_start(now.astimezone(zone).date()).isoformat(),
             "horizon_end": end.astimezone(zone).isoformat(), "choices": result}
 
 
@@ -212,7 +214,7 @@ def check(data, candidates, proposal, checked_at):
     current = instant(checked_at, zone)
     require(now <= current < instant(data["deadline"], zone), "check deadline exceeded")
     fields(candidates, ("schema_version", "week_key", "horizon_end", "choices"))
-    week = (now.astimezone(zone).date() - timedelta(days=now.astimezone(zone).weekday())).isoformat()
+    week = week_start(now.astimezone(zone).date()).isoformat()
     require(type(candidates["schema_version"]) is int and candidates["schema_version"] == 1
             and candidates["week_key"] == week
             and candidates["horizon_end"] == horizon.astimezone(zone).isoformat()
@@ -290,28 +292,3 @@ def check(data, candidates, proposal, checked_at):
     return {"schema_version": 1, "status": "checked_fixture_only", "blocks": sorted(plan, key=lambda b: (b["start"], b["id"])),
             "changes": [{"block_id": key, "reason": reasons[key]} for key in sorted(replacements)],
             "pending_task_ids": sorted(set(tasks) - {b["task_id"] for b in plan} - set(data["deleted_task_ids"]))}
-
-
-def propose(data, candidates):
-    """Deterministic code-only fixture chooser, not a model or an optimizer."""
-    proposal = {"schema_version": 1, "selections": []}
-    for task_id in sorted(task["id"] for task in data["tasks"]):
-        for item in candidates["choices"]:
-            if item["task_id"] != task_id or item["action"] == "drop":
-                continue
-            trial = {"schema_version": 1, "selections": proposal["selections"] + [
-                {"candidate_id": item["id"], "reason": "fixture first feasible choice"}]}
-            try:
-                check(data, candidates, trial, data["now"])
-            except InvalidPlan:
-                continue
-            proposal = trial
-            break
-    return proposal
-
-
-def dry_run(data):
-    candidates = generate(data)
-    proposal = propose(data, candidates)
-    return {"candidates": candidates, "selectedproposal": proposal,
-            "checkedplan": check(data, candidates, proposal, data["now"])}
