@@ -76,6 +76,92 @@ class IntentTests(unittest.TestCase):
         readings['sol']['data']['observed_at'] = now.isoformat()
         senses.save(db, readings, now, cid)
 
+    def test_unfolded_completion_keeps_deadline_without_writing_state(self):
+        from steward import runtime
+        now = NOW.replace(hour=3)  # 06:00 Athens, exactly the promise tick.
+        with writer(self.state) as st:
+            messages.poll(st.db, now, {}, fetcher=lambda offset: [], telegram={'chat_id': -1})
+            self.save_healthy(st.db, now)
+            jobs.job_verb(st.db, 'add', 'consolidate', dict(
+                justification='Keep memory fresh.', argv=[released()],
+                needs={'ready_by': ['06:00']}), now=now - timedelta(days=1))
+            cid = jobs.change(st.db, 'fixture', now, 'tick')
+            row = dict(run_id='unfolded', job='consolidate', state='started',
+                       planned_for=(now - timedelta(minutes=20)).isoformat(),
+                       started_at=(now - timedelta(minutes=20)).isoformat(),
+                       reason='Fixture run.', spec_json='{}')
+            jobs.append(st.db, 'runs', row, cid)
+            st.db.commit()
+        path = runtime.manifest_path(self.data, row)
+        path.parent.mkdir(parents=True)
+        manifest = dict(run_id='unfolded', job='consolidate', started_at=row['started_at'],
+                        ended_at=(now - timedelta(minutes=18)).isoformat(),
+                        exit_code=0, status='succeeded')
+        path.write_text(json.dumps(manifest))
+        before = (self.state / 'state.sqlite').read_bytes()
+        doc = self.doc(now=now)
+        self.assertEqual(doc['state'], 'green', doc['headline'])
+        promise = next(p for p in self.block(doc, 'day')['promises'] if p['label'] == 'consolidate')
+        self.assertEqual((promise['state'], promise['met_at']), ('kept', '05:42'))
+        run = next(r for r in self.block(doc, 'runs')['items'] if r['id'] == 'run-unfolded')
+        self.assertEqual(run['status'], 'succeeded')
+        self.assertEqual((self.state / 'state.sqlite').read_bytes(), before)
+        for changes in ({'job': 'other'}, {'exit_code': True},
+                        {'ended_at': (now + timedelta(minutes=1)).isoformat()},
+                        {'ended_at': (now - timedelta(minutes=21)).isoformat()}):
+            with self.subTest(changes=changes):
+                path.write_text(json.dumps(dict(manifest, **changes)))
+                doc = self.doc(now=now)
+                self.assertEqual(doc['state'], 'red')
+                self.assertIn('consolidate missed 06:00', doc['headline'])
+
+    def test_unfolded_gsd_completion_also_updates_chain_and_failure_reason(self):
+        from steward import runtime
+        now = NOW.replace(hour=15, minute=30)  # 18:30 Athens.
+        with writer(self.state) as st:
+            messages.poll(st.db, now, {}, fetcher=lambda offset: [], telegram={'chat_id': -1})
+            self.save_healthy(st.db, now)
+            jobs.job_verb(st.db, 'edit', 'gsd-steady', dict(
+                justification='Keep the obligations fresh.', argv=[released()],
+                needs={'ready_by': ['18:30']}, max_minutes=120, heavy=True),
+                now=now - timedelta(days=1))
+            st.db.execute("INSERT INTO told VALUES ('orientation:2026-10-17', '2026-10-17T04:00:00+00:00', NULL, NULL, 'Today', 1)")
+            row = dict(run_id='unfolded-gsd', job='gsd-steady', state='started',
+                       planned_for=(now - timedelta(minutes=20)).isoformat(),
+                       started_at=(now - timedelta(minutes=20)).isoformat(),
+                       reason='Fixture run.', spec_json='{}')
+            jobs.append(st.db, 'runs', row, jobs.change(st.db, 'fixture', now, 'tick'))
+            st.db.commit()
+        path = runtime.manifest_path(self.data, row)
+        path.parent.mkdir(parents=True)
+        manifest = dict(run_id=row['run_id'], job=row['job'], started_at=row['started_at'],
+                        ended_at=(now - timedelta(minutes=18)).isoformat(),
+                        exit_code=0, status='succeeded')
+        path.write_text(json.dumps(manifest))
+        doc = self.doc(now=now)
+        self.assertEqual(doc['state'], 'green', doc['headline'])
+        self.assertFalse(any(h['warn'] for h in self.block(doc, 'chain')['hops']))
+        manifest.update(exit_code=1, status='failed')
+        path.write_text(json.dumps(manifest))
+        (path.parent / 'stderr.txt').write_text('fixture failure')
+        doc = self.doc(now=now)
+        self.assertEqual(doc['state'], 'red')
+        self.assertIn('gsd-steady missed 18:30', doc['headline'])
+        self.assertIn('latest run failed: exit 1', doc['headline'])
+        self.assertIn('fixture failure', json.dumps(self.block(doc, 'runs')))
+
+    def test_missed_promise_is_the_red_headline_reason(self):
+        now = NOW.replace(hour=3)
+        with writer(self.state) as st:
+            messages.poll(st.db, now, {}, fetcher=lambda offset: [], telegram={'chat_id': -1})
+            self.save_healthy(st.db, now)
+            jobs.job_verb(st.db, 'add', 'consolidate', dict(
+                justification='Keep memory fresh.', argv=[released()],
+                needs={'ready_by': ['06:00']}), now=now - timedelta(days=1))
+        doc = self.doc(now=now)
+        self.assertEqual(doc['state'], 'red')
+        self.assertIn('consolidate missed 06:00', doc['headline'])
+
     def test_inflight_wake_is_running_and_judges_last_finished_model(self):
         now = NOW.replace(hour=2)
         with writer(self.state) as st:

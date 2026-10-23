@@ -209,7 +209,7 @@ class SensesTests(unittest.TestCase):
             state = jobs.snapshot(store.db, now=NOW + timedelta(seconds=20))
         self.assertEqual(set(state['senses']), set(senses.INTERVALS))
         self.assertTrue(all(v['age'] == 20 for v in state['senses'].values()))
-        self.assertEqual(set(self.collect()), {'machine', 'sol'})
+        self.assertEqual(set(self.collect()), {'machine', 'sol', 'gsd'})  # gsd every tick (F-64)
 
     def test_manual_run_landings_are_not_gsd_events(self):
         gsd = lambda d: {'gsd': dict(status='ok', data={'digest': d})}

@@ -80,7 +80,7 @@ def job_obligation(runs, name, target, now):
                               for r in runs if r['job'] == name and r['state'] == 'succeeded' and r['ended_at']], now)
 
 
-def latest_job_obligation(db, name, now):
+def latest_job_obligation(db, name, now, runs=None):
     """Newest passed target, including yesterday before today's first deadline."""
     from .jobs import current
     job = next((r for r in current(db, 'jobs') if r['name'] == name and r['state'] == 'active'), None)
@@ -89,7 +89,8 @@ def latest_job_obligation(db, name, now):
     targets = [target for offset in (-1, 0) for clock in clocks
                if (target := clock_on(day + timedelta(days=offset), clock)) is not None]
     target = max((t for t in targets if t <= now), default=None)
-    return job_obligation(current(db, 'runs'), name, target.astimezone(local_zone()), now) if target else None
+    return job_obligation(current(db, 'runs') if runs is None else runs,
+                          name, target.astimezone(local_zone()), now) if target else None
 
 
 def job_kept(runs, name, target):

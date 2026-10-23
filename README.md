@@ -71,7 +71,7 @@ Training separates calendar containers from dose targets. `fulfilment.py` is the
 
 Calendar C lives in Steward's versioned state, not a second Google calendar. `steward plan` lists feasible compute starts; `steward run plan JOB --at ISO --reason TEXT` selects a checked reservation. Tick supplies defaults for unreserved recurring jobs.
 
-A job row has a written `justification`, release-bound `argv`, and `needs`: `ready_by`, `max_staleness` or `every {min,max}`. It can declare `after`, `min_gap`, `heavy`, `model`, `deliver` and `max_minutes`. Cost is learned from manifests. There is no recurring-job count cap. State shows the job fields, validation failures and capability file version.
+A job row has a written `justification`, release-bound `argv`, and `needs`: `ready_by`, `max_staleness` or `every {min,max}`. It can declare `min_gap`, `heavy`, `model`, `deliver` and `max_minutes`. Cost is learned from manifests. There is no recurring-job count cap. State shows the job fields, validation failures and capability file version.
 
 Use `steward job add|edit|pause|resume|rm`, `steward run now JOB` and `steward run cancel RUN`. Calendar C enforces a frozen near-term horizon and a move cap; explicit owner actions have defined exceptions. Host-load/disk guards and the shared heavy lane still constrain dispatch. A failed ready-by run gets one retry, not an unbounded retry loop.
 

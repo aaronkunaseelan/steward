@@ -10,7 +10,7 @@ from .settings import local_zone
 from .jobs import now_utc, current, run_severity
 from .notify import interrupt_data, notification_status
 from .messages import poll_status
-from .runtime import DEFAULT_WAKE_TIMES, data_root
+from .runtime import DEFAULT_WAKE_TIMES, data_root, manifest_path, finished_manifest, failure_reason
 from .senses import snapshot
 from .state import StateError
 from .timing import moments, moment_obligation, job_obligation, model_called, clock_on, owner_time
@@ -46,9 +46,9 @@ def sounded(row):
     return data.get('buzz', data.get('at') is not None and data['at'] == row['sent_at']) is True
 
 
-def chain(db, now, inbound=None):
+def chain(db, now, inbound=None, runs=None):
     inbound = inbound if inbound is not None else poll_status(db, now)
-    senses = {name: value for name, value in snapshot(db, now).items() if name not in ('health', 'place')}
+    senses = {name: value for name, value in snapshot(db, now, runs=runs).items() if name not in ('health', 'place')}
     ages = [s['age'] for s in senses.values() if s['age'] is not None]
     bad = [f"{name} {s['verdict']}: {s['reason']}" for name, s in senses.items() if s['verdict'] != 'fresh']
     return {'kind': 'chain', 'layer': 'process', 'hops': [
@@ -200,6 +200,18 @@ def steward_doc(db, now, settings, data=None):
     jobs = {r['name']: json.loads(r['spec_json']) for r in latest(db, 'jobs', 'name')
             if r['state'] == 'active' and r['name'] not in invalid_specs}
     runs = current(db, 'runs')
+    # mech-d samples independently of the tick: completed manifests can precede
+    # their folded rows. Resolve them once, read-only, for every intent judgement.
+    for row in runs:
+        if row['state'] != 'started':
+            continue
+        path = manifest_path(data_root(data), row)
+        manifest = finished_manifest(path, row, now)
+        if manifest:
+            row.update(state=manifest['status'], ended_at=manifest['ended_at'],
+                       exit_code=manifest['exit_code'], manifest=str(path))
+            if manifest['exit_code']:
+                row['reason'] = failure_reason(manifest['exit_code'], path.parent)
     # A digest's several outbox items share one Telegram message id.
     sent = list({r['message_id']: r for r in db.execute("SELECT * FROM outbox WHERE state = 'sent'")
                  if today(when(r['sent_at']))}.values())
@@ -354,14 +366,15 @@ def steward_doc(db, now, settings, data=None):
          'undos': db.execute('SELECT count(*) FROM changes WHERE undo_of IS NOT NULL').fetchone()[0],
          'lessons': len([l for l in (lessons[0] if lessons and lessons[0] else '').splitlines() if l.strip().startswith(('-', '*'))]),
          'memory': clip(f"day memory {memories[0] if memories else 'none yet'} · synthesis {(synth[0] if synth and synth[0] else 0) / 1024:.1f} KB", 80)},
-        chain(db, now, inbound),
+        chain(db, now, inbound, runs=runs),
         {'kind': 'ticks', 'layer': 'process', **ticks(now, db=db)},
         schedule(runs, now, moments(db)),
         recent_runs(db, runs, now, data_root(data)),
     ]
     kept = sum(p['state'] == 'kept' for p in promises)
-    warnings = [hop['note'] for block in blocks if block['kind'] == 'chain'
-                for hop in block['hops'] if hop['warn']]
+    warnings = [f"{p['label']} missed {p['at']}" for p in promises if p['state'] == 'missed']
+    warnings.extend(hop['note'] for block in blocks if block['kind'] == 'chain'
+                    for hop in block['hops'] if hop['warn'])
     for name in jobs:
         finished = [r for r in runs if r['job'] == name and r['ended_at'] and when(r['ended_at']) <= now]
         newest = max(finished, key=lambda r: when(r['ended_at']), default=None)
@@ -381,5 +394,5 @@ def steward_doc(db, now, settings, data=None):
         warnings.append('newest wake briefing incomplete: ' + info.get('error', 'wake not complete or no complete page checkpoint'))
     warnings = [name + ': ' + reason for name, reason in invalid_specs.items()] + warnings
     return {'schema': 'intent/1', 'system': 'steward', 'at': int(now.timestamp()),
-            'state': 'red' if warnings or any(p['state'] == 'missed' for p in promises) else 'green',
+            'state': 'red' if warnings else 'green',
             'headline': clip(f'kept {kept} promises; {buzzes} interruptions' + ''.join('; ' + note for note in warnings)), 'blocks': blocks}

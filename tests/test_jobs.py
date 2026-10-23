@@ -109,7 +109,7 @@ class JobsTests(unittest.TestCase):
             stored = json.loads(jobs.get(st.db, 'jobs', 'test')['spec_json'])
         for key, value in stored.items():
             self.assertEqual(row[key], value)
-        for key in ('after', 'capability', 'capability_sha'):
+        for key in ('capability', 'capability_sha'):
             self.assertIsNone(row[key])
 
     def test_state_reports_effective_defaults_for_existing_specs(self):
@@ -129,10 +129,18 @@ class JobsTests(unittest.TestCase):
         for key, expected in dict(model='sol', heavy=False, recurring=True, deliver='digest',
                                   max_minutes=30, cwd=str(Path.home())).items():
             self.assertEqual(row[key], expected, key)
-        for key in ('after', 'min_gap', 'env_file', 'capability'):
+        for key in ('min_gap', 'env_file', 'capability'):
             self.assertIsNone(row[key], key)
         with writer(self.root) as st:
             self.assertEqual(json.loads(jobs.get(st.db, 'jobs', 'test')['spec_json']), legacy)
+
+    def test_cli_job_add_rejects_after(self):
+        output = io.StringIO()
+        with patch('sys.stdin', io.StringIO(json.dumps(spec(after='parent')))), redirect_stdout(output):
+            self.assertEqual(main(['job', 'add', 'child', '--state', str(self.root)]), 2)
+        self.assertEqual(json.loads(output.getvalue())['error'], 'unknown spec field')
+        with writer(self.root) as st:
+            self.assertEqual(jobs.current(st.db, 'jobs'), [])
 
     def test_no_recurring_job_count_limit(self):
         for i in range(10):
@@ -582,18 +590,15 @@ class JobsTests(unittest.TestCase):
         self.tick(at=NOW + timedelta(minutes=15), wake_starter=lambda: wake_calls.append(1))
         self.assertEqual(wake_calls, [1])
 
-    def test_default_placement_ready_by_every_staleness_dependency(self):
+    def test_default_placement_ready_by_every_staleness(self):
         with writer(self.root) as store:
             for name, need in [('ready', {'ready_by': ['18:30']}), ('every', {'every': {'min': '4h', 'max': '1d'}}), ('fresh', {'max_staleness': '1d'})]:
                 jobs.job_verb(store.db, 'add', name, spec(needs=need), now=NOW)
-            jobs.job_verb(store.db, 'add', 'child', spec(after='ready'), now=NOW)
         self.tick()
         with writer(self.root) as store:
             runs = jobs.current(store.db, 'runs')
             ready = next(r for r in runs if r['job'] == 'ready')
             self.assertEqual(jobs.instant(ready['planned_for']), NOW + timedelta(hours=2, minutes=0))
-            child = next(r for r in runs if r['job'] == 'child')
-            self.assertEqual(jobs.instant(child['planned_for']), NOW + timedelta(hours=2, minutes=40))
 
     def test_ready_by_served_deadline_is_not_run_again(self):
         # A successful run must serve its ready_by target only once.

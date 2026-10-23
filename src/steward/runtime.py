@@ -37,6 +37,22 @@ def manifest_path(data, run):
     return data / 'runs' / run['job'] / run['run_id'] / 'manifest.json'
 
 
+def finished_manifest(path, row, now):
+    """One completion check for the tick and read-only intent between ticks."""
+    try:
+        candidate = json.loads(path.read_text())
+        ended = instant(candidate['ended_at'])
+        started = instant(candidate['started_at'])
+        if (candidate['run_id'] == row['run_id'] and candidate['job'] == row['job']
+                and type(candidate['exit_code']) is int
+                and candidate['status'] == ('succeeded' if candidate['exit_code'] == 0 else 'failed')
+                and started <= ended <= now):
+            return candidate
+    except (FileNotFoundError, ValueError, KeyError, TypeError):
+        pass  # Invalid or absent manifests are not evidence of completion.
+    return None
+
+
 def failure_reason(code, directory):
     if code == 124:
         return 'exit 124: deadline exceeded'
@@ -111,15 +127,6 @@ def placement(job, runs, now):
     if floor and at <= grid(floor, True):
         at = grid(floor, True)
         reason += '; min_gap ' + spec['min_gap'] + ' after last success'
-    if spec.get('after'):
-        dependencies = [r for r in runs if r['job'] == spec['after'] and r['state'] in ('planned', 'started')]
-        if not dependencies:
-            return None, 'default: waiting for dependency reservation'
-        dep = min(dependencies, key=lambda r: r['planned_for'])
-        dep_spec = json.loads(dep['spec_json'])
-        end = instant(dep['started_at'] or dep['planned_for']) + timedelta(minutes=expected_minutes(runs, dep['job'], dep_spec))
-        at = max(at, end)
-        reason += '; after ' + spec['after']
     # Default placement serializes heavy reservations, without moving existing ones.
     if spec['heavy']:
         for other in sorted(runs, key=lambda r: r['planned_for']):
@@ -302,22 +309,10 @@ def tick(root, data=None, clock=now_utc, load_reader=host_load, lock_reader=heav
                     continue
                 path = manifest_path(data, row)
                 spec = json.loads(row['spec_json'])
-                manifest = None
-                if path.exists():
-                    try:
-                        candidate = json.loads(path.read_text())
-                        ended = instant(candidate['ended_at'])
-                        started = instant(candidate['started_at'])
-                        if (candidate['run_id'] == row['run_id'] and candidate['job'] == row['job']
-                                and type(candidate['exit_code']) is int
-                                and candidate['status'] == ('succeeded' if candidate['exit_code'] == 0 else 'failed')
-                                and ended >= started):
-                            manifest = candidate
-                    except (ValueError, KeyError, TypeError):
-                        pass  # invalid manifests remain unknown until unit reconciliation
+                manifest = finished_manifest(path, row, now)
                 if manifest:
                     row.update(learned_cost(manifest, path.parent))
-                    row.update(state=manifest['status'], exit_code=manifest['exit_code'], ended_at=ended.isoformat(), manifest=str(path))
+                    row.update(state=manifest['status'], exit_code=manifest['exit_code'], ended_at=instant(manifest['ended_at']).isoformat(), manifest=str(path))
                     if manifest['exit_code']:
                         row['reason'] = failure_reason(manifest['exit_code'], path.parent)
                 elif now > instant(row['started_at']) + timedelta(minutes=spec['max_minutes'] + 5) and unit_reader(row['unit']) is False:

@@ -81,14 +81,6 @@ def rule(job, runs, at, now, old=None, frozen=True):
                     deadlines.append(deadline)
         if not any(lo <= at <= hi for lo, hi in (deadline_window(d, span) for d in deadlines)):
             return 'ready_by'
-    if spec.get('after'):
-        deps = [r for r in runs if r['job'] == spec['after'] and r['state'] in ('planned', 'started')]
-        if not deps:
-            return 'after dependency'
-        dep = min(deps, key=lambda r: r['planned_for'])
-        end = instant(dep['started_at'] or dep['planned_for']) + timedelta(minutes=expected(runs, dep['job'], json.loads(dep['spec_json'])))
-        if at < end:
-            return 'after dependency'
     if spec['heavy']:
         for r in runs:
             if (old and r['run_id'] == old['run_id']) or r['state'] not in ('planned', 'started') or not json.loads(r['spec_json'])['heavy']:
@@ -136,7 +128,7 @@ def choices(db, now):
         default, why = placement(job, [r for r in runs if not old or r['run_id'] != old['run_id']], now)
         result.append(dict(job=job['name'], expected_minutes=expected(runs, job['name'], spec),
             missed_at=missed.isoformat() if missed else None,
-            feasible=[dict(at=t.isoformat(), reason='recovery after missed ' + missed.isoformat() if missed else 'meets declared needs, dependency and heavy lane') for t in feasible],
+            feasible=[dict(at=t.isoformat(), reason='recovery after missed ' + missed.isoformat() if missed else 'meets declared needs and heavy lane') for t in feasible],
             default_choice=default.isoformat() if default else None, default_reason=why,
             current_reservation=old['planned_for'] if old else None,
             meets_needs=not missed and rule(job, runs, instant(old['planned_for']), now, old, frozen=False) is None if old else None))

@@ -110,9 +110,8 @@ class PlanTests(unittest.TestCase):
         # A rejected write can touch SQLite metadata; read-only plan itself cannot.
         self.assertIsInstance(json.loads(outputs[0]), list)
 
-    def test_staleness_and_after(self):
+    def test_staleness(self):
         self.add(needs={'max_staleness': '4h'})
-        self.add('child', after='test')
         with writer(self.root) as store:
             db = store.db
             rid = jobs.run_verb(db, 'now', 'test', 'learn', now=NOW-timedelta(hours=1))['run_id']
@@ -123,5 +122,3 @@ class PlanTests(unittest.TestCase):
             with self.assertRaisesRegex(StateError, 'max_staleness'):
                 jobs.run_verb(db, 'plan', 'test', 'late', (NOW+timedelta(hours=4)).isoformat(), now=NOW)
             jobs.run_verb(db, 'plan', 'test', 'on time', (NOW+timedelta(hours=2)).isoformat(), now=NOW)
-            with self.assertRaisesRegex(StateError, 'after dependency'):
-                jobs.run_verb(db, 'plan', 'child', 'early', (NOW+timedelta(hours=2)).isoformat(), now=NOW)

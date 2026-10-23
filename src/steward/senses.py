@@ -15,7 +15,8 @@ from .timing import planning_end, owner_time
 from .jobs import COMPUTE_GRID_MINUTES, current
 
 UTC = timezone.utc
-INTERVALS = {'calendars': 900, 'gsd': 1800, 'qmd': 900, 'health': 1800, 'place': 600, 'machine': 0, 'sol': 0}
+# gsd is read every tick (0.27 s CPU): a 30-min interval hid a finished gsd-steady from the next ready_by judgement (F-64).
+INTERVALS = {'calendars': 900, 'gsd': 0, 'qmd': 900, 'health': 1800, 'place': 600, 'machine': 0, 'sol': 0}
 
 
 class ReadNotFound(ValueError):
@@ -312,7 +313,7 @@ def read_age(at, now):
     return max(0, (now - datetime.fromisoformat(at)).total_seconds()) if at else None
 
 
-def snapshot(db, now):
+def snapshot(db, now, runs=None):
     if not db.execute("SELECT 1 FROM sqlite_master WHERE name='senses'").fetchone():
         return {name: dict(status='unknown', at=None, age=None, verdict='unknown', as_of=None,
                            reason='not yet observed') for name in INTERVALS}
@@ -326,7 +327,7 @@ def snapshot(db, now):
         health['data'] = dated_health(health['data'], now)
     if result['gsd']['status'] == 'ok':
         from .timing import latest_job_obligation, GSD_JOB
-        result['gsd']['data'] = dict(result['gsd']['data'], promise=latest_job_obligation(db, GSD_JOB, now))
+        result['gsd']['data'] = dict(result['gsd']['data'], promise=latest_job_obligation(db, GSD_JOB, now, runs=runs))
     for name, sense in result.items():
         sense.get('data', {}).pop('stale', None)  # Retire the persisted pre-verdict flag.
         sense.update(freshness(name, sense, now))

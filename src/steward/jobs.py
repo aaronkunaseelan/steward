@@ -81,7 +81,7 @@ def append(db, table, row, change_id):
 def validate_spec(db, spec, name, qmd_status=None):
     require(isinstance(name, str) and re.fullmatch('[a-z0-9-]{1,40}', name), 'invalid job name')
     require(isinstance(spec, dict), 'invalid spec')
-    allowed = {'justification', 'argv', 'needs', 'after', 'heavy', 'deliver', 'max_minutes', 'recurring', 'capability', 'cwd', 'env_file', 'min_gap', 'model'}
+    allowed = {'justification', 'argv', 'needs', 'heavy', 'deliver', 'max_minutes', 'recurring', 'capability', 'cwd', 'env_file', 'min_gap', 'model'}
     require(not set(spec) - allowed, 'unknown spec field')
     require(isinstance(spec.get('justification'), str) and spec['justification'].strip(), 'justification required')
     argv = spec.get('argv')
@@ -120,16 +120,6 @@ def validate_spec(db, spec, name, qmd_status=None):
             validate(spec['capability'])
         else:
             validate(spec['capability'], qmd_status=qmd_status)
-    if 'after' in spec:
-        require(isinstance(spec['after'], str) and spec['after'] != name, 'invalid dependency')
-        dependency = get(db, 'jobs', spec['after'])
-        require(dependency['state'] != 'removed', 'removed dependency')
-        seen = {name}
-        while dependency:
-            require(dependency['name'] not in seen, 'dependency cycle')
-            seen.add(dependency['name'])
-            parent = json.loads(dependency['spec_json']).get('after')
-            dependency = get(db, 'jobs', parent) if parent else None
     return spec
 
 
@@ -292,7 +282,7 @@ def snapshot(db, now=None, interrupt_cap=3):
                     capability_sha = hashlib.sha1(b'blob ' + str(len(content)).encode() + b'\0' + content).hexdigest()
                 except OSError:
                     pass  # Missing capability is unknown, never a fabricated version.
-            fields = dict.fromkeys(('argv', 'capability', 'after', 'min_gap', 'env_file'))
+            fields = dict.fromkeys(('argv', 'capability', 'min_gap', 'env_file'))
             fields.update(SPEC_DEFAULTS, cwd=str(Path.home()))
             fields.update(spec)
             jobs.append(dict(fields, spec='unknown: ' + errors[row['name']] if row['name'] in errors else 'ok', capability_sha=capability_sha, missed_at=deadline.isoformat() if deadline and deadline < now else None, cost=cost(runs, row['name']), name=row['name'], next_planned=min(planned, default=None)))
