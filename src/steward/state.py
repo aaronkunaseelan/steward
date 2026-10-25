@@ -232,6 +232,18 @@ PRAGMA user_version=17;
 """
 
 
+SCHEMA_V18 = """
+-- All non-owner/non-model maintenance uses a neutral actor.
+UPDATE changes SET actor='maintenance'
+ WHERE actor NOT IN ('owner','model','maintenance','tick','migration');
+UPDATE outbox SET state='suppressed' WHERE state IN ('pending','failed')
+ AND change_id IN (SELECT id FROM changes WHERE actor='maintenance');
+UPDATE message_meta SET key='your_list_slug' WHERE key='your_items_slug';
+ALTER TABLE outbox DROP COLUMN kind;
+PRAGMA user_version=18;
+"""
+
+
 @contextmanager
 def writer(root, initialize=False, wait=0):
     """Never delete/replace the lock inode; every local writer uses this lock.
@@ -279,7 +291,7 @@ def writer(root, initialize=False, wait=0):
                 db.executescript('BEGIN;\n' + SCHEMA_V7 + '\nCOMMIT;')
             if db.execute('PRAGMA user_version').fetchone()[0] == 7:
                 if db.execute('SELECT count(*) FROM memory_versions').fetchone()[0]:
-                    raise StateError('legacy memory is not empty; supervisor migration required')
+                    raise StateError('legacy memory is not empty; manual migration required')
                 db.executescript('BEGIN;\n' + SCHEMA_V8 + '\nCOMMIT;')
             if db.execute('PRAGMA user_version').fetchone()[0] == 8:
                 db.executescript('BEGIN;\n' + SCHEMA_V9 + '\nCOMMIT;')
@@ -299,7 +311,9 @@ def writer(root, initialize=False, wait=0):
                 db.executescript('BEGIN;\n' + SCHEMA_V16 + '\nCOMMIT;')
             if db.execute('PRAGMA user_version').fetchone()[0] == 16:
                 db.executescript('BEGIN;\n' + SCHEMA_V17 + '\nCOMMIT;')
-            if db.execute('PRAGMA user_version').fetchone()[0] != 17:
+            if db.execute('PRAGMA user_version').fetchone()[0] == 17:
+                db.executescript('BEGIN;\n' + SCHEMA_V18 + '\nCOMMIT;')
+            if db.execute('PRAGMA user_version').fetchone()[0] != 18:
                 raise StateError('unsupported state schema')
             db.execute('PRAGMA journal_mode=WAL')
             db.execute('PRAGMA synchronous=FULL')
@@ -325,7 +339,7 @@ class Store:
             destination.close()
         os.chmod(target / 'state.sqlite', 0o600)
         hashes = {path.name: digest(path.read_bytes()) for path in target.iterdir()}
-        atomic_file(target / 'manifest.json', json.dumps({'schema':17,'sha256':hashes}, sort_keys=True).encode())
+        atomic_file(target / 'manifest.json', json.dumps({'schema':18,'sha256':hashes}, sort_keys=True).encode())
         return {'status':'backup_complete', 'files':len(hashes)}
 
 
@@ -336,14 +350,14 @@ def restore(source, target):
         raise StateError('restore requires absolute source and fresh isolated target')
     manifest = json.loads((source / 'manifest.json').read_text())
     names = set(manifest.get('sha256', {}))
-    if manifest.get('schema') not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17) or names not in ({'state.sqlite'}, {'state.sqlite','memory.md'}):
+    if manifest.get('schema') not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18) or names not in ({'state.sqlite'}, {'state.sqlite','memory.md'}):
         raise StateError('invalid backup manifest')
     for name, expected in manifest['sha256'].items():
         if digest((source / name).read_bytes()) != expected:
             raise StateError('backup digest mismatch')
     db = sqlite3.connect(f'file:{source / "state.sqlite"}?mode=ro', uri=True)
     try:
-        if db.execute('PRAGMA integrity_check').fetchone()[0] != 'ok' or db.execute('PRAGMA user_version').fetchone()[0] not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17):
+        if db.execute('PRAGMA integrity_check').fetchone()[0] != 'ok' or db.execute('PRAGMA user_version').fetchone()[0] not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18):
             raise StateError('backup integrity/schema invalid')
         target.mkdir(mode=0o700, parents=True)
         out = sqlite3.connect(target / 'state.sqlite')

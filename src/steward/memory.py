@@ -13,18 +13,10 @@ CAPS = dict(day=2048, week=3072, month=4096, lessons=6144, synthesis=2048)
 FIRST = date(2026, 10, 16)
 
 
-def home(root=None):
-    if root is not None:
-        return Path(root)
-    return Path.home() / '.local/share/steward/memory'
-
-
-def storage(db, root=None):
-    if root is not None:
-        return home(root)
+def storage(db):
     database = Path(db.execute('PRAGMA database_list').fetchone()[2])
     production = Path.home() / '.local/state/steward/state.sqlite'
-    return home() if database == production else database.parent / 'memory'
+    return Path.home() / '.local/share/steward/memory' if database == production else database.parent / 'memory'
 
 
 def local_day(instant):
@@ -74,14 +66,14 @@ def latest(db):
     return [dict(r) for r in db.execute('SELECT m.* FROM memories m WHERE version=(SELECT max(version) FROM memories WHERE layer=m.layer AND key=m.key) ORDER BY key,layer')]
 
 
-def filed(db, root=None):
-    return {r[0] for r in db.execute('SELECT day FROM journal_files') if (storage(db, root) / 'journal' / (r[0] + '.json')).is_file()}
+def filed(db):
+    return {r[0] for r in db.execute('SELECT day FROM journal_files') if (storage(db) / 'journal' / (r[0] + '.json')).is_file()}
 
 
-def journal(db, since=None, until=None, day=None, root=None, full=False):
+def journal(db, since=None, until=None, day=None, full=False):
     if day:
         start, end = period('day', day)
-        path = storage(db, root) / 'journal' / (day + '.json')
+        path = storage(db) / 'journal' / (day + '.json')
         if path.exists() and not full:
             return json.loads(path.read_text())
         since = datetime.combine(start, time(), local_zone()).isoformat()
@@ -125,7 +117,7 @@ def journal(db, since=None, until=None, day=None, root=None, full=False):
     for r in db.execute("SELECT * FROM outbox WHERE state='sent'"):
         if inside(r['sent_at']):
             keys = [k[0] for k in db.execute('SELECT key FROM outbox_keys WHERE outbox_id=? ORDER BY key', (r['id'],))]
-            add('messages', {**{k:r[k] for k in ('topic','kind','message_id','sent_at')}, 'told_key':keys[0] if keys else None, 'told_keys':keys, 'text':r['text'] if full else r['text'][:300]})
+            add('messages', {**{k:r[k] for k in ('topic','message_id','sent_at')}, 'told_key':keys[0] if keys else None, 'told_keys':keys, 'text':r['text'] if full else r['text'][:300]})
     from .notify import interrupt_records
     for r in interrupt_records(db):
         if inside(r['at']):
@@ -159,24 +151,24 @@ def wake_journal(db, wake_id):
     return result
 
 
-def file_days(db, now=None, root=None):
+def file_days(db, now=None):
     now = now or jobs.now_utc()
-    directory = storage(db, root) / 'journal'
+    directory = storage(db) / 'journal'
     directory.mkdir(parents=True, mode=0o700, exist_ok=True)
     done = []
     for key in days(FIRST, local_day(now)):
         path = directory / (key + '.json')
         if not path.exists():
-            atomic_file(path, json.dumps(journal(db, day=key, root=root)).encode())
+            atomic_file(path, json.dumps(journal(db, day=key)).encode())
         with db:
             db.execute('INSERT OR IGNORE INTO journal_files VALUES (?,?)', (key, now.isoformat()))
         done.append(key)
     return done
 
 
-def due(db, now=None, root=None):
+def due(db, now=None):
     today = local_day(now or jobs.now_utc())
-    records = filed(db, root)
+    records = filed(db)
     have = {(r['layer'],r['key']) for r in latest(db) if r['content'] is not None}
     if not records:
         return []
@@ -212,9 +204,9 @@ def due(db, now=None, root=None):
                                          period(r['layer'], r['key'])[1], order.index(r['layer'])))
 
 
-def mirror(db, root=None):
+def mirror(db):
     for r in latest(db):
-        path = storage(db, root) / r['layer'] / (r['key'] + '.md')
+        path = storage(db) / r['layer'] / (r['key'] + '.md')
         if r['content'] is None:
             path.unlink(missing_ok=True)
         else:
@@ -223,7 +215,7 @@ def mirror(db, root=None):
                 atomic_file(path, r['content'].encode())
 
 
-def write(db, layer, key, content, actor='owner', now=None, root=None):
+def write(db, layer, key, content, actor='owner', now=None):
     now = now or jobs.now_utc()
     jobs.require(layer in CAPS and isinstance(content,str) and content.strip() and len(content.encode()) <= CAPS[layer], 'invalid memory or byte cap exceeded')
     if layer in ('lessons', 'synthesis'):
@@ -232,7 +224,7 @@ def write(db, layer, key, content, actor='owner', now=None, root=None):
         start,end = period(layer,key)
         jobs.require(end <= local_day(now), 'period incomplete')
         required = {(end - timedelta(days=1)).isoformat()} if layer == 'month' else set(days(start, end))
-        jobs.require(required <= filed(db,root), 'period not filed')
+        jobs.require(required <= filed(db), 'period not filed')
     with db:
         cid = jobs.change(db, 'memory write', now, actor)
         label = layer
@@ -242,11 +234,11 @@ def write(db, layer, key, content, actor='owner', now=None, root=None):
         db.execute('UPDATE changes SET summary=? WHERE id=?', ('Memory write: ' + label, cid))
         version = db.execute('SELECT coalesce(max(version),0)+1 FROM memories WHERE layer=? AND key=?', (layer,key)).fetchone()[0]
         db.execute('INSERT INTO memories VALUES (?,?,?,?,?)', (layer,key,version,cid,content))
-    mirror(db,root)
+    mirror(db)
     return dict(change_id=cid,layer=layer,key=key,version=version)
 
 
-def undo(db, identity, actor='owner', root=None):
+def undo(db, identity, actor='owner'):
     r = db.execute('SELECT * FROM memories WHERE change_id=?', (identity,)).fetchone()
     jobs.require(r is not None, 'unknown memory change')
     version = db.execute('SELECT max(version) FROM memories WHERE layer=? AND key=?', (r['layer'],r['key'])).fetchone()[0]
@@ -255,7 +247,7 @@ def undo(db, identity, actor='owner', root=None):
     with db:
         cid = jobs.change(db,'undo',jobs.now_utc(),actor,identity)
         db.execute('INSERT INTO memories VALUES (?,?,?,?,?)',(r['layer'],r['key'],version+1,cid,prior[0] if prior else None))
-    mirror(db,root)
+    mirror(db)
     return dict(change_id=cid,undo_of=identity)
 
 
@@ -320,8 +312,8 @@ def briefing(db, now, state, receipt=None):
     receipt = receipt if receipt is not None else {}
     receipt.update(complete=False)
     from .timing import moments
-    state = dict(state, runs=jobs.current(db, 'runs'), moments=moments(db))
-    if 'day_close' in state.get('rituals', []):
+    state = dict(state, runs=jobs.current(db, 'runs'), moment_schedule=moments(db))
+    if 'day_close' in state.get('moments', []):
         state['day_close'] = page.day_close(db, now)
     text = memory_text + '\n\n' + page.render(state, now, receipt)
     prefix = len(memory_text) + 2
@@ -339,11 +331,11 @@ def briefing(db, now, state, receipt=None):
     return text
 
 
-def provocations(db, now=None, root=None, source=None):
+def provocations(db, now=None, source=None):
     text=mind.read('reference/provocations.md', source).split('Provocations (code draws one per week memory):',1)[1].split('\n## ',1)[0]
     options=[(int(n),t) for n,t in re.findall(r'^(\d+)\. (.+)$',text,re.M)]
     jobs.require(bool(options), 'no provocations in reference/provocations.md')
-    for item in due(db,now,root):
+    for item in due(db,now):
         if item['layer']=='week' and not db.execute('SELECT 1 FROM provocations WHERE week=?',(item['key'],)).fetchone():
             number,text=secrets.choice(options)
             with db:

@@ -99,6 +99,7 @@ def main(argv=None):
             for action in (('add', 'edit', 'pause', 'resume', 'rm') if name == 'job' else ('now', 'plan', 'cancel')):
                 q = sub.add_parser(action)
                 # Accept the state/config flags before or after the nested verb.
+                q.add_argument('--owner-message', type=int, help='inbox update id requesting this job or run change')
                 q.add_argument('--state', type=Path, default=argparse.SUPPRESS)
                 q.add_argument('--config', type=Path, default=argparse.SUPPRESS)
                 q.add_argument('name')
@@ -123,7 +124,6 @@ def main(argv=None):
             p.add_argument('--outstanding', action='store_true', help='read unhandled owner message ids and arrival times')
         if name == 'notify':
             p.add_argument('--topic', choices=TOPICS, required=True)
-            p.add_argument('--kind', choices=('change', 'result', 'alert'), required=True)
             identity = p.add_mutually_exclusive_group()
             identity.add_argument('--told-key', action='append')
             identity.add_argument('--moment', metavar='NAME', help='address an owner moment in Today; code builds its daily key')
@@ -139,6 +139,7 @@ def main(argv=None):
             p.add_argument('--subject')
         if name == 'undo':
             p.add_argument('change_id')
+            p.add_argument('--owner-message', type=int, help='inbox update id requesting this undo')
         if name in ('backup', 'restore'):
             p.add_argument('location', type=Path)
         if name == 'journal':
@@ -188,8 +189,10 @@ def main(argv=None):
         settings = runtime.config(args.config)
         from . import mind
         with mind.use(settings):
-            actor = os.environ.get('STEWARD_ACTOR', 'owner')
+            actor = os.environ.get('STEWARD_ACTOR')
             if args.command == 'restore':
+                jobs.require(actor in ('owner', 'model', 'maintenance'),
+                             'write requires STEWARD_ACTOR=owner, model or maintenance')
                 report = restore(args.location, args.state)
             elif args.command in ('tick', 'wake') and getattr(args, 'action', None) is None and not in_unit(f'steward-{args.command}.service'):
                 # Senses and sends need the unit's EnvironmentFiles (keyring, bot token). Outside
@@ -233,6 +236,8 @@ def main(argv=None):
                 finally:
                     db.close()
             else:
+                jobs.require(actor in ('owner', 'model', 'maintenance'),
+                             'write requires STEWARD_ACTOR=owner, model or maintenance')
                 with writer(args.state, initialize=args.command == 'init-state', wait=0 if args.command == 'wake' else 60) as store:
                     db = store.db
                     if args.command == 'init-state':
@@ -285,9 +290,9 @@ def main(argv=None):
                         spec = None
                         if args.action in ('add', 'edit'):
                             spec = json.loads(args.spec.read_text()) if args.spec else json.load(sys.stdin)
-                        report = jobs.job_verb(db, args.action, args.name, spec, actor=actor)
+                        report = jobs.job_verb(db, args.action, args.name, spec, actor=actor, owner_message=args.owner_message)
                     elif args.command == 'run':
-                        report = jobs.run_verb(db, args.action, args.name, args.reason, getattr(args, 'at', None), actor=actor)
+                        report = jobs.run_verb(db, args.action, args.name, args.reason, getattr(args, 'at', None), actor=actor, owner_message=args.owner_message)
                     elif args.command == 'undo':
                         from . import calendar_b
                         if db.execute('SELECT 1 FROM drafts WHERE change_id=?', (args.change_id,)).fetchone():
@@ -298,12 +303,12 @@ def main(argv=None):
                         elif db.execute('SELECT 1 FROM blocks WHERE change_id=? UNION SELECT 1 FROM demands WHERE change_id=?', (args.change_id, args.change_id)).fetchone():
                             report = calendar_b.undo(db, settings, args.change_id, actor=actor)
                         else:
-                            report = jobs.undo(db, args.change_id, actor=actor)
+                            report = jobs.undo(db, args.change_id, actor=actor, owner_message=args.owner_message)
                     elif args.command == 'inbox':
                         from .messages import done
                         report = done(db, args.ids, jobs.now_utc(), actor)
                     elif args.command == 'notify':
-                        report = notify(db, args.topic, args.kind, args.text, args.told_key, actor=actor, deliver=args.deliver, settings=settings, interrupt=args.interrupt, moment=args.moment)
+                        report = notify(db, args.topic, args.text, args.told_key, actor=actor, deliver=args.deliver, settings=settings, interrupt=args.interrupt, moment=args.moment)
                     elif args.command == 'backup':
                         report = store.backup(args.location)
     except WriterBusy:

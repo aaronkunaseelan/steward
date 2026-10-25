@@ -1,12 +1,15 @@
 from fixture_mind import use_settings
 import copy
+from contextlib import redirect_stdout
+import io
 from datetime import datetime, timedelta
 import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
-from steward import calendar_b as b, scheduler
+from steward import calendar_b as b, cli, scheduler
 from steward.state import writer, StateError
 from fixture_mind import TEST_ZONE
 
@@ -52,7 +55,7 @@ class Gog:
             return args[args.index(name)+1]
         key = next(args[n+1].split('=',1)[1] for n, v in enumerate(args) if v == '--private-prop' and args[n+1].startswith('event_key='))
         e = event(args[0] if command == 'update' else 'e'+str(len(self.events[cal])+1), flag('--from'), flag('--to'))
-        e.update(summary=flag('--summary'), transparency=flag('--transparency'), extendedProperties={'private': {'event_key': key, 'steward': '1'}}, reminders={})  # what gog returns for --no-reminders (observed live 2026-10-16)
+        e.update(summary=flag('--summary'), transparency=flag('--transparency'), extendedProperties={'private': {'event_key': key, 'steward': '1'}}, reminders={})  # gog represents disabled reminders as an empty object.
         if '--description' in args:
             e['description'] = flag('--description')
         if command == 'update':
@@ -169,7 +172,6 @@ class CalendarBTests(unittest.TestCase):
     def test_changes_names_moved_block_old_and_new_times(self):
         from steward import messages
         self.place()
-        old = copy.deepcopy(self.gog.events['schedule'][0])
         move = next(c for c in self.plan()['candidates']['choices']
                     if c['action'] == 'place' and c['start'][11:16] == '14:00')
         result = b.choose(self.db, SETTINGS, {'schema_version': 1, 'selections': [
@@ -181,16 +183,15 @@ class CalendarBTests(unittest.TestCase):
         self.assertEqual(len(sent), 1)
         topic, text = sent[0]
         self.assertEqual(topic, 'Changes')
-        for expected in ('Focus', 'moved from', 'Mon 19 Oct 09:00 EEST–10:00 EEST',
-                         'Mon 19 Oct 14:00 EEST–15:00 EEST',
-                         'A real change'):
-            self.assertIn(expected, text)
-        self.assertNotIn(result['change_id'][:8], text)
+        self.assertIn('Mon 19 Oct 14:00–15:00 Focus · moved from 09:00\nA real change', text)
+        self.assertTrue(text.startswith('<b>Your calendar</b>'))
+        self.assertNotIn('EEST', text)
+        self.assertEqual(text.count('A real change'), 1)
+        self.assertNotIn('Steward:', text)
 
     def test_changes_names_deleted_block_and_old_times(self):
         from steward import messages
         self.dead_event()
-        old = copy.deepcopy(self.gog.events['schedule'][0])
         drop = next(c for c in self.plan()['candidates']['choices'] if c['action'] == 'drop')
         b.choose(self.db, SETTINGS, {'schema_version': 1, 'selections': [
             {'candidate_id': drop['id'], 'reason': 'Demand retired'}]},
@@ -199,8 +200,38 @@ class CalendarBTests(unittest.TestCase):
         messages.changes(self.db, NOW, lambda topic, text, **options: sent.append(text) or
                          {'message_id': 1}, SETTINGS)
         self.assertEqual(len(sent), 1)
-        for expected in ('Focus', 'deleted from', 'Mon 19 Oct 10:00 EEST–11:00 EEST', 'Demand retired'):
+        for expected in ('Focus · removed', 'Mon 19 Oct 10:00–11:00', 'Demand retired'):
             self.assertIn(expected, sent[0])
+
+    def test_reply_undo_reverses_only_the_visible_calendar_change(self):
+        from steward import messages, jobs
+        self.place()
+        sent = []
+        def send(topic, text, **options):
+            sent.append(text)
+            return len(sent)
+        messages.changes(self.db, NOW, send, SETTINGS)
+        move = next(c for c in self.plan()['candidates']['choices']
+                    if c['action'] == 'place' and c['start'][11:16] == '14:00')
+        b.choose(self.db, SETTINGS, {'schema_version': 1, 'selections': [
+            {'candidate_id': move['id'], 'reason': 'Room for the interview'}]},
+            NOW, actor='model', runner=self.gog)
+        with self.db:
+            jobs.change(self.db, 'memory write', NOW, 'model')
+        messages.changes(self.db, NOW, send, SETTINGS)
+        self.assertEqual(sent[-1], '<b>Your calendar</b>\n\nMon 19 Oct 14:00–15:00 Focus · moved from 09:00\nRoom for the interview\n\nReply &quot;undo&quot; to undo it.')
+        binding = dict(chat_id=-1, owner_user_id=2, topics={'Changes': 3})
+        update = dict(update_id=100, message=dict(message_id=200, chat={'id': -1},
+            **{'from': {'id': 2}}, text='undo', message_thread_id=3,
+            reply_to_message={'message_id': len(sent)}))
+        undo = b.undo
+        with patch('steward.calendar_b.undo', side_effect=lambda db, settings, identity, now, actor:
+                   undo(db, settings, identity, now, actor, runner=self.gog)):
+            messages.poll(self.db, NOW, SETTINGS, send, lambda offset: [update], binding)
+        self.assertIn('Restored calendar change', sent[-1])
+        self.assertEqual(self.gog.events['schedule'][0]['start']['dateTime'][11:16], '09:00')
+        messages.changes(self.db, NOW, send, SETTINGS)
+        self.assertNotIn('memory', sent[-1].lower())
 
     def test_live_demands_shared_by_briefing_and_planner(self):
         once = {k: v for k, v in SPEC.items() if k != 'count'}
@@ -252,7 +283,7 @@ class CalendarBTests(unittest.TestCase):
         self.assertEqual(self.gog.events['schedule'], [])
         self.assertEqual(b.latest(self.db, 'blocks')[0]['state'], 'deleted')
         summary = self.db.execute('SELECT summary FROM changes WHERE id=?', (result['change_id'],)).fetchone()[0]
-        self.assertIn('Focus: deleted from Mon 19 Oct 10:00 EEST–11:00 EEST', summary)
+        self.assertIn('Mon 19 Oct 10:00–11:00 Focus · removed', summary)
         self.assertNotIn('+03:00', summary)
         self.assertIn('Make progress', summary)
         self.assertEqual(self.plan()['candidates']['choices'], [])
@@ -270,11 +301,11 @@ class CalendarBTests(unittest.TestCase):
         result = b.choose(self.db, SETTINGS, {'schema_version': 1, 'selections': [
             {'candidate_id': c['id'], 'reason': 'No longer needed'} for c in drops]}, NOW, runner=self.gog)
         summary = self.db.execute('SELECT summary FROM changes WHERE id=?', (result['change_id'],)).fetchone()[0]
-        self.assertEqual(len([line for line in summary.splitlines() if 'deleted from Mon 19 Oct' in line]), 2)
+        self.assertEqual(len([line for line in summary.splitlines() if '· removed' in line]), 2)
         self.assertEqual(b.block_time('2026-10-22T09:30:00Z', '2026-10-22T11:00:00Z'),
-                         'Thu 22 Oct 12:30 EEST–14:00 EEST')
+                         'Thu 22 Oct 12:30–14:00')
         self.assertEqual(b.block_time('2026-10-24T20:30:00Z', '2026-10-25T02:30:00Z'),
-                         'Sat 24 Oct 23:30 EEST–Sun 25 Oct 04:30 EET')
+                         'Sat 24 Oct 23:30–Sun 25 Oct 04:30')
 
     def test_expired_demand_future_event_delete(self):
         self.dead_event(expired=True)
@@ -314,8 +345,8 @@ class CalendarBTests(unittest.TestCase):
         result = self.plan()
         drop = next(c for c in result['candidates']['choices'] if c['action'] == 'drop')
         key = drop['task_id']
-        forged = scheduler.choice(key, 'place', key, '2026-10-19T11:00:00+03:00', '2026-10-19T12:00:00+03:00')
-        with self.assertRaises(scheduler.InvalidPlan):
+        forged = scheduler.choice(key, 'place', drop['block_id'], '2026-10-19T11:00:00+03:00', '2026-10-19T12:00:00+03:00')
+        with self.assertRaisesRegex(scheduler.InvalidPlan, 'user deletion wins'):
             scheduler.check(result['context'], dict(result['candidates'], choices=[forged]),
                 dict(schema_version=1, selections=[dict(candidate_id=forged['id'], reason='forge')]), NOW.isoformat())
 
@@ -398,8 +429,7 @@ class CalendarBTests(unittest.TestCase):
                 cid = b.change(self.db, 'tick', NOW, 'tick')
                 return b.reconcile(self.db, b.read(SETTINGS, NOW, self.gog, self.db), SETTINGS, cid)
         self.assertEqual(len(learn()), 1)
-        # Before S3, owner-edited payloads had no description key. The first read
-        # after promotion added an empty one and told the same owner move again.
+        # Absent and empty descriptions carry the same owner-visible meaning.
         old = dict(b.latest(self.db, 'blocks')[0])
         p = json.loads(old['payload'])
         p.pop('description', None)
@@ -494,15 +524,13 @@ class CalendarBTests(unittest.TestCase):
         self.assertTrue({'focus:2026-10-18:0', 'focus:2026-10-25:0',
                          'focus:2026-11-01:0'} <= keys)
 
-    def test_undo_restores_and_created_block_deletes(self):
-        first = self.place()
+    def test_undo_move_restores_original_time_and_links_change(self):
+        self.place()
         original = self.gog.events['schedule'][0]['start']
         moved = self.choose(next(c for c in self.plan()['candidates']['choices'] if c['action']=='place' and c['start'][11:16]=='14:00'))
         result = b.undo(self.db, SETTINGS, moved['change_id'], NOW, runner=self.gog)
         self.assertEqual(self.gog.events['schedule'][0]['start'], original)
         self.assertEqual(self.db.execute('SELECT undo_of FROM changes WHERE id=?', (result['change_id'],)).fetchone()[0], moved['change_id'])
-        # A fresh fixture for undo of creation (the old change has newer versions).
-        self.gog.events['schedule'].clear()
 
     def test_undo_creation_and_deletion(self):
         first = self.place()
@@ -517,7 +545,7 @@ class CalendarBTests(unittest.TestCase):
         result = self.plan()
         c = next(c for c in result['candidates']['choices'] if c['start'][11:16]=='11:00')
         result['context']['tasks'][0]['windows'] = [{'start':'2026-10-19T15:00:00+03:00','end':'2026-10-19T18:00:00+03:00'}]
-        with self.assertRaises(scheduler.InvalidPlan):
+        with self.assertRaisesRegex(scheduler.InvalidPlan, 'outside task windows'):
             scheduler.check(result['context'], result['candidates'], {'schema_version':1,'selections':[{'candidate_id':c['id'],'reason':'forged window'}]}, NOW.isoformat())
 
     def test_failed_wake_does_not_keep_a_moment(self):
@@ -531,7 +559,7 @@ class CalendarBTests(unittest.TestCase):
             self.assertIn(name, timing.due(self.db, retry))
             self.assertIn(name, runtime.gate(self.db, retry))
             key = name + ':' + str(start.date())
-            notify(self.db, 'Today', 'result', name, key, lambda *a, **options: 1, retry)
+            notify(self.db, 'Today', name, key, lambda *a, **options: 1, retry)
             self.assertNotIn(name, timing.due(self.db, retry))
 
     def test_demand_undo(self):
@@ -562,6 +590,7 @@ class CalendarBEdgeTests(unittest.TestCase):
     def test_deadline_limits_and_stale_inventory_rejected(self):
         b.demand(self.db, 'edit', 'focus', dict({k:v for k,v in SPEC.items() if k != 'count'}, deadline='2026-10-19T12:00:00+03:00'), NOW)
         choices = self.plan()['candidates']['choices']
+        self.assertTrue(choices)
         self.assertTrue(all(c['end'][11:16] <= '12:00' for c in choices))
         self.gog.events['main'].append(event('new-meeting', choices[0]['start'], choices[0]['end']))
         with self.assertRaises(scheduler.InvalidPlan):
@@ -597,6 +626,58 @@ class CalendarBEdgeTests(unittest.TestCase):
             with self.assertRaises(StateError):
                 b.gog(dict(SETTINGS, schedule_calendar_id='second'), cmd, [], self.gog)
         self.assertEqual(self.gog.calls, [])
+
+
+class DemandCLITests(unittest.TestCase):
+    setUp = use_settings
+
+    def invoke(self, root, *args):
+        output = io.StringIO()
+        with redirect_stdout(output), patch('steward.runtime.config', return_value={}):
+            code = cli.main([*args, '--state', str(root)])
+        return code, json.loads(output.getvalue())
+
+    def test_missing_spec_names_exception(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.invoke(root, 'init-state')
+            code, result = self.invoke(root, 'block', 'demand', 'add', 'test',
+                                       '--spec', str(root / 'missing.json'))
+            self.assertEqual(code, 2)
+            self.assertEqual(result['status'], 'rejected')
+            self.assertTrue(result['error'].startswith('FileNotFoundError: '), result)
+
+    def test_malformed_spec_names_json_error_without_contents(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.invoke(root, 'init-state')
+            spec = root / 'bad.json'
+            spec.write_text('private-file-contents')
+            code, result = self.invoke(root, 'block', 'demand', 'add', 'test',
+                                       '--spec', str(spec))
+            self.assertEqual(code, 2)
+            self.assertTrue(result['error'].startswith('JSONDecodeError: '), result)
+            self.assertNotIn('private-file-contents', result['error'])
+
+    def test_demand_readd_undo_preserves_versions_and_owner_removed(self):
+        with tempfile.TemporaryDirectory() as tmp, writer(Path(tmp), initialize=True) as store:
+            db = store.db
+            b.demand(db, 'add', 'gym', SPEC, NOW)
+            with self.assertRaises(StateError):
+                b.demand(db, 'add', 'gym', SPEC, NOW)
+            cid = b.change(db, 'fixture owner deletion', NOW, 'owner')
+            b.append(db, 'blocks', dict(event_key='gym:2026-10-19:0', version=0,
+                     demand='gym', state='removed', payload='{}'), cid)
+            removed = [dict(r) for r in db.execute('SELECT * FROM blocks')]
+            b.demand(db, 'rm', 'gym', now=NOW)
+            readded = b.demand(db, 'add', 'gym', dict(SPEC, minutes=90), NOW)
+            self.assertEqual(b.latest(db, 'demands')[0]['state'], 'active')
+            b.undo(db, SETTINGS, readded['change_id'], NOW)
+            rows = [dict(r) for r in db.execute('SELECT * FROM demands ORDER BY version')]
+            self.assertEqual([r['version'] for r in rows], [1, 2, 3, 4])
+            self.assertEqual([r['state'] for r in rows], ['active', 'removed', 'active', 'removed'])
+            self.assertEqual(rows[-1]['spec_json'], rows[1]['spec_json'])
+            self.assertEqual([dict(r) for r in db.execute('SELECT * FROM blocks')], removed)
 
 
 if __name__ == '__main__':

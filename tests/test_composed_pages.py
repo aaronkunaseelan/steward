@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from fixture_mind import install
-from steward import pages, senses
+from steward import calendar_b, jobs, pages, senses
 from steward.state import writer
 from test_pages import NOW
 
@@ -54,7 +54,6 @@ class ComposedPagesTests(unittest.TestCase):
         self.assertIn('gsd: unknown (read failed: ValueError)', self.objects['/_api/pages/' + result['slug']].decode())
 
     def test_block_header_uses_today_applied_block_and_justification(self):
-        from steward import calendar_b
         spec = dict(title='Older demand title', justification='One person moves both', items=['a', 'b'])
         with self.db:
             cid = self.db.execute("INSERT INTO changes(at,actor,verb,summary) VALUES (?,?,?,?)",
@@ -76,46 +75,62 @@ class ComposedPagesTests(unittest.TestCase):
         reader.assert_not_called()
         self.assertNotIn('gsd as of', self.objects['/_api/pages/' + result['slug']].decode())
 
-    def test_your_items_hash_skip_and_stable_slug(self):
+    def test_your_list_hash_skip_and_stable_slug(self):
         sense = dict(status='ok', data=senses.gsd(NOW, lambda argv: json.dumps(self.raw)))
-        first = pages.sync_your_items(self.db, sense, NOW, self.transport)
+        first = pages.sync_your_list(self.db, sense, NOW, self.transport)
         self.assertEqual(first['state'], 'live')
         slug = first['slug']
         body = self.objects['/_api/pages/' + slug].decode()
         self.assertLess(body.index('Second'), body.index('First'))
         self.assertIn('https://notion.so/b', body)
         self.calls.clear()
-        pages.sync_your_items(self.db, sense, NOW + timedelta(minutes=20), self.transport)
+        pages.sync_your_list(self.db, sense, NOW + timedelta(minutes=20), self.transport)
         self.assertEqual(self.calls, [])
         sense['data']['waiting_on_you'][0]['title'] = 'Changed'
-        second = pages.sync_your_items(self.db, sense, NOW + timedelta(minutes=40), self.transport)
+        second = pages.sync_your_list(self.db, sense, NOW + timedelta(minutes=40), self.transport)
         self.assertEqual(second['slug'], slug)
         self.assertEqual([m for m, p in self.calls], ['PUT', 'GET'])
 
-    def test_your_items_failed_upload_retries_same_slug(self):
+    def test_your_list_failed_upload_retries_same_slug(self):
         sense = dict(status='unknown', reason='fixture failure')
-        first = pages.sync_your_items(self.db, sense, NOW, lambda *a, **k: (503, b''))
+        first = pages.sync_your_list(self.db, sense, NOW, lambda *a, **k: (503, b''))
         self.assertEqual(first['state'], 'failed')
-        second = pages.sync_your_items(self.db, sense, NOW, self.transport)
+        second = pages.sync_your_list(self.db, sense, NOW, self.transport)
         self.assertEqual(second['slug'], first['slug'])
         self.assertEqual(second['state'], 'live')
-        self.assertEqual(pages.your_items(self.db)['url'], second['url'])
+        self.assertEqual(pages.your_list(self.db)['url'], second['url'])
 
     def test_cli_prep_options(self):
         from steward.cli import main
         source = Path(self.tmp.name) / 'plan.md'
         source.write_text('One message')
+        with self.db:
+            cid = jobs.change(self.db, 'fixture', NOW)
+            calendar_b.append(self.db, 'demands', dict(name='shared', version=0, state='active',
+                spec_json=json.dumps(dict(title='Shared block', justification='Prepare together'))), cid)
+        output = io.StringIO()
         with patch('steward.cli.writer', return_value=nullcontext(SimpleNamespace(db=self.db))), \
-             patch('steward.pages.put', return_value={}) as put, patch('sys.stdout', new_callable=io.StringIO):
+             patch('steward.senses.worklist', return_value=self.raw), \
+             patch('steward.pages.request', side_effect=self.transport), \
+             patch('sys.stdout', output):
             self.assertEqual(main(['page', 'put', '--title', 'Prep', '--items', 'a,b', '--block', 'shared', str(source)]), 0)
-        self.assertEqual(put.call_args.kwargs['items'], ['a', 'b'])
-        self.assertEqual(put.call_args.kwargs['block'], 'shared')
+        report = json.loads(output.getvalue())
+        self.assertEqual(report['state'], 'live')
+        body = self.objects['/_api/pages/' + report['slug']].decode()
+        for text in ('Shared block', 'Prepare together', 'https://notion.so/a', 'https://notion.so/b', 'One message'):
+            self.assertIn(text, body)
 
-    def test_your_items_not_observed_this_tick_keeps_page(self):
-        # gsd is absent from a tick's observations when its interval has not passed: not unknown, no upload.
-        pages.sync_your_items(self.db, {}, NOW, self.transport)
+    def test_your_list_not_observed_this_tick_keeps_page(self):
+        sense = dict(status='ok', data=senses.gsd(NOW, lambda argv: json.dumps(self.raw)))
+        first = pages.sync_your_list(self.db, sense, NOW, self.transport)
+        body = self.objects['/_api/pages/' + first['slug']]
+        self.calls.clear()
+        result = pages.sync_your_list(self.db, {}, NOW + timedelta(minutes=20), self.transport)
+        self.assertEqual(result['url'], first['url'])
+        self.assertEqual(result['state'], 'live')
+        self.assertEqual(self.objects['/_api/pages/' + first['slug']], body)
         self.assertEqual(self.calls, [])
 
-    def test_your_items_failed_sense_keeps_reason(self):
-        result = pages.sync_your_items(self.db, dict(status='unknown', reason='fixture failure'), NOW, self.transport)
+    def test_your_list_failed_sense_keeps_reason(self):
+        result = pages.sync_your_list(self.db, dict(status='unknown', reason='fixture failure'), NOW, self.transport)
         self.assertIn('gsd: unknown (fixture failure)', self.objects['/_api/pages/' + result['slug']].decode())

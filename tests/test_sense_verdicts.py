@@ -1,4 +1,4 @@
-"""BR2 counterexamples; fixtures only, never production state or providers."""
+"""Stale and unknown readings stay qualified on owner-facing surfaces."""
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
@@ -7,9 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from fixture_mind import install
-from steward import calendar_b, intent, jobs, messages, pages, planner, runtime, senses, timing
-from steward.capabilities import told_check
-from steward.notify import notification_status, notify, flush
+from steward import intent, jobs, messages, senses
 from steward.state import writer
 
 
@@ -38,8 +36,7 @@ class SenseVerdictTests(unittest.TestCase):
                 sources={'x': dict(cadence_s=300, fresh_through=now.timestamp(), current=False, limit_s=600)}))},
                 now, jobs.change(st.db, 'fixture', now, 'tick'))
             self.assertEqual(senses.snapshot(st.db, now)['qmd']['verdict'], 'stale')
-            with patch('steward.intent.ticks', return_value={}):
-                doc = intent.steward_doc(st.db, now, {})
+            doc = intent.steward_doc(st.db, now, {})
             self.assertNotEqual(doc['state'], 'green', 'chain ignores the existing shared freshness verdict')
 
     def test_fallback_labels_stale_gsd_before_printing_priorities(self):
@@ -58,8 +55,9 @@ class SenseVerdictTests(unittest.TestCase):
                 self.now, jobs.change(st.db, 'fixture', self.now, 'tick'))
             self.assertEqual(senses.snapshot(st.db, self.now)['gsd']['verdict'], 'stale')
             text = messages.fallback(st.db, self.now)
-            self.assertIn('stale', text.lower(), 'fallback prints stale priorities without their shared verdict')
-
+            self.assertIn('your list stale:', text)
+            self.assertLess(text.index('Last seen, not current'), text.index('Unverified old priority'))
+            self.assertGreater(text.index('your list stale:'), text.index('Unverified old priority'))
 
     def test_chain_uses_oldest_relevant_read_and_verdict_reasons(self):
         readings = {name: dict(status='ok', verdict='fresh', reason='read succeeded', age=0)
@@ -76,10 +74,10 @@ class SenseVerdictTests(unittest.TestCase):
         self.assertIn('gsd unknown: cut unknown', hop['note'])
 
     def test_fallback_qualifies_unknown_gsd_before_cached_priority(self):
-        readings = {name: dict(status='ok', verdict='fresh', reason='read succeeded', data={})
-                    for name in senses.INTERVALS}
-        readings['gsd'].update(verdict='unknown', reason='cut unknown',
-                              data={'waiting_on_you': [dict(id='cached', title='Old priority')]})
-        with writer(self.root) as st, patch('steward.messages.senses.snapshot', return_value=readings):
+        with writer(self.root) as st:
+            senses.save(st.db, {'gsd': dict(status='ok', data=dict(digest='fixture',
+                waiting_on_you=[dict(id='cached', title='Old priority')]))},
+                self.now, jobs.change(st.db, 'fixture', self.now, 'tick'))
             text = messages.fallback(st.db, self.now)
-        self.assertLess(text.index('gsd unknown: cut unknown'), text.index('Old priority'))
+        self.assertLess(text.index('Last seen, not current'), text.index('Old priority'))
+        self.assertIn('your list unknown: gsd-steady ready_by target unknown', text)

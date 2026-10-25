@@ -1,5 +1,5 @@
 import contextlib
-from datetime import datetime
+from datetime import date, datetime, timedelta
 import io
 import json
 from pathlib import Path
@@ -31,10 +31,14 @@ class MemoryTests(unittest.TestCase):
 
     def test_caps_bytes_and_periods(self):
         self.file()
-        for layer,key in [('day','2027-02-01'),('week','2027-01-24'),('month','2027-01'),('lessons','lessons')]:
-            memory.write(self.db,layer,key,'x'*memory.CAPS[layer],now=self.now)
-            with self.assertRaises(StateError):
-                memory.write(self.db,layer,key,'é'*(memory.CAPS[layer]//2+1),now=self.now)
+        for layer, key, cap in [('day', '2027-02-01', 2048), ('week', '2027-01-24', 3072),
+                                ('month', '2027-01', 4096), ('lessons', 'lessons', 6144),
+                                ('synthesis', 'current', 2048)]:
+            with self.subTest(layer=layer):
+                memory.write(self.db, layer, key, 'x' * cap, now=self.now)
+                self.assertEqual(memory.show(self.db, layer, key)[0]['content'], 'x' * cap)
+                with self.assertRaisesRegex(StateError, 'byte cap exceeded'):
+                    memory.write(self.db, layer, key, 'é' * (cap // 2 + 1), now=self.now)
         for layer,key in [('day','2027-02-02'),('week','2027-01-31'),('month','2027-02'),('day','2026-10-15')]:
             with self.assertRaises(StateError):
                 memory.write(self.db,layer,key,'no',now=self.now)
@@ -76,19 +80,25 @@ class MemoryTests(unittest.TestCase):
         self.assertIn(('month','2026-11'),pairs)
         self.assertIn(('month','2026-10'),pairs)  # A partial launch month still closes.
         self.assertNotIn(('week','2026-10-11'),pairs)
-        ends = [memory.period('month', r['month'])[1] if r['layer'] == 'lessons' else
-                memory.period(r['layer'], r['key'])[1] for r in due]
-        self.assertEqual(ends, sorted(ends))
+        expected = [(date(2026, 10, 17) + timedelta(days=i), 0, 'day',
+                     (date(2026, 10, 16) + timedelta(days=i)).isoformat()) for i in range(46)]
+        expected += [(date.fromisoformat(key) + timedelta(days=7), 1, 'week', key)
+                     for key in ('2026-10-18', '2026-10-25', '2026-11-01', '2026-11-08',
+                                 '2026-11-15', '2026-11-22')]
+        expected += [(date(2026, 11, 1), 3, 'month', '2026-10'),
+                     (date(2026, 11, 29), 2, 'lessons', 'lessons'),
+                     (date(2026, 11, 29), 3, 'month', '2026-11')]
+        self.assertEqual([(r['layer'], r['key']) for r in due],
+                         [(layer, key) for _, _, layer, key in sorted(expected)])
         (self.files/'journal/2026-11-01.json').unlink()
         pairs={(r['layer'],r['key']) for r in memory.due(self.db,self.now)}
         self.assertIn(('month','2026-11'),pairs)  # A gap below never blocks the month.
         self.assertNotIn(('week','2026-11-01'),pairs)
 
     def test_sunday_week_due_after_saturday_filing_across_dst(self):
-        from datetime import date, timedelta
         from steward.settings import local_zone
         key = '2026-10-18'
-        expected = list(memory.days(date(2026, 10, 18), date(2026, 10, 25)))
+        expected = [f'2026-10-{day}' for day in range(18, 25)]
         def weeks(at):
             return [r for r in memory.due(self.db, datetime.fromisoformat(at)) if r['layer'] == 'week']
         self.file('2026-10-24T23:59:59+03:00')
@@ -117,7 +127,6 @@ class MemoryTests(unittest.TestCase):
         self.assertEqual(weeks('2026-10-25T06:00:00+02:00'), [])
 
     def test_nested_month_boundaries_and_dst(self):
-        from datetime import date
         from steward.settings import local_zone
         self.assertEqual(memory.period('month', '2026-10'),
                          (date(2026, 9, 27), date(2026, 11, 1)))
@@ -234,13 +243,13 @@ class MemoryTests(unittest.TestCase):
         self.assertNotIn('SYNTHETIC_SOUL_MARKER', text)
         self.assertNotIn('PROMPT', text)
         self.assertLess(text.index('## What I carry'), text.index('## Now ['))
-        with self.assertRaises(Exception):
+        with self.assertRaisesRegex(StateError, 'byte cap exceeded'):
             memory.write(self.db,'synthesis','current','x'*2049)
         memory.write(self.db,'synthesis','current','now')  # not period-bound
 
     def test_realistic_briefing_keeps_decision_inputs(self):
         # A page selects decision inputs, not arbitrary large bookkeeping fields.
-        state = dict(inbox=['owner instruction'], rituals=['orientation'],
+        state = dict(inbox=['owner instruction'], moments=['orientation'],
                      senses={'qmd': {'status': 'ok', 'data': {
                          'alive': True, 'sources': {}, 'feed': {'seen': 'x'*38000}}}},
                      interests='watcher evidence'*350, noise='x'*200000)
@@ -256,15 +265,14 @@ class MemoryTests(unittest.TestCase):
 
     def test_provocation_persisted_from_reference(self):
         self.file('2026-10-26T00:00:00+02:00')
-        with patch('steward.memory.secrets.choice',side_effect=lambda values:values[-1]) as choice, \
-             patch.object(memory.mind, 'read', return_value='Provocations (code draws one per week memory):\n99. Reference-only question') as read:
-            draw=memory.provocations(self.db,self.now)
-            again=memory.provocations(self.db,self.now)
-        self.assertEqual(draw,again)
-        self.assertEqual(choice.call_count,1)
-        self.assertEqual(draw[0]['week'],'2026-10-18')
-        self.assertIn(f"{draw[0]['number']}. {draw[0]['text']}",'99. Reference-only question')
-        read.assert_called_with('reference/provocations.md', None)
+        reference = Path(self.tmp.name) / 'mind/reference/provocations.md'
+        reference.write_text('Provocations (code draws one per week memory):\n99. Reference-only question')
+        draw = memory.provocations(self.db, self.now)
+        reference.write_text('Provocations (code draws one per week memory):\n100. A different question')
+        again = memory.provocations(self.db, self.now)
+        self.assertEqual([(r['week'], r['number'], r['text']) for r in draw],
+                         [('2026-10-18', 99, 'Reference-only question')])
+        self.assertEqual(again, draw)
 
     def test_journal_bounds_and_owner_signals(self):
         with self.db:
@@ -283,8 +291,8 @@ class MemoryTests(unittest.TestCase):
         text = 'long message é ' * 40
         with self.db:
             cid = jobs.change(self.db, 'fixture', self.now)
-            self.db.execute("INSERT INTO outbox(id,change_id,topic,kind,text,state,message_id,sent_at) VALUES (?,?,?,?,?,?,?,?)",
-                            ('message', cid, 'Today', 'result', text, 'sent', 1, self.now.isoformat()))
+            self.db.execute("INSERT INTO outbox(id,change_id,topic,text,state,message_id,sent_at) VALUES (?,?,?,?,?,?,?)",
+                            ('message', cid, 'Today', text, 'sent', 1, self.now.isoformat()))
             self.db.execute('INSERT INTO inbox VALUES (?,?,?,?,?,?,?,?)',
                             (1, 2, 6, self.now.isoformat(), text, None, 0, '[]'))
         def read(*options):
@@ -305,13 +313,18 @@ class MemoryTests(unittest.TestCase):
         self.assertEqual(full['messages'][0]['text'], text)
         self.assertEqual(full['inbox'][0]['text'], text)
 
-    def test_legacy_verbs_gone(self):
-        for verb in ['memory-range','memory-commit']:
-            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+    def test_unsupported_memory_commands_are_rejected(self):
+        before = (self.root / 'state.sqlite').read_bytes()
+        for verb in ['memory-range', 'memory-commit']:
+            error = io.StringIO()
+            with self.subTest(verb=verb), contextlib.redirect_stderr(error), self.assertRaises(SystemExit) as raised:
                 cli.main([verb])
-        self.assertFalse(self.db.execute("SELECT 1 FROM sqlite_master WHERE name='memory_versions'").fetchone())
+            self.assertEqual(raised.exception.code, 2)
+            self.assertIn('invalid choice', error.getvalue())
+            self.assertIn(verb, error.getvalue())
+        self.assertEqual((self.root / 'state.sqlite').read_bytes(), before)
 
-    def test_experiments_closed_or_undone(self):
+    def test_experiments_disappear_when_closed(self):
         with self.db:
             cid=jobs.change(self.db,'experiment: hypothesis; measure; ends 2027-02-08',self.now)
         self.assertEqual(memory.experiments(self.db)[0]['ends'],'2027-02-08')
@@ -352,6 +365,24 @@ class MemoryTests(unittest.TestCase):
         with patch('sys.stdin',io.StringIO('a fixture lesson')),contextlib.redirect_stdout(output):
             self.assertEqual(cli.main(['memory','write','lessons','--state',str(root)]),0)
         identity=json.loads(output.getvalue())['change_id']
-        for args in [['memory','show','lessons'],['memory','due'],['journal','--day','2026-10-16'],['undo',identity]]:
-            with contextlib.redirect_stdout(io.StringIO()):
-                self.assertEqual(cli.main([args[0],'--state',str(root)]+args[1:]),0)
+        path = root / 'state.sqlite'
+        before = path.read_bytes()
+        queries = [['memory', 'show', 'lessons'], ['memory', 'due'],
+                   ['journal', '--day', '2026-10-16']]
+        reports = []
+        with patch('steward.cli.writer', side_effect=AssertionError('read-only query')):
+            for args in queries:
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    self.assertEqual(cli.main([*args, '--state', str(root)]), 0)
+                reports.append(json.loads(output.getvalue()))
+        self.assertEqual(reports[0][0]['content'], 'a fixture lesson')
+        self.assertEqual(reports[1], [])
+        self.assertEqual(reports[2]['messages'], [])
+        self.assertEqual(path.read_bytes(), before)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.main(['undo', identity, '--state', str(root)]), 0)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(cli.main(['memory', 'show', 'lessons', '--state', str(root)]), 0)
+        self.assertEqual(json.loads(output.getvalue()), [])

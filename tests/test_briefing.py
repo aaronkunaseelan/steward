@@ -53,7 +53,7 @@ class PageTests(unittest.TestCase):
             with patch('steward.mind.read', return_value='stable'):
                 receipt = {}
                 page = memory.briefing(store.db, NOW, {'inbox': ['important']}, receipt=receipt)
-                headings = ['Now', 'Inbox', 'Calendar', 'Movement', 'Blocks', 'Your items', 'Waiting on others', 'Deadlines',
+                headings = ['Now', 'Inbox', 'Calendar', 'Movement', 'Blocks', 'Your list', 'Waiting on others', 'Deadlines',
                             'Compute', 'Finds waiting', 'Health', 'Place', 'Machine and qmd']
                 positions = [page.index('## ' + h + ' [') for h in headings]
                 self.assertEqual(positions, sorted(positions))
@@ -75,7 +75,7 @@ class DayCloseTests(unittest.TestCase):
         from pathlib import Path
         import tempfile
         with tempfile.TemporaryDirectory() as root, writer(Path(root), initialize=True) as store:
-            page = memory.briefing(store.db, NOW, {'rituals': ['day_close']})
+            page = memory.briefing(store.db, NOW, {'moments': ['day_close']})
         for title in ('Done today', 'Next two days', 'Horizon', 'Long form'):
             self.assertIn('## Day close — ' + title, page)
         self.assertIn('unknown: gsd done not supplied', page)
@@ -113,9 +113,9 @@ class DayCloseTests(unittest.TestCase):
             cid = jobs.change(store.db, 'block choose', NOW)
             store.db.execute('UPDATE changes SET summary=? WHERE id=?',
                              ('Moved movement to tomorrow. ' + 'detail ' * 100, cid))
-            state = {'rituals': []}
+            state = {'moments': []}
             normal = memory.briefing(store.db, NOW, state)
-            evening = memory.briefing(store.db, NOW, dict(state, rituals=['day_close']))
+            evening = memory.briefing(store.db, NOW, dict(state, moments=['day_close']))
         extra = evening.split('## Day close — Done today', 1)[1].split('## Health', 1)[0]
         for forbidden in ('tick', 'release', 'mind commit', cid, 'change id:', 'undo of:', 'actor:', 'subject:'):
             self.assertNotIn(forbidden, extra)
@@ -138,7 +138,7 @@ class DayCloseTests(unittest.TestCase):
             jobs.append(store.db, 'blocks', dict(event_key='removed-block', demand='movement',
                         state='deleted', payload=json.dumps({'start': NOW.isoformat(),
                         'end': (NOW + timedelta(hours=1)).isoformat()})), cid)
-            state = dict(rituals=['day_close'], senses={'gsd': dict(status='ok', at=NOW.isoformat(),
+            state = dict(moments=['day_close'], senses={'gsd': dict(status='ok', at=NOW.isoformat(),
                          data={'done': [], 'horizon_deadlines': []}), 'calendars': dict(status='ok',
                          at=NOW.isoformat(), data={'events': [], 'from': NOW.isoformat(),
                                                   'to': (NOW + timedelta(days=7)).isoformat()})})
@@ -152,7 +152,7 @@ class DayCloseTests(unittest.TestCase):
 
     def test_horizon_keeps_calendar_events_beyond_next_two_days(self):
         from steward.briefing import render
-        state = dict(rituals=['day_close'], senses={'calendars': dict(status='ok', at=NOW.isoformat(),
+        state = dict(moments=['day_close'], senses={'calendars': dict(status='ok', at=NOW.isoformat(),
                      data={'events': [dict(summary='trip', start={'date': '2026-10-24'},
                                            end={'date': '2026-10-25'})], 'to': '2026-10-26T00:00:00+03:00'})})
         self.assertIn('trip', render(state, NOW, {}))

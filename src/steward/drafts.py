@@ -81,7 +81,9 @@ def create(db, settings, body, reply_to=None, reply_all=False, to=None, subject=
     with db:
         db.execute("UPDATE drafts SET draft_id=?,url=?,state='created' WHERE change_id=?", (identity, url, cid))
         db.execute('UPDATE changes SET summary=? WHERE id=?', (summary, cid))
-    notify(db, 'Changes', 'change', summary + ' · undo ' + cid, 'draft:' + cid,
+    from .messages import changes_text
+    row = db.execute('SELECT * FROM changes WHERE id=?', (cid,)).fetchone()
+    notify(db, 'Changes', changes_text([(row, summary)]), 'draft:' + cid,
            sender, now, actor, settings=settings, change_id=cid, related_changes=(cid,))
     return dict(change_id=cid, draft_id=identity, url=url, status='created')
 

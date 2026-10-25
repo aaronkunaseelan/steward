@@ -22,7 +22,7 @@ RUN = 'a' * 32
 
 
 def validate(case, schema, value):
-    """Reference subset plus the draft's bounds, patterns and exact-key constraints."""
+    """Validate independent schema bounds, patterns and exact-key constraints."""
     case.assertEqual(issues(schema, value), [])
     if isinstance(value, dict):
         if schema.get('additionalProperties') is False:
@@ -137,7 +137,7 @@ print(json.dumps(json.loads(pathlib.Path(os.environ['TEST_TTY_MAP']).read_text()
                     'content': [{'type': 'output_text', 'text': 'Final'}]})
                 stream.write(json.dumps(row) + '\n')
                 stream.write('{partial')
-        # An already complete T2 archive with no end must be repaired too.
+        # A complete archive still needs an evidence-backed completion time.
         directory = self.data / 'wakes/7'
         archive.wake(self.data, self.wake_row, now=NOW, home=self.home)
         meta_path = directory / 'transcript-meta.json'
@@ -179,7 +179,7 @@ print(json.dumps(json.loads(pathlib.Path(os.environ['TEST_TTY_MAP']).read_text()
         self.assertFalse(archive.wake(self.data, row, now=NOW, home=self.home)['complete'])
         with self.assertRaises(StateError):
             transcripts.document(self.data, 'wake-7')
-        # T2 could mark an empty archive complete with no evidence of its end.
+        # Reject complete metadata when no completion evidence exists.
         path = self.data / 'wakes/7/transcript-meta.json'
         old = json.loads(path.read_text())
         old['complete'] = True
@@ -244,7 +244,7 @@ print(json.dumps(json.loads(pathlib.Path(os.environ['TEST_TTY_MAP']).read_text()
                 self.assertEqual(cli.main(['transcript', identity, '--json', '--data', str(self.data)]), 0)
             doc = json.loads(out.getvalue())
             validate(self, load('steward.transcript.v1'), doc)
-            self.assertLessEqual(len(out.getvalue().encode()), transcripts.LIMIT)
+            self.assertLessEqual(len(out.getvalue().encode()), 1_000_000)
             turns = doc['sessions'][0]['turns']
             self.assertEqual([t['i'] for t in turns], list(range(len(turns))))
             self.assertEqual([t['type'] for t in turns], ['text', 'thinking', 'text', 'tool_call', 'tool_result', 'text']
@@ -321,7 +321,7 @@ print(json.dumps(json.loads(pathlib.Path(os.environ['TEST_TTY_MAP']).read_text()
         validate(self, load('steward.transcript.v1'), doc)
         serialized = transcripts.compact(doc)
         self.assertTrue(doc['truncated'])
-        self.assertLessEqual(len(serialized.encode()), transcripts.LIMIT - 1)
+        self.assertLessEqual(len(serialized.encode()), 999_999)
         for value in (secret, 'hunter2', 'secret-value', 'abcdef123456'):  # gitleaks:allow
             self.assertNotIn(value, serialized)
         self.assertIn('[REDACTED]', serialized)
@@ -340,7 +340,7 @@ print(json.dumps(json.loads(pathlib.Path(os.environ['TEST_TTY_MAP']).read_text()
         self.assertEqual(turns[0]['text'], '')
         self.assertTrue(turns[0]['truncated'])
         self.assertEqual(turns[-1]['text'], 'Keep the newest answer.')
-        self.assertLessEqual(len(transcripts.compact(doc).encode()) + 1, transcripts.LIMIT)
+        self.assertLessEqual(len(transcripts.compact(doc).encode()) + 1, 1_000_000)
 
     def test_session_limit_and_malformed_trailing_line(self):
         directory, manifest = self.manifest([{'session': f'synthetic-{n}', 'agent': 'claude'} for n in range(9)])
@@ -363,7 +363,10 @@ print(json.dumps(json.loads(pathlib.Path(os.environ['TEST_TTY_MAP']).read_text()
         archive.wake(self.data, self.wake_row, now=NOW, home=self.home)
         doc = transcripts.document(self.data, 'wake-7')
         text = doc['sessions'][0]['turns'][0]['text']
-        self.assertEqual(transcripts.compact(json.loads(text)), text)
+        expected = dict(command='PASSWORD="[REDACTED]" curl -H "Authorization: Bearer [REDACTED]"',
+                        api_key='[REDACTED]', nested={'token': '[REDACTED]'})
+        self.assertEqual(json.loads(text), expected)
+        self.assertEqual(text, json.dumps(expected, ensure_ascii=False, separators=(',', ':')))
         for secret in ('hunter2', 'abcdef123', 'synthetic-secret', 'another-secret'):
             self.assertNotIn(secret, text)
 

@@ -28,9 +28,7 @@ class SchedulerTests(unittest.TestCase):
         candidates["choices"].append(item)
         return candidates, [{"candidate_id": item["id"], "reason": "test"}]
 
-    def test_deterministic_pipeline_pinned_manual_deleted(self):
-        self.assertEqual(self.data["timezone"], "Europe/Athens")
-        self.assertIs(self.data["timezone_confirmed"], True)
+    def test_deterministic_plan_preserves_existing_blocks_and_deletions(self):
         candidates = generate(self.data)
         self.assertEqual(candidates, generate(copy.deepcopy(self.data)))
         selections = [self.pick(candidates)]
@@ -81,15 +79,16 @@ class SchedulerTests(unittest.TestCase):
             check(data, c, {"schema_version": 1, "selections": [self.pick(c)]}, data["now"])
 
     def test_unknown_expired_unconfirmed_and_bounds(self):
-        for key, value in (("external_state", "unknown"), ("timezone_confirmed", False),
-                           ("deadline", self.data["now"]),
-                           ("timezone", "fake/zone")):
+        for key, value, reason in (("external_state", "unknown", "unknown external state"),
+                                   ("timezone_confirmed", False, "confirmed timezone required"),
+                                   ("deadline", self.data["now"], "expired or unbounded wake deadline"),
+                                   ("timezone", "fake/zone", "invalid IANA zone")):
             data = copy.deepcopy(self.data)
             data[key] = value
-            with self.subTest(key=key), self.assertRaises(InvalidPlan):
+            with self.subTest(key=key), self.assertRaisesRegex(InvalidPlan, reason):
                 generate(data)
         self.data["tasks"][1]["minutes"] = 241
-        with self.assertRaises(InvalidPlan):
+        with self.assertRaisesRegex(InvalidPlan, "invalid integer bound"):
             generate(self.data)
 
     def test_malicious_choices_schema_refs_duplicates(self):
@@ -119,17 +118,17 @@ class SchedulerTests(unittest.TestCase):
 
     def test_independent_overlap_horizon_duration_deadline_deletion_checks(self):
         cases = [
-            ("read", "2026-10-24T09:00:00+03:00", "2026-10-24T09:30:00+03:00"), # busy
-            ("read", "2026-10-24T11:00:00+03:00", "2026-10-24T11:30:00+03:00"), # manual
-            ("read", "2026-10-27T09:00:00+02:00", "2026-10-27T09:30:00+02:00"), # horizon
-            ("read", "2026-10-24T10:00:00+03:00", "2026-10-24T10:15:00+03:00"), # duration
-            ("read", "2026-10-25T09:00:00+02:00", "2026-10-25T09:30:00+02:00"), # due
-            ("deleted", "2026-10-24T10:00:00+03:00", "2026-10-24T10:30:00+03:00"),
-            ("read", "2026-10-24T08:00:00+03:00", "2026-10-24T08:30:00+03:00"), # outside working windows
+            ("read", "2026-10-24T09:00:00+03:00", "2026-10-24T09:30:00+03:00", "checked plan overlap"),
+            ("read", "2026-10-24T11:00:00+03:00", "2026-10-24T11:30:00+03:00", "checked plan overlap"),
+            ("read", "2026-10-27T09:00:00+02:00", "2026-10-27T09:30:00+02:00", "placement outside mutable horizon"),
+            ("read", "2026-10-24T10:00:00+03:00", "2026-10-24T10:15:00+03:00", "invalid duration"),
+            ("read", "2026-10-25T09:00:00+02:00", "2026-10-25T09:30:00+02:00", "task deadline exceeded"),
+            ("deleted", "2026-10-24T10:00:00+03:00", "2026-10-24T10:30:00+03:00", "user deletion wins"),
+            ("read", "2026-10-24T08:00:00+03:00", "2026-10-24T08:30:00+03:00", "outside working windows"),
         ]
-        for task, start, end in cases:
+        for task, start, end, reason in cases:
             c, selections = self.forged(choice(task, "place", None, start, end))
-            with self.subTest(task=task, start=start), self.assertRaises(InvalidPlan):
+            with self.subTest(task=task, start=start), self.assertRaisesRegex(InvalidPlan, reason):
                 self.checked(c, selections)
 
     def test_pinned_elapsed_outside_horizon_immutable(self):
@@ -144,7 +143,7 @@ class SchedulerTests(unittest.TestCase):
             self.assertEqual([x["action"] for x in c["choices"] if x["task_id"] == "write"], ["keep"])
             forged = choice("write", "drop", "old-1")
             c["choices"].append(forged)
-            with self.subTest(mode=mode), self.assertRaises(InvalidPlan):
+            with self.subTest(mode=mode), self.assertRaisesRegex(InvalidPlan, "immutable block change"):
                 check(data, c, {"schema_version": 1, "selections": [{"candidate_id": forged["id"], "reason": "test"}]}, data["now"])
 
     def test_move_reason_and_omission(self):
@@ -153,7 +152,7 @@ class SchedulerTests(unittest.TestCase):
         move = self.pick(c, task="write")
         unchanged = self.checked(c, [])
         self.assertIn(self.data["blocks"][-1], unchanged["blocks"])
-        with self.assertRaises(InvalidPlan):
+        with self.assertRaisesRegex(InvalidPlan, "schedule change needs reason"):
             self.checked(c, [{**move, "reason": " "}])
         plan = self.checked(c, [move])
         self.assertEqual(len(plan["changes"]), 1)
@@ -162,7 +161,6 @@ class SchedulerTests(unittest.TestCase):
         self.assertIn("write", dropped["pending_task_ids"])
 
     def test_candidate_bound_and_conflicting_new_selections(self):
-        c = generate(self.data)
         # Two tasks at the same valid slot cannot pass the final whole-plan check.
         self.data["tasks"].append({"id": "extra", "minutes": 30,
                                   "deadline": "2026-10-24T12:00:00+03:00"})

@@ -61,9 +61,9 @@ def main():
             text += " Tracking shows it as final; I'll stop watching."
         elif s.get("contextData", {}).get("partner") and args.partner_label and args.partner_url:
             text += ' ' + args.partner_label.format(code=code) + ': [' + args.partner_link_label + '](' + args.partner_url + ')'
-        sent = subprocess.run([STEWARD, "notify", "--topic", "Talk", "--kind", "result",
+        sent = subprocess.run([STEWARD, "notify", "--topic", "Talk",
                                "--deliver", "immediate", "--told-key", key, text],
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, env=dict(os.environ, STEWARD_ACTOR='model'))
         print(sent.stdout, sent.stderr)
         record["notified"] = sent.returncode == 0
 

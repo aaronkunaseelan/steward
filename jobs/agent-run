@@ -47,7 +47,7 @@ Authority: All Steward changes use these exact verbs:
 All capabilities may read steward state (interests); pull told checks as needed, not a preloaded key list.
 Code collects and renders; you judge relevance, priority and wording. Unknown is not a negative result.
 No improvised scripts; when a needed fact has no tool verb, write a record line {{"kind":"unestablished","what":…,"command_that_would_answer":…}} and carry on.
-{command} notify --topic Finds --kind result --deliver {spec['deliver']} --told-key KEY TEXT
+{command} notify --topic Finds --deliver {spec['deliver']} --told-key KEY TEXT
 Write links as [label](https://…) with a short descriptive label; bare URLs are refused. Records still retain full source URLs.
 Read-only qmd and research CLI/API calls described below are allowed. No other Steward verbs beyond state and those above unless this capability has memory context: then journal, memory show|due|recall|write (day, week, month, lessons, synthesis), job edit|pause|resume|rm, run plan, interest rm, block demand edit|rm, undo and notify Today are also allowed.
 {permissions}

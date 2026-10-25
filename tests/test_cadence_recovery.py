@@ -1,15 +1,11 @@
-"""BR2 counterexamples; fixtures only, never production state or providers."""
+"""Overdue cadence recovery preserves scheduling constraints."""
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
-
 from fixture_mind import install
-from steward import calendar_b, intent, jobs, messages, pages, planner, runtime, senses, timing
-from steward.capabilities import told_check
-from steward.notify import notification_status, notify, flush
+from steward import jobs, planner
 from steward.state import writer
 
 
@@ -22,7 +18,6 @@ class CadenceRecoveryTests(unittest.TestCase):
         with writer(self.root, initialize=True):
             pass
         self.now = datetime(2026, 10, 21, 4, tzinfo=timezone.utc)
-        self.sent = []
 
     def test_overdue_every_job_has_a_recovery_slot(self):
         from fixture_mind import command

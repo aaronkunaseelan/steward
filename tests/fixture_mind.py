@@ -8,9 +8,12 @@ SOURCE = Path(__file__).resolve().parents[1]
 TEST_CONFIG = (Path(__file__).parent / 'fixtures/config.toml').read_text()
 TEST_ZONE = zone(tomllib.loads(TEST_CONFIG)['timezone'])
 from unittest.mock import patch
+from fixture_io import seal
 
 
 def use_settings(case):
+    seal(case)
+    case.enterContext(patch.dict(os.environ, STEWARD_ACTOR='owner'))
     from steward.settings import _active
     token = _active.set(tomllib.loads(TEST_CONFIG))
     case.addCleanup(_active.reset, token)
@@ -68,7 +71,7 @@ def install(case, root):
     guard = patch('steward.pages.request', side_effect=pages_request)
     guard.start()
     case.addCleanup(guard.stop)
-    # Explicit settings={} used by older tests still resolve this fixture.
+    # Explicit settings={} must resolve the fixture mind, not the host default.
     from steward import mind as module
     original = module.directory
     guard = patch.object(module, 'directory', side_effect=lambda settings=None: mind if settings == {} or (settings is not None and 'mind_dir' not in settings) else original(settings))

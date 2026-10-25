@@ -25,7 +25,7 @@ class ExtraRunTests(unittest.TestCase):
                                    at.isoformat(), now=NOW)
             return jobs.get(st.db, 'runs', result['run_id'])
 
-    def extra(self, actor='supervisor'):
+    def extra(self, actor='maintenance'):
         with writer(self.root) as st:
             result = jobs.run_verb(st.db, 'now', 'test', 'daytime check', now=NOW, actor=actor)
             return jobs.get(st.db, 'runs', result['run_id'])
@@ -45,7 +45,7 @@ class ExtraRunTests(unittest.TestCase):
     def test_cli_non_model_extra_preserves_ready_by_reservation(self):
         self.add(needs={'ready_by': ['05:00']}, min_gap='20h', max_minutes=5)
         reservation = self.reserve()
-        for actor in ('owner', 'supervisor'):
+        for actor in ('owner', 'maintenance'):
             with self.subTest(actor=actor):
                 output = io.StringIO()
                 with patch.dict('os.environ', STEWARD_ACTOR=actor), patch('steward.jobs.now_utc', return_value=NOW), redirect_stdout(output):
@@ -102,7 +102,7 @@ class ExtraRunTests(unittest.TestCase):
             self.assertFalse(jobs.is_extra(planned[0]))
             self.assertEqual(jobs.instant(planned[0]['planned_for']), due + timedelta(days=1))
 
-    def test_extra_does_not_serve_ready_by_or_consume_its_retry(self):
+    def test_extra_success_does_not_serve_ready_by(self):
         self.add(needs={'ready_by': ['17:00']}, max_minutes=5)
         reservation = self.reserve(NOW + timedelta(hours=1, minutes=20))
         extra = self.extra()
@@ -118,7 +118,9 @@ class ExtraRunTests(unittest.TestCase):
             self.assertEqual(planned[0]['planned_for'], reservation['planned_for'])
 
     def test_min_gap_and_cadence_ignore_extra_but_measurements_include_it(self):
-        for needs in ({'every': {'min': '4h', 'max': '1d'}}, {'max_staleness': '24h'}):
+        for needs, deadline, placement in (
+                ({'every': {'min': '4h', 'max': '1d'}}, NOW + timedelta(hours=1), NOW),
+                ({'max_staleness': '24h'}, NOW + timedelta(hours=1, minutes=5), NOW + timedelta(hours=1))):
             with self.subTest(needs=needs):
                 spec = dict(needs=needs, min_gap='20h', max_minutes=5, heavy=False)
                 job = dict(name='test', spec_json=json.dumps(spec))
@@ -128,9 +130,9 @@ class ExtraRunTests(unittest.TestCase):
                              ended_at=(NOW - timedelta(minutes=55)).isoformat(), spec_json='{"_extra":true}')
                 runs = [regular, extra]
                 self.assertEqual(planner.gap_floor(runs, 'test', spec), NOW - timedelta(hours=3))
-                self.assertEqual(planner.cadence_deadline('test', spec, runs), planner.cadence_deadline('test', spec, [regular]))
-                self.assertEqual(runtime.placement(job, runs, NOW), runtime.placement(job, [regular], NOW))
-                self.assertEqual(planner.rule(job, runs, NOW, NOW), planner.rule(job, [regular], NOW, NOW))
+                self.assertEqual(planner.cadence_deadline('test', spec, runs), deadline)
+                self.assertEqual(runtime.placement(job, runs, NOW)[0], placement)
+                self.assertIsNone(planner.rule(job, runs, NOW, NOW))
                 self.assertEqual(planner.cost(runs, 'test')['run_count'], 2)
 
     def test_extra_heavy_exclusion_at_reservation_and_dispatch(self):
@@ -148,6 +150,19 @@ class ExtraRunTests(unittest.TestCase):
         self.assertIn(other['run_id'], self.tick()['started'])
         with self.assertRaisesRegex(StateError, 'heavy runs overlap'):
             self.extra()
+        with writer(self.root) as st:
+            self.assertEqual(jobs.get(st.db, 'runs', reservation['run_id']), reservation)
+
+    def test_extra_heavy_overlap_uses_expected_duration_not_runaway_limit(self):
+        self.add(heavy=True, max_minutes=60)
+        reservation = self.reserve(NOW + timedelta(hours=2))
+        first = self.extra()
+        self.assertEqual(self.tick()['started'], [first['run_id']])
+        self.finish(first['run_id'], NOW, minutes=15)
+        self.tick(NOW + timedelta(minutes=20))
+        with writer(self.root) as st:
+            self.assertEqual(jobs.execution_profile(st.db, 'test')['limit_minutes'], 150)
+        self.assertTrue(jobs.is_extra(self.extra()))
         with writer(self.root) as st:
             self.assertEqual(jobs.get(st.db, 'runs', reservation['run_id']), reservation)
 
@@ -204,6 +219,6 @@ class ExtraRunTests(unittest.TestCase):
         self.add(needs={'ready_by': ['05:00']})
         with writer(self.root) as st:
             with self.assertRaisesRegex(StateError, 'ready_by'):
-                jobs.run_verb(st.db, 'now', 'test', 'outside window', now=NOW, actor='supervisor')
+                jobs.run_verb(st.db, 'now', 'test', 'outside window', now=NOW, actor='maintenance')
             result = jobs.run_verb(st.db, 'now', 'test', 'owner override', now=NOW)
             self.assertFalse(jobs.is_extra(jobs.get(st.db, 'runs', result['run_id'])))

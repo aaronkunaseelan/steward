@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from fixture_mind import SOURCE, install, use_settings
+from fixture_mind import install, use_settings
 from steward import briefing, memory, runtime
 from steward.cli import main
 from steward.state import writer
@@ -18,12 +18,44 @@ NOW = datetime(2026, 10, 23, 9, tzinfo=timezone.utc)
 class IndexTests(unittest.TestCase):
     setUp = use_settings
 
-    def test_fixed_prompt_explains_section_pull(self):
-        prompt = (SOURCE / 'prompts/wake.md').read_text()
+    def test_harness_instructions_explain_section_pull(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            install(self, root)
+            with writer(root / 'state', initialize=True):
+                pass
+            with patch('steward.runtime.gate', return_value='owner message'), \
+                 patch('steward.runtime.archive_attempt', return_value='pending'), \
+                 patch('steward.runtime.harness', return_value='fixture-run') as harness:
+                runtime.wake(root / 'state', clock=lambda: NOW, runner=harness,
+                             settings={'wake_model': True}, sender=lambda *a, **kw: {'message_id': 1})
+            argv = harness.call_args.args[0]
+            prompt = argv[argv.index('--append-system-prompt') + 1]
         self.assertIn('steward briefing "SECTION"', prompt)
         self.assertIn('steward briefing --list', prompt)
         self.assertIn('required for', prompt)
         self.assertIn('steward.job.v2', prompt)
+
+    def test_model_is_directed_to_pull_planning_instead_of_preloading_programme(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mind = install(self, root)
+            planning = mind / 'reference/planning.md'
+            planning.write_text('PRIVATE_PROGRAMME: 90-minute slots at 12:30–18:00')
+            with writer(root / 'state', initialize=True):
+                pass
+            with patch('steward.runtime.gate', return_value='owner message'), \
+                 patch('steward.runtime.archive_attempt', return_value='pending'), \
+                 patch('steward.runtime.harness', return_value='fixture-run') as harness:
+                runtime.wake(root / 'state', clock=lambda: NOW, runner=harness,
+                             settings={'wake_model': True}, sender=lambda *a, **kw: 1)
+            argv = harness.call_args.args[0]
+            instructions = argv[argv.index('--append-system-prompt') + 1]
+            index = Path(argv[argv.index('-C') + 2]).read_text()
+        self.assertIn('planning.md before scheduling', instructions)
+        self.assertNotIn('PRIVATE_PROGRAMME', instructions + index)
+        self.assertNotIn('90-minute', instructions + index)
+        self.assertNotIn('12:30–18:00', instructions + index)
 
     def test_changed_unchanged_unknown_and_now(self):
         state = {'gate_reason': 'owner message', 'inbox': ['hello'], 'inbound_poll': 'ok', 'senses': {
@@ -47,21 +79,42 @@ class IndexTests(unittest.TestCase):
         self.assertIn('unknown (', again)
 
     def test_observation_time_alone_is_unchanged(self):
-        def info(verdict, at):
-            text = '# x\n\n## Calendar [' + verdict + ']\ncalendars: ' + verdict + ' — ok; as of ' + at + '\n- event: A\n'
-            start = text.index('\n## Calendar')
-            return briefing.section_info(text, dict(section_spans={'Calendar': dict(start=start, end=len(text))}))
-        before = info('fresh', '10:00')
-        self.assertEqual(before['Calendar']['digest'], info('fresh', '10:20')['Calendar']['digest'])
-        self.assertNotEqual(before['Calendar']['digest'], info('stale', '10:20')['Calendar']['digest'])
+        def page(verdict, at, event='A'):
+            text = ('## Now [fresh]\nWake now.\n\n## Calendar [' + verdict + ']\ncalendars: ' +
+                    verdict + ' — ok; as of ' + at + '\n- event: ' + event + '\n')
+            start = text.index('## Calendar')
+            info = briefing.section_info(text, dict(section_spans={
+                'Now': dict(start=0, end=start), 'Calendar': dict(start=start, end=len(text))}))
+            return text, info
+        _, before = page('fresh', '10:00')
+        for verdict, event, expected in [('fresh', 'A', 'unchanged'),
+                                         ('stale', 'A', 'changed'), ('fresh', 'B', 'changed')]:
+            with self.subTest(verdict=verdict, event=event):
+                text, info = page(verdict, '10:20', event)
+                index = briefing.wake_index(text, info, before, 'fixture', [])
+                self.assertRegex(index, r'Calendar: \d+ lines · ' + expected + r'\n')
 
-    def test_ritual_names_sections(self):
+    def test_moment_names_sections(self):
         receipt = {}
-        text = briefing.render({'rituals': ['orientation', 'day_close']}, NOW, receipt)
+        text = briefing.render({'moments': ['orientation', 'day_close']}, NOW, receipt)
         index = briefing.wake_index(text, briefing.section_info(text, receipt), {},
-                                    'ritual', ['orientation', 'day_close'])
+                                    'moment', ['orientation', 'day_close'])
         self.assertRegex(index, r'Calendar: .*required for orientation, day_close')
         self.assertRegex(index, r'Day close — Done today: .*required for day_close')
+
+    def test_every_wake_carries_the_synthesis_inline(self):
+        for synthesis, expected in [('Top of mind\n1. Hiring: second interview Mon 14:45.', None),
+                                    (None, '(no synthesis yet: consolidation writes the first one)')]:
+            with self.subTest(synthesis=synthesis), tempfile.TemporaryDirectory() as tmp:
+                with writer(Path(tmp) / 'state', initialize=True) as store:
+                    if synthesis:
+                        memory.write(store.db, 'synthesis', 'current', synthesis)
+                    receipt = {}
+                    text = memory.briefing(store.db, NOW, {}, receipt)
+                index = briefing.wake_index(text, briefing.section_info(text, receipt), {}, 'moment', [])
+                self.assertIn('## What I carry\n' + (synthesis or expected), index)
+                self.assertLess(index.index('## What I carry'), index.index('## Sections'))
+                self.assertRegex(index, r'- What I carry: \d+ lines')
 
     def test_rendered_boundaries_do_not_treat_memory_headings_as_sections(self):
         with tempfile.TemporaryDirectory() as tmp:

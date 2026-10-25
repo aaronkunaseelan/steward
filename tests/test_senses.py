@@ -50,7 +50,7 @@ class SensesTests(unittest.TestCase):
         result = self.collect()
         self.assertEqual(result['calendars']['status'], 'unknown')
         self.assertIn('configuration', result['calendars']['reason'])
-        # gsd now owns the store path; the consumer needs no database configuration.
+        # The producer owns its store path; the consumer needs no database configuration.
         self.assertEqual(result['gsd']['status'], 'unknown')
         self.assertIn('read failed', result['gsd']['reason'])
 
@@ -100,7 +100,7 @@ class SensesTests(unittest.TestCase):
         events.reverse()
         events[0]['description'] = 'changed private'
         self.assertEqual(first['digest'], read()['digest'])
-        # Google bumps `updated` with nothing else changed (7 of 9 live events on 17-18 Oct).
+        # Provider metadata alone is not a calendar change.
         events[0]['updated'] = '2026-10-16T11:59:00Z'
         self.assertEqual(first['digest'], read()['digest'])
         # Steward's own block moving is not news; an owner edit to it arrives as learning.
@@ -123,7 +123,7 @@ class SensesTests(unittest.TestCase):
         self.assertEqual([d['id'] for d in first['deadlines']], ['overdue', 'boundary'])
         self.assertEqual(first['deadlines'][0]['project'], 'Fixture project')
         self.assertEqual(first['past_due_older'], {'count': 0, 'oldest_due_at': None})
-        self.assertEqual(first['counts']['state']['ready'], 2)  # gsd D29: the awaiting state became ready
+        self.assertEqual(first['counts']['state']['ready'], 2)
         self.assertEqual(first['counts']['next_actor']['external'], 1)
         self.assertEqual(first['cut']['until'], payload['cut']['until'])
         self.assertEqual(first['cut_age_seconds'], 21600)
@@ -209,7 +209,7 @@ class SensesTests(unittest.TestCase):
             state = jobs.snapshot(store.db, now=NOW + timedelta(seconds=20))
         self.assertEqual(set(state['senses']), set(senses.INTERVALS))
         self.assertTrue(all(v['age'] == 20 for v in state['senses'].values()))
-        self.assertEqual(set(self.collect()), {'machine', 'sol', 'gsd'})  # gsd every tick (F-64)
+        self.assertEqual(set(self.collect()), {'machine', 'sol', 'gsd'})
 
     def test_manual_run_landings_are_not_gsd_events(self):
         gsd = lambda d: {'gsd': dict(status='ok', data={'digest': d})}
@@ -265,7 +265,7 @@ class SensesTests(unittest.TestCase):
         self.assertEqual(tick(40), 1)
         self.assertEqual(tick(60), 0)
 
-    def test_health_flip_and_bounded_history(self):
+    def test_machine_read_failure_does_not_wake_and_history_is_bounded(self):
         self.save({'machine': dict(status='ok', data={})})
         self.save({'machine': dict(status='unknown', reason='read failed')})
         with writer(self.root) as store:
@@ -428,13 +428,17 @@ class SensesTests(unittest.TestCase):
         self.write_rollout('rollout-a.jsonl', '2026-10-16T11:00:00Z', {'used_percent': 12, 'window_minutes': 10080, 'resets_at': reset})
         self.assertEqual(self.collect()['sol']['data']['burn_percent_per_hour'], 2)
 
-    def test_default_runner_enforces_timeout_and_hides_stderr(self):
+    def test_command_adapter_bounds_reads_and_hides_provider_errors(self):
         from unittest.mock import patch
         with patch('steward.senses.subprocess.run') as command:
             command.return_value = subprocess.CompletedProcess(['fixture'], 1, '', 'private')
-            with self.assertRaisesRegex(ValueError, '^external command failed$'):
+            for argv, timeout in [(['fixture'], 60), (['qmd', 'status', '--json'], 30)]:
+                with self.subTest(argv=argv), self.assertRaisesRegex(ValueError, '^external command failed$'):
+                    senses.run(argv)
+                self.assertEqual(command.call_args.kwargs['timeout'], timeout)
+            command.side_effect = subprocess.TimeoutExpired('private', 60, stderr='private')
+            with self.assertRaises(subprocess.TimeoutExpired):
                 senses.run(['fixture'])
-            self.assertEqual(command.call_args.kwargs['timeout'], 60)
 
     def test_machine_reports_timer_violation(self):
         def runner(argv):

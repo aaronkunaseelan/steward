@@ -120,7 +120,7 @@ def choices(db, now):
         result.append(dict(job=job['name'], measurement=profile['measurement'], expected_minutes=expected(runs, job['name'], spec),
             missed_at=missed.isoformat() if missed else None,
             feasible=[dict(at=t.isoformat(), reason='recovery after missed ' + missed.isoformat() if missed else 'meets declared needs and heavy lane') for t in feasible],
-            default_choice=default.isoformat() if default else None, default_reason=why,
+            default_choice=default.isoformat(), default_reason=why,
             current_reservation=old['planned_for'] if old else None,
             meets_needs=not missed and rule(job, runs, instant(old['planned_for']), now, old) is None if old else None))
     return result

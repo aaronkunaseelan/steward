@@ -78,11 +78,28 @@ def interrupt_status(db, now, cap=3):
 
 LINK = re.compile(r'\[([^\]\n]+)\]\((https?://(?:[^\s<>()]|\([^\s<>()]*\))+)\)')
 BARE = re.compile(r'(?i)(?:https?://|www\.)')
+BOLD = re.compile(r'\*\*((?:(?!\*\*).)+)\*\*', re.S)
+
+
+def plain_text(text, start, stop, bold):
+    """Only complete bold pairs within this link-free slice are markup."""
+    pieces, visible, end = [], [], start
+    for match in bold:
+        if not start <= match.start() < match.end() <= stop:
+            continue
+        pieces.extend((html.escape(text[end:match.start()]),
+                       '<b>' + html.escape(match[1]) + '</b>'))
+        visible.extend((text[end:match.start()], match[1]))
+        end = match.end()
+    pieces.append(html.escape(text[end:stop]))
+    visible.append(text[end:stop])
+    return ''.join(pieces), ''.join(visible)
 
 
 def render(db, text, now, expired_pages=False):
-    """Escape every character except our own validated Telegram anchor markup."""
+    """Escape everything except bold and our validated Telegram anchors."""
     pieces, visible, end = [], [], 0
+    bold = list(BOLD.finditer(text))
     for match in LINK.finditer(text):
         plain = text[end:match.start()]
         label, url = match.groups()
@@ -99,18 +116,21 @@ def render(db, text, now, expired_pages=False):
             live = row is not None and row['state'] == 'live' and instant(row['expires_at']) > now
             if not live and expired_pages:
                 fallback = label + ' (page expired)'
-                pieces.extend((html.escape(plain), html.escape(fallback)))
-                visible.extend((plain, fallback))
+                formatted, words = plain_text(text, end, match.start(), bold)
+                pieces.extend((formatted, html.escape(fallback)))
+                visible.extend((words, fallback))
                 end = match.end()
                 continue
             require(live, 'Steward page link is not live or has expired')
-        pieces.extend((html.escape(plain), '<a href="' + html.escape(url, quote=True) + '">' + html.escape(label) + '</a>'))
-        visible.extend((plain, label))
+        formatted, words = plain_text(text, end, match.start(), bold)
+        pieces.extend((formatted, '<a href="' + html.escape(url, quote=True) + '">' + html.escape(label) + '</a>'))
+        visible.extend((words, label))
         end = match.end()
     tail = text[end:]
     require(not BARE.search(tail), 'bare URL refused; use [label](https://...)')
-    pieces.append(html.escape(tail))
-    visible.append(tail)
+    formatted, words = plain_text(text, end, len(text), bold)
+    pieces.append(formatted)
+    visible.append(words)
     return ''.join(pieces), ''.join(visible)
 
 
@@ -231,11 +251,11 @@ def flush(db, sender=telegram_sender, now=None, settings=None):
         send_rows(db, batch, sender, now, settings)
 
 
-def notify(db, topic, kind, text, told_key=None, sender=telegram_sender, now=None,
+def notify(db, topic, text, told_key=None, sender=telegram_sender, now=None,
            actor='owner', deliver=None, settings=None, thread_id=None, change_id=None, related_changes=(),
            interrupt=None, moment=None):
     now = now or now_utc()
-    require(topic in TOPICS and kind in ('change', 'result', 'alert'), 'invalid notification route')
+    require(topic in TOPICS, 'invalid notification route')
     if moment is not None:
         from .timing import moment_key
         require(topic == 'Today', 'moments must be sent to Today')
@@ -259,13 +279,15 @@ def notify(db, topic, kind, text, told_key=None, sender=telegram_sender, now=Non
     delivery = deliver if topic == 'Finds' else 'immediate'
     if interrupt is not None:
         delivery = json.dumps(dict(reason=interrupt.strip(), at=None, over_cap=None))
+    if actor == 'maintenance':
+        delivery = 'silent'
     with db:
         cid = change_id or change(db, 'notify', now, actor)
         from .capabilities import told_check
         if any(told_check(db, keys).values()):
             return {'change_id': cid, 'status': 'already_told'}
         identity = uuid.uuid4().hex
-        db.execute("INSERT INTO outbox(id,change_id,topic,kind,text,told_key,state,thread_id,delivery) VALUES (?,?,?,?,?,?,?,?,?)", (identity, cid, topic, kind, text, None, 'suppressed' if delivery == 'silent' else 'pending', thread_id, delivery))
+        db.execute("INSERT INTO outbox(id,change_id,topic,text,told_key,state,thread_id,delivery) VALUES (?,?,?,?,?,?,?,?)", (identity, cid, topic, text, None, 'suppressed' if delivery == 'silent' else 'pending', thread_id, delivery))
         db.executemany('INSERT INTO outbox_keys VALUES (?,?)', [(identity, key) for key in keys])
         db.execute('UPDATE outbox SET job=?,run_id=? WHERE id=?', (os.environ.get('STEWARD_JOB'), os.environ.get('STEWARD_RUN_ID'), identity))
         db.executemany('INSERT INTO message_changes VALUES (?,?)', [(identity, c) for c in related_changes])

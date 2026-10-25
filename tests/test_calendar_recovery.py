@@ -1,15 +1,11 @@
-"""BR2 counterexamples; fixtures only, never production state or providers."""
+"""Calendar update recovery distinguishes preimages, postimages and owner edits."""
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
-
 from fixture_mind import install
-from steward import calendar_b, intent, jobs, messages, pages, planner, runtime, senses, timing
-from steward.capabilities import told_check
-from steward.notify import notification_status, notify, flush
+from steward import calendar_b, jobs, senses
 from steward.state import writer
 
 
@@ -53,7 +49,9 @@ class CalendarRecoveryTests(unittest.TestCase):
             pending = calendar_b.latest(st.db, 'blocks')[0]
             result = calendar_b.resume(st.db, settings, pending['change_id'], now, gog)
             self.assertEqual(result['status'], 'applied')
-
+            self.assertEqual(gog.events['schedule'][0]['start']['dateTime'], '2026-10-19T14:00:00+03:00')
+            self.assertEqual(calendar_b.latest(st.db, 'blocks')[0]['state'], 'applied')
+            self.assertEqual(sum('update' in call for call in gog.calls), 1)
 
     def test_lost_update_response_accepts_postimage_without_second_mutation(self):
         with writer(self.root) as st:
@@ -71,6 +69,8 @@ class CalendarRecoveryTests(unittest.TestCase):
             result = calendar_b.resume(st.db, settings, pending['change_id'], now, gog)
             self.assertEqual(result['status'], 'applied')
             self.assertEqual(sum('update' in call for call in gog.calls), 1)
+            self.assertEqual(gog.events['schedule'][0]['start']['dateTime'], '2026-10-19T14:00:00+03:00')
+            self.assertEqual(calendar_b.latest(st.db, 'blocks')[0]['state'], 'applied')
 
     def test_recovery_refuses_unrelated_owner_edit(self):
         with writer(self.root) as st:

@@ -35,25 +35,24 @@ class InterruptTests(unittest.TestCase):
         return len(self.sent)
 
     def request(self, db, now=NOW, **options):
-        return notify(db, 'Talk', 'result', 'Act on the booking.', sender=self.send,
+        return notify(db, 'Talk', 'Act on the booking.', sender=self.send,
                       now=now, actor='model', interrupt=REASON, **options)
 
-    def test_midday_is_silent_for_every_topic_and_legacy_delivery(self):
+    def test_ordinary_messages_and_pending_retries_are_silent_for_every_topic(self):
         with writer(self.root) as st:
             for topic in ('Today', 'Changes', 'Finds', 'Alerts', 'Talk'):
-                notify(st.db, topic, 'result', 'Fixture message.', sender=self.send,
-                       now=NOW, deliver='immediate', settings={'quiet_hours': ['01:00', '02:00']})
-            # Old pending rows with delivery=immediate also become silent on promotion.
+                notify(st.db, topic, 'Fixture message.', sender=self.send,
+                       now=NOW, deliver='immediate')
             with patch('steward.notify.send_rows'):
-                notify(st.db, 'Talk', 'result', 'Previously queued.', sender=self.send, now=NOW)
+                notify(st.db, 'Talk', 'Previously queued.', sender=self.send, now=NOW)
             flush(st.db, self.send, NOW, {})
             self.assertEqual(len(self.sent), 6)
             self.assertTrue(all(options['disable_notification'] for _, options in self.sent))
             self.assertEqual(interrupt_status(st.db, NOW)['used'], 0)
 
-    def test_interrupt_has_sound_even_with_interim_all_day_quiet_override(self):
+    def test_explicit_interrupt_sounds_and_is_reported_in_state_and_journal(self):
         with writer(self.root) as st:
-            result = self.request(st.db, settings={'quiet_hours': ['00:00', '24:00']})
+            result = self.request(st.db)
             self.assertEqual(result['status'], 'sent')
             self.assertFalse(self.sent[0][1]['disable_notification'])
             status = jobs.snapshot(st.db, now=NOW)['interrupts']
@@ -65,7 +64,6 @@ class InterruptTests(unittest.TestCase):
             self.assertEqual(record['message_id'], result['message_id'])
             self.assertFalse(record['over_cap'])
             self.assertEqual(memory.journal(st.db, day='2026-10-17')['interrupts'], [record])
-            self.assertEqual(st.db.execute('PRAGMA user_version').fetchone()[0], 17)
 
     def test_fourth_is_silent_and_recorded_and_budget_survives_reopening(self):
         with writer(self.root) as st:
@@ -146,7 +144,7 @@ class InterruptTests(unittest.TestCase):
             raise SystemExit('simulated crash after Telegram may have accepted')
         with writer(self.root) as st:
             with self.assertRaises(SystemExit):
-                notify(st.db, 'Talk', 'result', 'Act.', sender=crash, now=NOW, interrupt=REASON)
+                notify(st.db, 'Talk', 'Act.', sender=crash, now=NOW, interrupt=REASON)
         with writer(self.root) as st:
             self.assertEqual(interrupt_status(st.db, NOW)['used'], 1)
             flush(st.db, self.send, NOW, {})
@@ -160,7 +158,7 @@ class InterruptTests(unittest.TestCase):
             self.assertFalse(options['disable_notification'])
             raise OSError('private failure detail')
         with writer(self.root) as st:
-            result = notify(st.db, 'Talk', 'result', 'Act.', sender=ambiguous,
+            result = notify(st.db, 'Talk', 'Act.', sender=ambiguous,
                             now=NOW, interrupt=REASON)
             self.assertEqual(result['status'], 'pending')
             self.assertNotIn('private', str(result))
@@ -174,7 +172,7 @@ class InterruptTests(unittest.TestCase):
     def test_interrupt_find_is_immediate_and_dedup_does_not_spend_again(self):
         with writer(self.root) as st:
             for _ in range(2):
-                result = notify(st.db, 'Finds', 'result', 'Act.', 'fixture-key', sender=self.send,
+                result = notify(st.db, 'Finds', 'Act.', 'fixture-key', sender=self.send,
                                 now=NOW, interrupt=REASON)
             self.assertEqual(result['status'], 'already_told')
             self.assertEqual(len(self.sent), 1)
@@ -187,16 +185,16 @@ class InterruptTests(unittest.TestCase):
         with writer(self.root) as st:
             for reason in ('', '  ', True):
                 with self.assertRaises(StateError):
-                    notify(st.db, 'Talk', 'result', 'Act.', sender=self.send, now=NOW, interrupt=reason)
+                    notify(st.db, 'Talk', 'Act.', sender=self.send, now=NOW, interrupt=reason)
             for options in ({'actor': 'tick'}, {'deliver': 'digest'}, {'deliver': 'silent'},
                             {'settings': {'interrupt_cap': -1}}, {'settings': {'interrupt_cap': True}}):
                 with self.assertRaises(StateError):
-                    notify(st.db, 'Talk', 'result', 'Act.', sender=self.send, now=NOW, interrupt=REASON, **options)
+                    notify(st.db, 'Talk', 'Act.', sender=self.send, now=NOW, interrupt=REASON, **options)
             self.assertEqual(st.db.execute('SELECT count(*) FROM changes WHERE actor!=\'migration\'').fetchone()[0], 0)
             self.assertEqual(self.sent, [])
 
     def test_cli_requires_reason_and_state_uses_configured_cap(self):
-        args = ['notify', '--state', str(self.root), '--topic', 'Talk', '--kind', 'result', 'Act.']
+        args = ['notify', '--state', str(self.root), '--topic', 'Talk', 'Act.']
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit) as exc:
                 main(args + ['--interrupt'])

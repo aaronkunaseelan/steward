@@ -22,16 +22,16 @@ class MomentTests(unittest.TestCase):
         from steward.notify import notify
         with writer(self.root, initialize=True) as st:
             now = self.now.replace(hour=15, minute=40)
-            notify(st.db, 'Today', 'result', 'Day close', sender=lambda *a, **options: 1,
+            notify(st.db, 'Today', 'Day close', sender=lambda *a, **options: 1,
                    now=now, moment='day_close')
             self.assertEqual(timing.moment_obligation(st.db, jobs.get(st.db, 'moments', 'day_close'), now)['state'], 'kept')
             self.assertEqual(st.db.execute('SELECT key FROM told').fetchone()[0], 'day_close:2026-10-20')
             before = st.db.execute('SELECT count(*) FROM outbox').fetchone()[0]
             with self.assertRaises(StateError):
-                notify(st.db, 'Today', 'result', 'Unknown', sender=lambda *a, **options: 1,
+                notify(st.db, 'Today', 'Unknown', sender=lambda *a, **options: 1,
                        now=now, moment='missing')
             with self.assertRaises(StateError):
-                notify(st.db, 'Talk', 'result', 'Wrong route', sender=lambda *a, **options: 1,
+                notify(st.db, 'Talk', 'Wrong route', sender=lambda *a, **options: 1,
                        now=now, moment='day_close')
             self.assertEqual(st.db.execute('SELECT count(*) FROM outbox').fetchone()[0], before)
 
@@ -50,7 +50,7 @@ class MomentTests(unittest.TestCase):
              patch('steward.notify.api', return_value={'message_id': 1}) as send, \
              patch('steward.notify.now_utc', return_value=now), redirect_stdout(io.StringIO()):
             self.assertEqual(cli.main(['notify', '--state', str(self.root), '--config', str(config),
-                                      '--topic', 'Today', '--kind', 'result', '--moment', 'day_close', 'Close']), 0)
+                                      '--topic', 'Today', '--moment', 'day_close', 'Close']), 0)
         self.assertEqual(send.call_count, 1)
         with writer(self.root) as st:
             self.assertEqual(timing.moment_obligation(st.db, jobs.get(st.db, 'moments', 'day_close'), now)['state'], 'kept')
@@ -97,7 +97,7 @@ class MomentTests(unittest.TestCase):
             def send(*args, **options):
                 sent.append(args)
                 return 1
-            notify(st.db, 'Finds', 'result', 'A find', 'find:1', send, self.now)
+            notify(st.db, 'Finds', 'A find', 'find:1', send, self.now)
             flush(st.db, send, self.now.replace(hour=13, minute=59))
             self.assertEqual(sent, [])
             flush(st.db, send, self.now.replace(hour=14, minute=0))
@@ -122,18 +122,18 @@ class MomentTests(unittest.TestCase):
         from datetime import timedelta
         with writer(self.root, initialize=True) as st:
             send = lambda *a, **kw: 1
-            notify(st.db, 'Today', 'result', 'Week gist', 'week:gist', send,
+            notify(st.db, 'Today', 'Week gist', 'week:gist', send,
                    self.now - timedelta(hours=2))
             self.assertIn('orientation', timing.due(st.db, self.now))
             self.assertEqual(timing.moment_obligation(st.db, jobs.get(st.db, 'moments', 'orientation'), self.now)['state'], 'due')
-            notify(st.db, 'Today', 'result', 'Orientation', 'orientation:2026-10-20', send, self.now)
+            notify(st.db, 'Today', 'Orientation', 'orientation:2026-10-20', send, self.now)
             self.assertNotIn('orientation', timing.due(st.db, self.now))
             evening = self.now.replace(hour=15, minute=40)
-            notify(st.db, 'Today', 'result', 'A reply', None, send, evening)
+            notify(st.db, 'Today', 'A reply', None, send, evening)
             self.assertIn('day_close', timing.due(st.db, evening))
             self.assertEqual(timing.moment_obligation(st.db, jobs.get(st.db, 'moments', 'day_close'), evening)['state'], 'due')
             late = evening.replace(hour=16, minute=1)
-            notify(st.db, 'Today', 'result', 'Late close', 'day_close:2026-10-20', send, late)
+            notify(st.db, 'Today', 'Late close', 'day_close:2026-10-20', send, late)
             self.assertEqual(timing.moment_obligation(st.db, jobs.get(st.db, 'moments', 'day_close'), late)['state'], 'recovered')
             self.assertNotIn('day_close', timing.due(st.db, late))
 
@@ -142,11 +142,11 @@ class MomentTests(unittest.TestCase):
             late = self.now.replace(hour=16, minute=5)
             self.assertIn('day_close', timing.due(st.db, late))
 
-    def test_own_early_message_keeps_promise_but_late_one_does_not(self):
+    def test_own_early_message_keeps_promise(self):
         from steward.notify import notify
         from datetime import timedelta
         with writer(self.root, initialize=True) as st:
-            notify(st.db, 'Today', 'result', 'Own orientation', 'orientation:2026-10-20',
+            notify(st.db, 'Today', 'Own orientation', 'orientation:2026-10-20',
                    lambda *a, **options: 1, self.now - timedelta(minutes=5))
             self.assertEqual(timing.moment_obligation(st.db, jobs.get(st.db, 'moments', 'orientation'), self.now)['state'], 'kept')
             self.assertNotIn('orientation', timing.due(st.db, self.now))

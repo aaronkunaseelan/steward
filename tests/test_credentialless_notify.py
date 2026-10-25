@@ -28,7 +28,7 @@ class CredentiallessNotifyTests(unittest.TestCase):
         output = io.StringIO()
         with redirect_stdout(output):
             code = cli.main(['notify', '--state', str(self.root), '--topic', 'Talk',
-                             '--kind', 'result', '--deliver', 'immediate', '--told-key', 'parcel:fixture',
+                             '--deliver', 'immediate', '--told-key', 'parcel:fixture',
                              'A parcel update'])
         self.assertEqual(code, 0)
         queued = json.loads(output.getvalue())
@@ -59,8 +59,8 @@ class CredentiallessNotifyTests(unittest.TestCase):
         now = NOW.replace(hour=2)
         healthy = dict(kind='chain', layer='process', hops=[])
         with writer(self.root) as st, patch('steward.intent.chain', return_value=healthy), \
-             patch('steward.intent.ticks', return_value={}), patch('urllib.request.urlopen') as transport:
-            queued = notify(st.db, 'Talk', 'result', 'Queued for tick', told_key='tick:fixture',
+             patch('urllib.request.urlopen') as transport:
+            queued = notify(st.db, 'Talk', 'Queued for tick', told_key='tick:fixture',
                             now=now, deliver='immediate')
             self.assertEqual(queued['status'], 'pending')
             self.assertEqual(notification_status(st.db)['pending'], [])
@@ -83,7 +83,7 @@ class CredentiallessNotifyTests(unittest.TestCase):
         provider.side_effect = None
         provider.return_value = {'message_id': 42}
         with patch.dict(os.environ, STEWARD_TELEGRAM_BOT_TOKEN='synthetic-fixture'), writer(self.root) as st:
-            sent = notify(st.db, 'Talk', 'result', 'Credentialed tick', now=NOW, deliver='immediate')
+            sent = notify(st.db, 'Talk', 'Credentialed tick', now=NOW, deliver='immediate')
             self.assertEqual(sent['status'], 'sent')
             self.assertEqual(sent['message_id'], 42)
         provider.assert_called_once()
@@ -91,7 +91,7 @@ class CredentiallessNotifyTests(unittest.TestCase):
     def test_credentialless_interrupt_does_not_reserve_a_send_or_budget(self):
         provider = self.job_environment()
         with writer(self.root) as st:
-            queued = notify(st.db, 'Talk', 'result', 'An owner action', told_key='action:fixture',
+            queued = notify(st.db, 'Talk', 'An owner action', told_key='action:fixture',
                             now=NOW, deliver='immediate', interrupt='Fixture deadline')
             self.assertEqual(queued['status'], 'pending')
             row = st.db.execute('SELECT * FROM outbox WHERE id=?', (queued['outbox_id'],)).fetchone()

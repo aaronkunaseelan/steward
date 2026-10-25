@@ -33,19 +33,21 @@ def section_info(text, receipt):
             for name, body in sections(text, spans).items()}
 
 
-# These are the inputs the existing rituals explicitly ask the model to read.
-RITUAL_SECTIONS = {
-    'orientation': {'Schedule', 'Limits', 'Calendar', 'Movement', 'Blocks', 'Your items',
+# These are the inputs the existing moments explicitly ask the model to read.
+MOMENT_SECTIONS = {
+    'orientation': {'Schedule', 'Limits', 'Calendar', 'Movement', 'Blocks', 'Your list',
                     'Waiting on others', 'Deadlines', 'Compute', 'Finds waiting', 'Inbox'},
     'day_close': {'Schedule', 'Limits', 'Calendar', 'Blocks', 'Deadlines', 'Compute',
                   'Finds waiting', 'Inbox'},
 }
 
 
-def wake_index(text, info, previous, trigger, rituals):
+def wake_index(text, info, previous, trigger, moments):
     parts = sections(text, info)
-    output = ['# Steward wake index', 'Trigger: ' + trigger, '', parts['Now'].rstrip(), '',
-              '## Sections (change since last model wake)']
+    output = ['# Steward wake index', 'Trigger: ' + trigger, '', parts['Now'].rstrip(), '']
+    if 'What I carry' in parts:
+        output += [parts['What I carry'].rstrip(), '']
+    output.append('## Sections (change since last model wake)')
     for name, item in info.items():
         if name == 'Now':
             continue
@@ -53,8 +55,8 @@ def wake_index(text, info, previous, trigger, rituals):
         change = ('unknown (' + ' '.join(item['unknown'].split()) + ')' if item['unknown'] else
                   'no model baseline' if old is None else
                   'unchanged' if item['digest'] == old['digest'] else 'changed')
-        required = [ritual for ritual in rituals if name in RITUAL_SECTIONS.get(ritual, ()) or
-                    (ritual == 'day_close' and name.startswith('Day close — '))]
+        required = [moment for moment in moments if name in MOMENT_SECTIONS.get(moment, ()) or
+                    (moment == 'day_close' and name.startswith('Day close — '))]
         output.append(f"- {name}: {item['lines']} lines · {change}" +
                       (' · required for ' + ', '.join(required) if required else ''))
     return '\n'.join(output) + '\n'
@@ -136,7 +138,7 @@ def day_close(db, now):
 
 
 def blocks(b, gsd, live_pages, now, end):
-    """Steward's blocks through the next two days; a bundle shows its items, its page and whether it was used."""
+    """Blocks through the next two days, with their items, prep page and evidence of use."""
     specs = {r['name']: json.loads(r['spec_json']) for r in b.get('demands', [])}
     pages = {p['slug']: p for p in live_pages}
     done = gsd.get('done')  # today's closures, each at gsd's own closure time
@@ -195,13 +197,13 @@ def render(state, now, receipt):
     if isinstance(skips, dict):
         skips = dict(skips, current=skips['current'] if skips.get('current') is not None else 'none')
     section('Now', dict(time=now.isoformat(), gate=state.get('gate_reason', 'unknown'),
-                        rituals=state.get('rituals', []), experiments=state.get('experiments', []),
+                        moments=state.get('moments', []), experiments=state.get('experiments', []),
                         provocation=state.get('provocation', 'unknown: not supplied'), tick_skips=skips))
     from .notify import TODAY_CHARACTERS
     section('Schedule', [dict(name=m['name'], start=m['start'], deadline=m['deadline'],
                               releases=m['releases'] or 'none',
                               notify='--moment ' + m['name'])
-                         for m in state.get('moments', [])])
+                         for m in state.get('moment_schedule', [])])
     section('Limits', dict(today_characters=TODAY_CHARACTERS, longer_detail='Put the detail on a page.'))
     section('Inbox', dict(unhandled=state.get('inbox', []), poll=state.get('inbound_poll'),
                           live_pages=state.get('live_pages', [])))
@@ -227,7 +229,7 @@ def render(state, now, receipt):
     section('Movement', dict(ranked_open_doses=b.get('movement'), fulfilment=b.get('fulfilment')), ('health', 'calendars'))
     block_rows = blocks(b, data('gsd'), state.get('live_pages', []), now, end)
     section('Blocks', block_rows, ('calendars', 'gsd'))
-    section('Your items', dict(page=state.get('your_items_page', 'unknown: not rendered yet'),
+    section('Your list', dict(page=state.get('your_list_page', 'unknown: not rendered yet'),
                                items=data('gsd').get('waiting_on_you', 'unknown: refresh gsd sense')), ('gsd',))
     section('Waiting on others', data('gsd').get('waiting_on_others', 'unknown: refresh gsd sense'), ('gsd',))
     section('Deadlines', dict(items=data('gsd').get('deadlines'), older=data('gsd').get('past_due_older')), ('gsd',))
@@ -238,7 +240,7 @@ def render(state, now, receipt):
                             failures=[{k: r.get(k) for k in ('run_id', 'job', 'ended_at', 'reason')} for r in runs if r['state'] == 'failed'],
                             sol=data('sol')), ('sol',))
     section('Finds waiting', state.get('finds_waiting', []))
-    if 'day_close' in state.get('rituals', []):
+    if 'day_close' in state.get('moments', []):
         evidence = state.get('day_close', {})
         section('Day close — Done today', dict(
             gsd_done=[f"{owner_time(instant(row['at']), '%H:%M')} done: {' '.join(row['title'].split())[:100]}"
@@ -251,7 +253,7 @@ def render(state, now, receipt):
             blocks=[f"{r['title']} {datetime.fromisoformat(r['start']).astimezone(local_zone()):%H:%M}: {r['used']}"
                     for r in block_rows if 'items' in r
                     and memory.local_day(datetime.fromisoformat(r['start'])) == memory.local_day(now)]
-                   or 'no bundles today',
+                   or 'no blocks with items today',
             journal=evidence or 'unknown: day journal not supplied',
             interpretation='Run success is not proof of delivery; correlate records and sent messages. '
                            'Inbox handled is not proof of an answer; correlate replies. '

@@ -67,7 +67,7 @@ class IntentTests(unittest.TestCase):
         def deliver(*args, **kwargs):
             self.message_id += 1
             return self.message_id
-        return notify.notify(db, topic, 'result', 'PRIVATE MESSAGE BODY', sender=sender or deliver,
+        return notify.notify(db, topic, 'PRIVATE MESSAGE BODY', sender=sender or deliver,
                              now=NOW, interrupt=interrupt, settings={'interrupt_cap': 1}, **options)
 
     def save_healthy(self, db, now):
@@ -300,7 +300,7 @@ class IntentTests(unittest.TestCase):
         delivered = []
         with writer(self.state) as st:
             for key in ('one', 'two'):
-                notify.notify(st.db, 'Finds', 'result', 'Synthetic finding', told_key=key,
+                notify.notify(st.db, 'Finds', 'Synthetic finding', told_key=key,
                               deliver='digest', now=NOW - timedelta(hours=3))
             notify.flush(st.db, lambda *a, **k: delivered.append(a) or 99, NOW.replace(hour=16), {})
             self.assertEqual(st.db.execute("SELECT count(*) FROM outbox WHERE state='sent'").fetchone()[0], 2)
@@ -398,7 +398,6 @@ class IntentTests(unittest.TestCase):
         self.assertIn('latest run failed', doc['headline'])
 
     def test_ready_by_before_the_job_existed_or_before_a_resume_is_not_owed(self):
-        # F-59: a job added at midday is not red for a target that passed before it existed.
         spec = dict(justification='Advisories before the day starts.', argv=[released()], needs={'ready_by': ['06:40', '18:40']})
         with writer(self.state) as st:
             jobs.job_verb(st.db, 'add', 'advisories', spec, now=NOW)  # 12:00 Athens; 06:40 already passed
@@ -415,7 +414,7 @@ class IntentTests(unittest.TestCase):
         mine = [p for p in self.block(self.doc(now=NOW + timedelta(hours=8)), 'day')['promises'] if p['label'] == 'advisories']
         self.assertEqual(mine, [])
 
-    def test_miss_without_later_kept_same_label_stays_red(self):
+    def test_missing_success_leaves_each_elapsed_target_missed(self):
         with writer(self.state) as st:
             self.add_job(st.db, ['06:30', '18:30'])
         doc = self.doc(now=NOW.replace(hour=16))
@@ -424,7 +423,7 @@ class IntentTests(unittest.TestCase):
         self.assertIsNone(gsd[0]['met_at'])
         self.assertEqual(doc['state'], 'red')
 
-    def test_due_and_quiet_promises_do_not_recover_miss(self):
+    def test_due_promises_do_not_recover_miss(self):
         with writer(self.state) as st:
             self.add_job(st.db, ['06:30', '18:30'])
         doc = self.doc()
@@ -437,16 +436,19 @@ class IntentTests(unittest.TestCase):
     def test_later_kept_different_label_does_not_recover_miss(self):
         with writer(self.state) as st:
             self.add_job(st.db, ['06:30'])
-            self.send(st.db, topic='Finds', deliver='immediate')
+            self.send(st.db, topic='Today', deliver='immediate', told_key='orientation:2026-10-17')
             with st.db:
-                st.db.execute("UPDATE outbox SET sent_at='2026-10-17T07:15:00+00:00'")
+                st.db.execute("UPDATE outbox SET sent_at='2026-10-17T04:15:00+00:00'")
+                st.db.execute("UPDATE told SET at='2026-10-17T04:15:00+00:00'")
         doc = self.doc()
         promises = self.block(doc, 'day')['promises']
         self.assertEqual(next(p['state'] for p in promises if p['label'] == 'gsd-steady'), 'missed')
+        orientation = next(p for p in promises if p['label'] == 'Orientation')
+        self.assertEqual((orientation['state'], orientation['met_at']), ('kept', '07:15'))
         self.assertEqual(next(p['state'] for p in promises if p['label'] == 'Day close'), 'due')
         self.assertEqual(doc['state'], 'red')
 
-    def test_ritual_promises_use_shared_times_and_configured_wake_minutes(self):
+    def test_moment_promises_use_shared_times_and_configured_wake_minutes(self):
         promises = self.block(self.doc(), 'day')['promises']
         self.assertEqual([(p['label'], p['at']) for p in promises],
                          [('Orientation', '07:45'), ('Day close', '19:00')])
@@ -458,7 +460,7 @@ class IntentTests(unittest.TestCase):
     def test_today_reply_after_day_close_start_leaves_close_due(self):
         now = NOW.replace(hour=15, minute=40)
         with writer(self.state) as st:
-            notify.notify(st.db, 'Today', 'result', 'Reply, not the close',
+            notify.notify(st.db, 'Today', 'Reply, not the close',
                           sender=lambda *a, **options: 1, now=now)
         promises = self.block(self.doc(now=now), 'day')['promises']
         self.assertEqual(next(p['state'] for p in promises if p['label'] == 'Day close'), 'due')
@@ -788,6 +790,6 @@ class IntentTests(unittest.TestCase):
         with writer(self.state) as st:
             self.add_job(st.db, ['06:30', '18:30'])
             self.send(st.db, 'Act before the deadline.')
-        doc = self.doc(now=datetime.now(timezone.utc))
+        doc = self.doc(now=NOW)
         self.assertEqual(problems(load('intent-1', vendor=True), doc), [])
         self.assertTrue(problems(load('intent-1', vendor=True), dict(doc, extra=1)))

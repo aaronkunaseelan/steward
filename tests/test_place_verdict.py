@@ -1,5 +1,8 @@
 """A known reading can honestly contain an unknown location."""
+from pathlib import Path
+import json
 from steward import briefing, jobs, messages, senses
+from test_place import fixture
 from steward.state import writer
 import test_intent
 import unittest
@@ -16,11 +19,21 @@ class PlaceVerdictTests(unittest.TestCase):
         with writer(self.state) as st:
             self.save_healthy(st.db, now)
             messages.poll(st.db, now, {}, fetcher=lambda offset: [], telegram={'chat_id': -1})
-            senses.save(st.db, {'place': dict(status='ok', data=dict(state='unknown', place=None))},
+            value = dict(fixture(), state='unknown', place=None, since=None,
+                         last_event=None, today=[])
+            def runner(argv):
+                if argv == ['phone', 'where', '--json']:
+                    return json.dumps(value)
+                raise FileNotFoundError
+            observation = senses.collect(self.state, {}, now, runner,
+                                         Path(self.tmp.name) / 'rollouts')['place']
+            self.assertEqual(observation['status'], 'ok')
+            senses.save(st.db, {'place': observation},
                         now, jobs.change(st.db, 'fixture', now, 'tick'))
             state = jobs.snapshot(st.db, now=now)
             place = state['senses']['place']
             self.assertEqual(place['data']['state'], 'unknown')
+            self.assertIsNone(place['data']['place'])
             self.assertEqual(place['verdict'], 'fresh')
             page = briefing.render(state, now, {})
             self.assertIn('## Place [fresh]', page)

@@ -46,7 +46,7 @@ class OutcomeTests(unittest.TestCase):
     def test_reply_is_find_action_but_questions_and_kept_are_unknown(self):
         cid = jobs.change(self.db, 'notify', NOW)
         for n in (1, 2):
-            self.db.execute("INSERT INTO outbox(id,change_id,topic,kind,text,state,message_id,sent_at) VALUES (?,?,'Finds','result','find','sent',?,?)", (str(n), cid, n, NOW.isoformat()))
+            self.db.execute("INSERT INTO outbox(id,change_id,topic,text,state,message_id,sent_at) VALUES (?,?,'Finds','find','sent',?,?)", (str(n), cid, n, NOW.isoformat()))
         for n in (1, 2):
             self.db.execute("INSERT INTO inbox(update_id,message_id,at,text,reply_to) VALUES (?,?,?,'yes',1)", (n, 10+n, NOW.isoformat()))
         rows = self.report()
@@ -81,16 +81,24 @@ class OutcomeTests(unittest.TestCase):
         from unittest.mock import patch
         from steward.cli import main
         self.db.commit()
-        path = self.store.root / 'state.sqlite'
-        # Reads must work on the live schema without triggering schema 14.
+        # A read-only query must not migrate an older schema.
+        self.db.execute("ALTER TABLE outbox ADD COLUMN kind TEXT NOT NULL DEFAULT 'result'")
         self.db.execute('PRAGMA user_version=13')
+        path = self.store.root / 'state.sqlite'
+        before = path.read_bytes()
         output = io.StringIO()
-        with patch('steward.outcomes.r1', return_value=dict(metric='r1_amendment_rate',status='unknown',reason='no contract')), redirect_stdout(output):
+        from steward.outcomes import weekly
+        with patch('steward.outcomes.weekly', side_effect=lambda db, week: weekly(
+                db, week, now=NOW, runner=lambda argv: '{}')), \
+             patch('steward.cli.writer', side_effect=AssertionError('read-only query')), \
+             redirect_stdout(output):
             self.assertEqual(main(['journal','--state',str(self.store.root),'--outcomes','--week','2026-10-18','--json']), 0)
-        self.assertEqual(json.loads(output.getvalue())['week'], '2026-10-18')
+        report = json.loads(output.getvalue())
+        self.assertEqual(report['week'], '2026-10-18')
+        amendment = next(row for row in report['rows'] if row['metric'] == 'r1_amendment_rate')
+        self.assertEqual((amendment['status'], amendment['reason']), ('unknown', 'no contract'))
         self.assertEqual(self.db.execute('PRAGMA user_version').fetchone()[0], 13)
-        from steward.outcomes import r1
-        self.assertEqual(r1('2026-10-19', NOW-timedelta(days=1), NOW, NOW, lambda argv: '{}')['reason'], 'no contract')
+        self.assertEqual(path.read_bytes(), before)
 
     def bundle(self, key, start, closures, demand='grants'):
         from steward import pages

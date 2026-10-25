@@ -278,7 +278,7 @@ def tick(root, data=None, clock=now_utc, load_reader=host_load, lock_reader=heav
         talk = messages.poll(db, now, settings, sender, update_fetcher or updates, telegram)
         from . import pages
         result['pages_poll_ok'] = pages.poll(db, now, pages_transport)
-        result['your_items'] = pages.sync_your_items(db, observations.get('gsd', {}), now, pages_transport)
+        result['your_list'] = pages.sync_your_list(db, observations.get('gsd', {}), now, pages_transport)
         # A skip suppresses wakes only; deterministic work continues normally.
         skipping = status(db, now)['current']
         with db:
@@ -329,27 +329,26 @@ def tick(root, data=None, clock=now_utc, load_reader=host_load, lock_reader=heav
                 if job['state'] != 'active' or not spec['recurring'] or any(r['job'] == job['name'] and r['state'] in ('planned', 'started') for r in runs):
                     continue
                 at, reason = placement(job, runs, now)
-                if at is not None:
-                    from .planner import rule
-                    if at > now + timedelta(hours=36):
-                        # Not due inside the planning window: nothing is wrong, it is planned later.
-                        result.setdefault('later', {})[job['name']] = at.isoformat()
-                        continue
-                    # The feasible time nearest the default, so a refused default never
-                    # collapses to "now" and reruns a job that was just served.
-                    slots = [grid(now, True) + timedelta(minutes=COMPUTE_GRID_MINUTES*i) for i in range(109)]
-                    candidates = [at] + sorted(slots, key=lambda t: abs(t - at)) + [now]
-                    default_at = at
-                    at = next((t for t in candidates if rule(job, runs, t, now) is None), None)
-                    if at is None:
-                        result.setdefault('unplanned', {})[job['name']] = 'no feasible time'
-                        continue
-                    if at != default_at:
-                        reason = 'default: feasible alternative; original placement violates calendar C constraints'
-                    try:
-                        plan(db, job['name'], at, reason, now, cid)
-                    except StateError as exc:
-                        result.setdefault('unplanned', {})[job['name']] = str(exc)
+                from .planner import rule
+                if at > now + timedelta(hours=36):
+                    # Not due inside the planning window: nothing is wrong, it is planned later.
+                    result.setdefault('later', {})[job['name']] = at.isoformat()
+                    continue
+                # The feasible time nearest the default, so a refused default never
+                # collapses to "now" and reruns a job that was just served.
+                slots = [grid(now, True) + timedelta(minutes=COMPUTE_GRID_MINUTES*i) for i in range(109)]
+                candidates = [at] + sorted(slots, key=lambda t: abs(t - at)) + [now]
+                default_at = at
+                at = next((t for t in candidates if rule(job, runs, t, now) is None), None)
+                if at is None:
+                    result.setdefault('unplanned', {})[job['name']] = 'no feasible time'
+                    continue
+                if at != default_at:
+                    reason = 'default: feasible alternative; original placement violates calendar C constraints'
+                try:
+                    plan(db, job['name'], at, reason, now, cid)
+                except StateError as exc:
+                    result.setdefault('unplanned', {})[job['name']] = str(exc)
         # Commit started intent before crossing the process boundary. The lock serializes ticks.
         for row in current(db, 'runs'):
             if row['state'] != 'planned' or instant(row['planned_for']) > now:
@@ -385,11 +384,11 @@ def tick(root, data=None, clock=now_utc, load_reader=host_load, lock_reader=heav
                 append(db, 'runs', row, cid)
             # run-exec owns the deadline (TERM, grace, KILL, manifest); the unit's limit
             # is only a backstop after it, or systemd would kill run-exec first.
-            argv = ['batch-run'] + (['--heavy'] if spec['heavy'] else []) + ['--name', name, '--max', str(spec['_limit_minutes'] + 5) + 'm']
+            argv = ['batch-run', '--pass', pages.TOKEN_ENV] + (['--heavy'] if spec['heavy'] else []) + ['--name', name, '--max', str(spec['_limit_minutes'] + 5) + 'm']
             if spec.get('env_file'):
                 argv += ['--env-file', spec['env_file']]
             # batch-run does not preserve PYTHONPATH, so explicitly bind the current code root.
-            argv += ['--', '/usr/bin/env', 'PYTHONPATH=' + str(Path(__file__).resolve().parents[1]), sys.executable, '-m', 'steward', 'run-exec', row['run_id'], '--state', str(root), '--data', str(data)]
+            argv += ['--', '/usr/bin/env', 'STEWARD_ACTOR=tick', 'PYTHONPATH=' + str(Path(__file__).resolve().parents[1]), sys.executable, '-m', 'steward', 'run-exec', row['run_id'], '--state', str(root), '--data', str(data)]
             try:
                 launcher(argv)
                 result['started'].append(row['run_id'])
@@ -399,7 +398,7 @@ def tick(root, data=None, clock=now_utc, load_reader=host_load, lock_reader=heav
                     row.update(state='failed', ended_at=now.isoformat(), reason='batch launch failed')
                     append(db, 'runs', row, cid)
         if result.get('calendar_learned'):
-            messages.notify(db, 'Changes', 'change', '\n'.join(result['calendar_learned']),
+            messages.notify(db, 'Changes', '\n'.join(result['calendar_learned']),
                             'calendar-learning:' + cid, sender, now, 'tick', settings=settings, change_id=cid)
         # Dispatcher effects are not told: placements and launches show in Today,
         # a skip is the guards working, and repeated failures reach Alerts.
@@ -565,7 +564,7 @@ def wake(root, clock=now_utc, runner=harness, settings=None, prompt=None, sender
             db = store.db
             from .notify import telegram_sender
             sender = sender or telegram_sender
-            ritual = 'orientation' in timing.undelivered(db, now)
+            moment = 'orientation' in timing.undelivered(db, now)
             reason = gate(db, now)
             cursor = db.execute('SELECT coalesce(max(rowid),0) FROM changes').fetchone()[0]
             with db:
@@ -573,12 +572,12 @@ def wake(root, clock=now_utc, runner=harness, settings=None, prompt=None, sender
             state = snapshot(db, now, settings.get('interrupt_cap', 3))
             state['inbox'] = messages.inbox(db)
             from . import calendar_b
-            state['rituals'] = timing.undelivered(db, now)
+            state['moments'] = timing.undelivered(db, now)
             state['calendar_b'] = calendar_b.briefing(db, now)
             state['finds_waiting'] = messages.queued(db)
             from . import pages
             state['live_pages'] = pages.live(db, now)
-            state['your_items_page'] = pages.your_items(db)
+            state['your_list_page'] = pages.your_list(db)
         directory = data_root() / 'wakes' / str(wake_id)
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         source = Path(__file__).resolve().parents[2]
@@ -599,7 +598,7 @@ def wake(root, clock=now_utc, runner=harness, settings=None, prompt=None, sender
                         previous = checkpoint.get('briefing', {}).get('sections', {})
                         break
                 section_info = briefing.section_info(text, briefing_info)
-                index = briefing.wake_index(text, section_info, previous, reason, state['rituals'])
+                index = briefing.wake_index(text, section_info, previous, reason, state['moments'])
                 briefing_info.update(sections=section_info, baseline_wake=baseline,
                                      index_bytes=len(index.encode()))
                 briefing_info['system_bytes'] = len(stable.encode())
@@ -632,9 +631,9 @@ def wake(root, clock=now_utc, runner=harness, settings=None, prompt=None, sender
             with store.db:
                 store.db.execute('UPDATE wakes SET status=?,checkpoint=?,harness_run_id=? WHERE id=?', (status, json.dumps({'model_calls': calls, 'ended_at': now.isoformat(), 'briefing': briefing_info}), run_id, wake_id))
             messages.changes(db, now, sender, settings, key=f'wake-changes:{wake_id}')
-            if ritual and 'orientation' in timing.undelivered(db, now):
+            if moment and 'orientation' in timing.undelivered(db, now):
                 # A pending orientation is already told (told_check), so a retry never enqueues a second.
-                messages.notify(db, 'Today', 'result', messages.fallback(db, now), sender=sender,
+                messages.notify(db, 'Today', messages.fallback(db, now), sender=sender,
                                 now=now, actor='tick', settings=settings, moment='orientation')
             messages.alerts(db, now, sender, settings)
             messages.flush(db, sender, now, settings)

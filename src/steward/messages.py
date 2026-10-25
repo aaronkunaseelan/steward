@@ -1,4 +1,4 @@
-"""Owner messages, rituals and delivery, independent of model availability."""
+"""Owner messages, moments and delivery, independent of model availability."""
 from .settings import local_zone
 from .memory import local_day
 import json
@@ -189,7 +189,7 @@ def poll(db, now, settings, sender=telegram_sender, fetcher=updates, telegram=No
             except (ValueError, OSError, KeyError, TypeError):
                 answer = 'Undo refused: constraints, an owner edit, or an unknown calendar prevented safe restoration.'
             topic = next((k for k, v in telegram['topics'].items() if v == thread), 'Talk')
-            notify(db, topic, 'change', answer, sender=sender, now=now, actor='tick', settings=settings, thread_id=thread, deliver='immediate')
+            notify(db, topic, answer, sender=sender, now=now, actor='tick', settings=settings, thread_id=thread, deliver='immediate')
         else:
             wake = True
     return wake
@@ -199,60 +199,127 @@ def queued(db):
     return db.execute("SELECT count(*) FROM outbox WHERE topic='Finds' AND state='pending' AND delivery='digest'").fetchone()[0]
 
 
+def clipped(text, limit):
+    return text if len(text) <= limit else text[:limit - 1] + '…'
+
+
 def fallback(db, now):
-    from .timing import owner_time
     observations = senses.snapshot(db, now)
-    lines = ['Current state (fallback)', owner_time(now, '%A %d %b, %H:%M'), 'Today']
-    cal = observations['calendars']
+    cal, gsd = observations['calendars'], observations['gsd']
+    unknown = []
+    for label, reading in (('calendar', cal), ('your list', gsd)):
+        if reading['verdict'] != 'fresh':
+            unknown.append(clipped(f"{label} {reading['verdict']}: {reading['reason']}", 180))
     events = []
     for e in cal.get('data', {}).get('events', []):
         start = e['start'].get('dateTime', e['start'].get('date', ''))
-        if start[:10] == str(local_day(now)):
-            clock = owner_time(jobs.instant(start), '%H:%M') if 'T' in start else 'All day'
-            events.append((start, clock + ' ' + (e.get('summary') or 'Busy')))
-    if cal['verdict'] != 'fresh':
-        lines += [f"Calendars {cal['verdict']}: {cal['reason']}"]
-    lines += [v[:160] for _, v in sorted(events)[:6]] or ['No events observed']
-    lines += ['Your items']
-    gsd = observations['gsd']
-    if gsd['verdict'] != 'fresh':
-        lines += [f"gsd {gsd['verdict']}: {gsd['reason']}"]
-    for key, empty in (('waiting_on_you', 'No open items of yours'), ('waiting_on_others', 'No items waiting on others')):
-        if key == 'waiting_on_others':
-            lines += ['Waiting on others']
+        when = jobs.instant(start).astimezone(local_zone()) if 'T' in start else None
+        day = when.date().isoformat() if when else start
+        if day == str(local_day(now)) and e.get('status') != 'cancelled':
+            events.append((when.timestamp() if when else float('-inf'), (when.strftime('%H:%M') if when else 'All day') +
+                           ' ' + (e.get('summary') or 'Busy')))
+    groups = [('Today', [v for _, v in sorted(events)[:6]] or
+               ['No events observed' if cal['verdict'] == 'fresh' else 'Not currently known'], cal)]
+    for label, key, empty in (('Your list', 'waiting_on_you', 'No open items of yours'),
+                              ('Waiting', 'waiting_on_others', 'No items waiting on others')):
         priorities = gsd.get('data', {}).get(key)
-        lines += ([str(i.get('title') or i['id'])[:140] for i in priorities] or [empty]) if priorities is not None else ['Unknown: refresh gsd sense']
-    lines += ['Compute today']
-    runs = [r for r in jobs.current(db, 'runs') if r['state'] == 'planned' and local_day(jobs.instant(r['planned_for'])) == local_day(now)]
-    lines += [(owner_time(jobs.instant(r['planned_for']), '%H:%M') + ' ' + r['job'] + ': ' + r['reason'])[:160] for r in sorted(runs, key=lambda r:r['planned_for'])[:5]] or ['No planned jobs']
-    lines += ['Finds waiting', str(queued(db)) + ' queued', 'Next actions', 'Review Today; send instructions in Talk.']
+        items = ([str(i.get('title') or i['id']) for i in priorities[:6]] or [empty]) if priorities is not None else ['Not currently known']
+        groups.append((label, items, gsd))
+    # Reserve the final unknown group before shortening items; never clip markup or a warning.
+    header = '**' + now.astimezone(local_zone()).strftime('%a %d %b') + ' · Current state (fallback)**'
+    ending = "**Can't see**\n" + ('\n'.join(unknown) if unknown else 'Nothing missing from these readings')
     from .notify import TODAY_CHARACTERS
-    return '\n'.join(lines)[:TODAY_CHARACTERS]
+    overhead = len(header) + len(ending) + 12 + sum(len(label) + 7 +
+               (24 if reading['verdict'] != 'fresh' else 0) for label, _, reading in groups)
+    budget = max(12, (TODAY_CHARACTERS - overhead) // sum(len(items) for _, items, _ in groups))
+    sections = [header]
+    for label, items, reading in groups:
+        qualifier = ['Last seen, not current'] if reading['verdict'] != 'fresh' and items != ['Not currently known'] else []
+        sections.append('\n'.join(['**' + label + '**', *qualifier, *(clipped(i, budget) for i in items)]))
+    return '\n\n'.join([*sections, ending])
+
+
+def calendar_changes(db, identity):
+    """Use stored before/after fields, including edits recorded before the new summary shape."""
+    from .calendar_b import change_summary
+    entries = []
+    for row in db.execute("SELECT b.* FROM blocks b WHERE change_id=? AND state='intended' AND version=(SELECT min(version) FROM blocks WHERE event_key=b.event_key AND change_id=b.change_id AND state='intended') ORDER BY rowid", (identity,)):
+        if re.search(r'(^|[-_:])canary($|[-_:])', row['demand'], re.I):
+            continue
+        final = db.execute('SELECT state FROM blocks WHERE event_key=? AND change_id=? ORDER BY version DESC LIMIT 1', (row['event_key'], identity)).fetchone()
+        if final['state'] not in ('applied', 'deleted'):
+            return None  # An incomplete apply is not an accomplished calendar change.
+        after = json.loads(row['payload'])
+        prior = db.execute("SELECT payload FROM blocks WHERE event_key=? AND version<? AND state='applied' ORDER BY version DESC LIMIT 1", (row['event_key'], row['version'])).fetchone()
+        before = json.loads(prior[0]) if prior else None
+        action = ('drop' if after.get('delete') else 'keep' if before and
+                  (before['start'], before['end']) == (after['start'], after['end']) else 'place')
+        entries.append(change_summary(before, after, action, after['reason']))
+    return '\n\n'.join(entries)
+
+
+def visible_change(db, row):
+    verb, identity = row['verb'], row['id']
+    if row['actor'] not in ('owner', 'model'):
+        return ''
+    if verb == 'block choose':
+        return calendar_changes(db, identity)
+    if verb in ('draft', 'undo draft'):
+        return row['summary']
+    if verb == 'moment set' or (verb == 'undo' and db.execute('SELECT 1 FROM moments WHERE change_id=?', (identity,)).fetchone()):
+        return '\n\n'.join(r['start'] + '–' + r['deadline'] + ' ' +
+            r['name'].replace('_', ' ') + ' · updated' for r in
+            db.execute('SELECT * FROM moments WHERE change_id=?', (identity,)))
+    if verb.startswith(('job ', 'run ')) or verb == 'undo':
+        requested = db.execute('SELECT 1 FROM message_meta WHERE key=?', ('owner_request:' + identity,)).fetchone()
+        if row['actor'] != 'owner' and not (row['actor'] == 'model' and requested):
+            return ''
+        subjects = [x[0] for x in db.execute('SELECT name FROM jobs WHERE change_id=? UNION SELECT job FROM runs WHERE change_id=?', (identity, identity))]
+        if not subjects or any(re.search(r'(^|[-_:])canary($|[-_:])', s, re.I) for s in subjects):
+            return ''
+        reasons = list(dict.fromkeys([r[0] for r in db.execute('SELECT reason FROM runs WHERE change_id=?', (identity,))] +
+                      [json.loads(r[0])['justification'] for r in db.execute('SELECT spec_json FROM jobs WHERE change_id=?', (identity,))]))
+        return verb.capitalize() + ' ' + ', '.join(subjects) + ('\n' + '; '.join(reasons) if reasons else '')
+    return ''
+
+
+def changes_text(rows):
+    header = '**Your calendar**' if all(r['verb'] == 'block choose' for r, _ in rows) else '**Changes**'
+    multiple = len(rows) > 1
+    entries = [('You: ' if r['actor'] == 'owner' else '') + text +
+               ('\nUndo: ' + r['id'][:8] if multiple else '') for r, text in rows]
+    hint = ('Reply "undo ID" with the change’s Undo id to undo that change.' if multiple else
+            'Reply "undo" to undo it.')
+    return '\n\n'.join([header, *entries, hint])
 
 
 def changes(db, now, sender, settings, key=None):
-    # Wake-start cursors omit edits between wakes; linkage records what was reported.
-    # Migration 17 links pre-release edits to a suppressed outbox row.
-    rows = db.execute("SELECT rowid,* FROM changes WHERE actor NOT IN ('tick','migration') AND verb NOT IN ('notify','inbox done','tick skip') AND NOT EXISTS (SELECT 1 FROM tick_skips s WHERE s.change_id=changes.id) AND NOT EXISTS (SELECT 1 FROM message_changes m WHERE m.change_id=changes.id) ORDER BY rowid").fetchall()
-    if not rows:
-        return
-    counts = {}
-    for r in rows:
-        subjects = [x[0] for x in db.execute('SELECT name FROM jobs WHERE change_id=? UNION SELECT job FROM runs WHERE change_id=?', (r['id'], r['id']))]
-        reasons = ['Retry after a failed run' if x['retry_of'] else x['reason']
-                   for x in db.execute('SELECT reason,retry_of FROM runs WHERE change_id=?', (r['id'],))]
-        reasons += [json.loads(x[0])['justification'] for x in db.execute('SELECT spec_json FROM jobs WHERE change_id=?', (r['id'],))]
-        # Plain words: the verb on its subjects and why, or the change's own summary.
-        line = ' '.join([r['verb']] + [', '.join(subjects)] * bool(subjects)) + ': ' + '; '.join(reasons) if reasons else r['summary']
-        who = {'model': 'Steward', 'owner': 'You', 'supervisor': 'Supervisor'}.get(r['actor'], r['actor'])
-        line = who + ': ' + line[:1].upper() + line[1:]
-        counts[line] = counts.get(line, 0) + 1
-    lines = [line + (f' (×{count})' if count > 1 else '') for line, count in counts.items()]
-    # Reply-to-message undo uses message_changes; internal ids need not reach the owner.
-    budget = max(20, 3900 // len(lines))
-    text = '\n'.join(line if len(line) <= budget else line[:budget-1] + '…' for line in lines)
-    notify(db, 'Changes', 'change', text, key, sender, now, 'tick', settings=settings,
-           change_id=rows[0]['id'], related_changes=[r['id'] for r in rows])
+    # Hidden bookkeeping gets its own reported marker, never an undo link on a message.
+    rows = db.execute("SELECT rowid,* FROM changes WHERE NOT EXISTS (SELECT 1 FROM message_changes m WHERE m.change_id=changes.id) AND NOT EXISTS (SELECT 1 FROM message_meta m WHERE m.key='changes_reported:' || changes.id) ORDER BY rowid").fetchall()
+    shown = []
+    with db:
+        for row in rows:
+            text = visible_change(db, row)
+            if text is None:
+                continue
+            if text:
+                shown.append((row, clipped(text, 3300)))
+            else:
+                db.execute('INSERT INTO message_meta VALUES (?,?)', ('changes_reported:' + row['id'], 'true'))
+    batch = []
+    batches = []
+    for entry in shown:
+        if batch and len(changes_text([*batch, entry])) > 3900:
+            batches.append(batch)
+            batch = []
+        batch.append(entry)
+    if batch:
+        batches.append(batch)
+    for i, batch in enumerate(batches):
+        notify(db, 'Changes', changes_text(batch),
+               key if len(batches) == 1 else f'{key}:{i}' if key else None,
+               sender, now, 'tick', settings=settings, change_id=batch[0][0]['id'],
+               related_changes=[r['id'] for r, _ in batch])
 
 
 def alerts(db, now, sender, settings):
@@ -269,7 +336,7 @@ def alerts(db, now, sender, settings):
                 db.execute("INSERT INTO message_meta VALUES ('garmin_auth',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                            (json.dumps(prior),))
         if auth == 'signed_out':
-            notify(db, 'Alerts', 'alert',
+            notify(db, 'Alerts',
                    'Garmin needs you to sign in again: run `~/tools/garmin/bin/garmin-login` on OCI',
                    prior['key'], sender, now, 'tick', settings=settings)
     problems = []
@@ -299,4 +366,4 @@ def alerts(db, now, sender, settings):
         problems.append(('wake', 'harness', wakes[-1]['started_at'], 'Check tty/Codex authentication and harness availability.'))
     for kind, subject, since, action in problems:
         key = f'alert:{kind}:{subject}:{local_day(now)}'
-        notify(db, 'Alerts', 'alert', f'{subject}: {kind} problem since {since}. {action}', key, sender, now, 'tick', settings=settings)
+        notify(db, 'Alerts', f'{subject}: {kind} problem since {since}. {action}', key, sender, now, 'tick', settings=settings)

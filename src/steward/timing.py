@@ -1,4 +1,4 @@
-"""Shared planning minimum, ritual and digest times."""
+"""Shared planning minimum, moment and digest times."""
 from datetime import datetime, time, timedelta, timezone
 import json
 from .settings import local_zone
@@ -149,7 +149,7 @@ def model_called(row):
 
 
 def completed_moment_wake(db, moment, now):
-    # By start, not finish: a wake's briefing (and its rituals) is built when it starts.
+    # By start, not finish: a wake's briefing (and its moments) is built when it starts.
     start = moment_due_at(db, moment, now)
     if start is None or now < start:
         return None

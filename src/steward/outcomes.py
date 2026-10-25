@@ -48,8 +48,8 @@ def closures(since, runner):
         return None
 
 
-def bundles(db, lo, hi, now, events):
-    """Rows for the owner's bundles: a block of a demand with items that started in the week and has ended."""
+def item_blocks(db, lo, hi, now, events):
+    """Rows for the owner's blocks with items: a block of a demand with items that started in the week and has ended."""
     specs = {}
     for r in db.execute('SELECT name, spec_json FROM demands ORDER BY version'):
         specs[r['name']] = json.loads(r['spec_json'])  # latest version wins
@@ -80,11 +80,11 @@ def bundles(db, lo, hi, now, events):
     reason = None if events is not None else 'gsd closures view unavailable or invalid'
     return [
         row('blocks_used', None if reason else used, elapsed, reason=reason,
-            definition=f"bundle blocks ended in week with an item closed done on the block's {local_zone().key.rsplit('/', 1)[-1]} day, by gsd's closure time / bundle blocks ended in week"),
+            definition=f"blocks with items ended in week with an item closed done on the block's {local_zone().key.rsplit('/', 1)[-1]} day, by gsd's closure time / blocks with items ended in week"),
         row('blocks_ignored', None if reason else ignored, None if reason else applied, reason=reason,
-            definition='bundle blocks ended in week, kept by the owner, with nothing closed that day / bundle blocks ended in week and kept'),
+            definition='blocks with items ended in week, kept by the owner, with nothing closed that day / blocks with items ended in week and kept'),
         row('pages_opened_before_block', opened, elapsed,
-            definition='bundle blocks whose prepared page was opened before the block started / bundle blocks ended in week'),
+            definition='blocks with items whose prepared page was opened before the block started / blocks with items ended in week'),
     ]
 
 
@@ -129,7 +129,7 @@ def weekly(db, week=None, now=None, runner=senses.run):
                     definition='Finds messages with a recorded owner reply by week end / sent Finds messages (digest counts once; not individual links; not proof of reading)'))
     rows.append(r1(start.isoformat(), lo, hi, now, runner))
     events = None if coverage else closures(lo.isoformat(), runner)
-    for r in bundles(db, lo, hi, now, events):
+    for r in item_blocks(db, lo, hi, now, events):
         rows.append(dict(r, status='unknown', reason=coverage, count=None, total=None) if coverage else r)
     rows.append(row('items_closed', None if events is None else sum(e['state'] == 'done' and inside(e['at']) for e in events),
                     reason=coverage or (None if events is not None else 'gsd closures view unavailable or invalid'),

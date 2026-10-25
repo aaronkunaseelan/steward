@@ -76,7 +76,7 @@ class DayClosePrepareTests(unittest.TestCase):
         self.assert_close(False, early)
         self.assert_close(True, self.now.replace(hour=15, minute=30))
 
-    def test_wake_during_prepare_does_not_consume_close_ritual(self):
+    def test_wake_during_prepare_does_not_consume_close_moment(self):
         self.prepare()
         self.prepare_run()
         checkpoint = json.dumps(dict(model_calls=1))

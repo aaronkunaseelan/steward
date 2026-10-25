@@ -1,5 +1,5 @@
+"""A bundle reserves time for gsd-owned items with code-rendered descriptions."""
 from fixture_mind import use_settings
-"""FB1-2a: a bundle is a block demand with gsd items; gsd owns the items, code renders the block."""
 from datetime import timedelta
 import json
 from pathlib import Path
@@ -156,7 +156,7 @@ class BundleTests(unittest.TestCase):
                         NOW, b.change(self.db, 'fixture', NOW, 'tick'))
             result = jobs.snapshot(self.db, now=NOW)
             result.update(calendar_b=b.briefing(self.db, NOW), live_pages=pages.live(self.db, NOW),
-                          rituals=['day_close'], day_close={})
+                          moments=['day_close'], day_close={})
             return result
 
         text = briefing.render(state([]), NOW, {})

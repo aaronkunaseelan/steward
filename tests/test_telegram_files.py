@@ -17,11 +17,14 @@ class TelegramFilesTests(unittest.TestCase):
         with patch('steward.notify.bot_token', return_value='fake'), patch.object(files, 'request', side_effect=responses) as request:
             self.assertEqual(files.bounded(dict(file_id='id')), b'raw')
             self.assertEqual(request.call_count, 2)
-            self.assertTrue(request.call_args_list[0].args[0].endswith('/getFile'))
-            self.assertTrue(request.call_args_list[1].args[0].endswith('/voice/a.ogg'))
+            metadata, content = request.call_args_list
+            self.assertTrue(metadata.args[0].endswith('/getFile'))
+            self.assertEqual(json.loads(metadata.args[2]), {'file_id': 'id'})
+            self.assertTrue(content.args[0].endswith('/voice/a.ogg'))
+            self.assertEqual(metadata.args[1], content.args[1])
 
     def test_provider_size_path_and_error_are_safe(self):
-        for info, reason in [(dict(file_size=files.LIMIT+1), 'too_large'),
+        for info, reason in [(dict(file_path='voice/a.ogg', file_size=files.LIMIT+1), 'too_large'),
                              (dict(file_path='../bad'), 'download')]:
             with patch('steward.notify.bot_token', return_value='fake'), patch.object(files, 'request', return_value=(json.dumps(dict(ok=True, result=info)).encode(), {})):
                 with self.assertRaisesRegex(files.Failed, reason):

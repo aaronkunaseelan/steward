@@ -52,11 +52,7 @@ class MessagesTests(unittest.TestCase):
                         return_value=BINDING):
                     def fail(offset):
                         raise OSError('SECRET_TOKEN')
-                    writes = []
-                    st.db.set_trace_callback(writes.append)
                     self.assertFalse(messages.poll(st.db, NOW, {}, fetcher=fail))
-                    st.db.set_trace_callback(None)
-                    self.assertEqual(sum(s.startswith('INSERT INTO message_meta') for s in writes), 1)
                     health = jobs.snapshot(st.db, now=NOW)['inbound_poll']
                     self.assertEqual(health['last_error'], dict(code='OSError', at=NOW.isoformat()))
                     self.assertEqual(health['status'], 'unknown')
@@ -219,11 +215,12 @@ class MessagesTests(unittest.TestCase):
         db.execute('DROP TABLE outbox_keys')
         db.execute('DROP TABLE moments'); db.execute("DELETE FROM changes WHERE actor=\'migration\'")
         db.execute('ALTER TABLE runs DROP COLUMN retry_of')
+        db.execute("ALTER TABLE outbox ADD COLUMN kind TEXT NOT NULL DEFAULT 'result'")
         db.execute('PRAGMA user_version=9')
         db.commit()
         db.close()
         with writer(self.root) as st:
-            self.assertEqual(st.db.execute('PRAGMA user_version').fetchone()[0], 17)
+            self.assertEqual(st.db.execute('PRAGMA user_version').fetchone()[0], 18)
             row = messages.inbox(st.db, BINDING)[0]
             self.assertEqual((row['text'], row['topic'], row['attachments']), ('keep this', 'Today', []))
             st.backup(Path(self.tmp.name) / 'backup')
@@ -261,7 +258,7 @@ class MessagesTests(unittest.TestCase):
     def test_reply_undo_and_ambiguous_prefix(self):
         with writer(self.root) as st:
             cid = self.add(st.db)['change_id']
-            notify(st.db,'Changes','change','created watch',sender=self.send,now=NOW,change_id=cid)
+            notify(st.db,'Changes','created watch',sender=self.send,now=NOW,change_id=cid)
             self.poll(st.db,[self.update(1,'undo',reply=1)])
             self.assertEqual(jobs.get(st.db,'jobs','watch')['state'],'removed')
             with st.db:
@@ -286,11 +283,9 @@ class MessagesTests(unittest.TestCase):
     def test_tick_retries_failed_moment_wake_not_completed_without_message(self):
         import json
         now = ORIENT.replace(hour=15, minute=55)  # 18:55 Athens
-        with patch('steward.senses.collect', return_value={}), \
-             patch('steward.senses.events', return_value=[]), \
+        with patch('steward.senses.events', return_value=[]), \
              patch('steward.mind.history', return_value=None), \
              patch('steward.pages.poll', return_value=True), \
-             patch('steward.archive.sweep', return_value={}), \
              patch('steward.memory.file_days'), patch('steward.memory.provocations'):
             for status, expected in [('failed', [True]), ('completed', [])]:
                 with self.subTest(status=status), writer(self.root) as st:
@@ -313,7 +308,7 @@ class MessagesTests(unittest.TestCase):
         from fixture_mind import TEST_ZONE
         morning = datetime(2026, 10, 26, 7, tzinfo=TEST_ZONE)
         with writer(self.root) as st:
-            notify(st.db, 'Today', 'result', 'Week gist', 'week:2026-10-18',
+            notify(st.db, 'Today', 'Week gist', 'week:2026-10-18',
                    self.send, morning - timedelta(hours=2))
             self.assertEqual(runtime.gate(st.db, morning), 'orientation')
         runtime.wake(self.root, clock=lambda:morning, settings={'wake_model':False},
@@ -328,35 +323,80 @@ class MessagesTests(unittest.TestCase):
         runtime.wake(self.root, clock=lambda:ORIENT,settings={'wake_model':False},prompt='test',sender=self.send)
         self.assertEqual(self.sent[0][0],'Today')
         self.assertIn('(fallback)',self.sent[0][1])
-        self.assertIn('Calendars unknown',self.sent[0][1])
+        self.assertIn('calendar unknown',self.sent[0][1])
         runtime.wake(self.root, clock=lambda:ORIENT,settings={'wake_model':False},prompt='test',sender=self.send)
         self.assertEqual(len(self.sent),1)
         later=ORIENT+timedelta(days=1)
         def model(argv):
             with writer(self.root) as st:
-                notify(st.db,'Today','result','Current state\nModel orientation',
+                notify(st.db,'Today','Current state\nModel orientation',
                        sender=self.send,now=later, moment='orientation')
             return 'run-1'
         runtime.wake(self.root,clock=lambda:later,settings={'wake_model':True},runner=model,prompt='test',sender=self.send)
         self.assertEqual(len(self.sent),2)
         self.assertNotIn('fallback',self.sent[-1][1])
 
+    def test_fallback_has_stable_groups_time_first_and_unknowns_last(self):
+        from steward.notify import render
+        observed = dict(
+            calendars=dict(verdict='fresh', data={'events': [
+                dict(start={'dateTime': '2026-10-15T22:00:00Z'}, summary='Late local event'),
+                dict(start={'dateTime': '2026-10-16T07:00:00Z'}, summary='Interview & prep')]}),
+            gsd=dict(verdict='stale', reason='Refresh has not finished', data={
+                'waiting_on_you': [dict(title='Review the reply')], 'waiting_on_others': []}))
+        with writer(self.root) as st, patch('steward.messages.senses.snapshot', return_value=observed):
+            text = messages.fallback(st.db, NOW)
+            markup, visible = render(st.db, text, NOW)
+            notify(st.db, 'Today', text, sender=self.send, now=NOW)
+        expected = ('Fri 16 Oct · Current state (fallback)\n\nToday\n01:00 Late local event\n10:00 Interview & prep'
+                    '\n\nYour list\nLast seen, not current\nReview the reply'
+                    '\n\nWaiting\nLast seen, not current\nNo items waiting on others'
+                    "\n\nCan't see\nyour list stale: Refresh has not finished")
+        self.assertEqual(visible, expected)
+        self.assertEqual(self.sent[0][1], markup)
+        self.assertTrue(markup.startswith('<b>Fri 16 Oct · Current state (fallback)</b>'))
+        self.assertIn('10:00 Interview &amp; prep', markup)
+        self.assertNotIn('Compute', visible)
+        self.assertNotIn('EEST', visible)
+
+    def test_fallback_keeps_unknowns_when_lists_are_long(self):
+        from steward.notify import render, TODAY_CHARACTERS
+        observed = dict(calendars=dict(verdict='unknown', reason='Calendar unreadable ' * 30,
+            data={'events': []}), gsd=dict(verdict='stale', reason='Refresh overdue ' * 30,
+            data={key: [dict(title='Long title ' * 40) for _ in range(10)]
+                  for key in ('waiting_on_you', 'waiting_on_others')}))
+        with writer(self.root) as st, patch('steward.messages.senses.snapshot', return_value=observed):
+            markup, visible = render(st.db, messages.fallback(st.db, NOW), NOW)
+        self.assertLessEqual(len(visible), TODAY_CHARACTERS)
+        self.assertIn("Can't see\ncalendar unknown:", visible)
+        self.assertIn('your list stale:', visible)
+        self.assertEqual(markup.count('<b>'), markup.count('</b>'))
+        self.assertEqual(sum(line.startswith('Long title') for line in visible.splitlines()), 12)
+
+    def test_moment_changes_and_canary_jobs(self):
+        from steward import timing
+        with writer(self.root) as st:
+            timing.set_moment(st.db, 'orientation', '07:15', '07:45', now=NOW, actor='model')
+            jobs.job_verb(st.db, 'add', 'format-canary', dict(justification='Test only',
+                argv=[released()], needs={'every': {'min': '1h', 'max': '1d'}}), now=NOW)
+            messages.changes(st.db, NOW, self.send, {})
+        self.assertEqual(len(self.sent), 1)
+        self.assertEqual(self.sent[0][1], '<b>Changes</b>\n\n07:15–07:45 orientation · updated\n\nReply &quot;undo&quot; to undo it.')
+
     def test_today_limit_refuses_detail_before_any_effect(self):
         with writer(self.root) as st:
-            accepted = notify(st.db, 'Today', 'result', 'x' * 1200, sender=self.send, now=NOW)
+            accepted = notify(st.db, 'Today', 'x' * 1200, sender=self.send, now=NOW)
             self.assertEqual(accepted['status'], 'sent')
             before = st.db.execute('SELECT count(*) FROM outbox').fetchone()[0]
             with self.assertRaisesRegex(StateError, 'page'):
-                notify(st.db, 'Today', 'result', 'x' * 1201, sender=self.send, now=NOW)
+                notify(st.db, 'Today', 'x' * 1201, sender=self.send, now=NOW)
             self.assertEqual(st.db.execute('SELECT count(*) FROM outbox').fetchone()[0], before)
             self.assertEqual(len(self.sent), 1)
 
-    def test_today_limit_digest_once_told_and_quiet(self):
+    def test_digest_once_told_and_quiet(self):
         with writer(self.root) as st:
-            with self.assertRaises(StateError):
-                notify(st.db,'Today','result','x'*2000,sender=self.send,now=NOW)
             for n in range(3):
-                notify(st.db,'Finds','result','source '+str(n),'url:'+str(n),sender=self.send,now=NOW)
+                notify(st.db,'Finds','source '+str(n),'url:'+str(n),sender=self.send,now=NOW)
             flush(st.db,self.send,NOW+timedelta(hours=9, minutes=29),{})
             self.assertEqual(self.sent,[])
             flush(st.db,self.send,NOW+timedelta(hours=9, minutes=30),{})
@@ -365,14 +405,14 @@ class MessagesTests(unittest.TestCase):
             self.assertTrue(self.sent[0][2]['disable_notification'])
             flush(st.db,self.send,NOW+timedelta(hours=10),{})
             self.assertEqual(len(self.sent),1)
-            notify(st.db,'Talk','result','quiet',sender=self.send,now=NOW-timedelta(minutes=1))
+            notify(st.db,'Talk','quiet',sender=self.send,now=NOW-timedelta(minutes=1))
             self.assertTrue(self.sent[-1][2]['disable_notification'])
 
     def test_digest_splits_and_pending_dedup(self):
         with writer(self.root) as st:
             for i in range(3):
-                notify(st.db,'Finds','result','x'*2100,str(i),sender=self.send,now=NOW)
-            report=notify(st.db,'Finds','result','duplicate','0',sender=self.send,now=NOW)
+                notify(st.db,'Finds','x'*2100,str(i),sender=self.send,now=NOW)
+            report=notify(st.db,'Finds','duplicate','0',sender=self.send,now=NOW)
             self.assertEqual(report['status'],'already_told')
             flush(st.db,self.send,NOW+timedelta(hours=10),{})
             self.assertEqual(len(self.sent),3)
@@ -383,7 +423,7 @@ class MessagesTests(unittest.TestCase):
         athens = TEST_ZONE
         evening = datetime(2026, 10, 16, 23, 35, tzinfo=athens)
         with writer(self.root) as st:
-            notify(st.db,'Finds','result','late find','k-late',sender=self.send,now=evening)
+            notify(st.db,'Finds','late find','k-late',sender=self.send,now=evening)
             flush(st.db,self.send,evening+timedelta(minutes=10),{})
             flush(st.db,self.send,datetime(2026, 10, 17, 18, 29, tzinfo=athens),{})
             self.assertEqual(self.sent,[])
@@ -418,88 +458,101 @@ class MessagesTests(unittest.TestCase):
             messages.alerts(st.db,NOW+timedelta(days=1),self.send,{})
             self.assertEqual(len(self.sent),2)
 
-    def test_wake_changes_are_aggregated_and_reply_is_ambiguous(self):
-        def model(argv):
-            with writer(self.root) as st:
-                self.add(st.db)
-                jobs.job_verb(st.db,'pause','watch',actor='model',now=ORIENT)
-                jobs.job_verb(st.db,'resume','watch',actor='model',now=ORIENT)
-            return 'run-1'
-        runtime.wake(self.root,clock=lambda:ORIENT,settings={'wake_model':True},runner=model,prompt='test',sender=self.send)
-        changes=[m for m in self.sent if m[0]=='Changes']
-        self.assertEqual(len(changes),1)
-        self.assertNotIn('undo ', changes[0][1])
-        self.assertIn('You:', changes[0][1])
-        self.assertEqual(changes[0][1].count('Steward:'), 2)
+    def test_only_requested_compute_changes_are_reported(self):
         with writer(self.root) as st:
-            mid=next(i+1 for i,m in enumerate(self.sent) if m[0]=='Changes')
-            self.poll(st.db,[self.update(9,'undo',reply=mid)])
-        self.assertIn('ambiguous',self.sent[-1][1])
+            self.poll(st.db, [self.update(1, 'Resume the watch')])
+            self.add(st.db)
+            jobs.job_verb(st.db, 'pause', 'watch', actor='model', now=NOW)
+            jobs.job_verb(st.db, 'resume', 'watch', actor='model', now=NOW, owner_message=1)
+            jobs.job_verb(st.db, 'pause', 'watch', actor='maintenance', now=NOW)
+            messages.changes(st.db, NOW, self.send, {})
+            messages.changes(st.db, NOW, self.send, {})
+            self.assertEqual(len(self.sent), 1)
+            text = self.sent[0][1]
+            self.assertTrue(text.startswith('<b>Changes</b>\n\nYou: Job add watch'))
+            self.assertIn('\n\nJob resume watch\nKeep inputs fresh', text)
+            self.assertNotIn('Job pause', text)
+            self.assertNotIn('Steward:', text)
+            self.assertIn('Reply &quot;undo ID&quot;', text)
+            self.poll(st.db, [self.update(9, 'undo', reply=1)])
+            self.assertIn('ambiguous', self.sent[-1][1])
 
-    def test_migration_baselines_historical_edits_but_reports_new_actors_once(self):
+    def test_migration_baselines_historical_edits_but_reports_new_owner_changes_once(self):
         with writer(self.root) as st:
             self.add(st.db)
-            jobs.job_verb(st.db, 'pause', 'watch', actor='supervisor', now=NOW)
-            jobs.job_verb(st.db, 'resume', 'watch', actor='owner', now=NOW)
+            jobs.job_verb(st.db, 'pause', 'watch', actor='maintenance', now=NOW)
             st.db.execute('ALTER TABLE runs DROP COLUMN retry_of')
+            st.db.execute("ALTER TABLE outbox ADD COLUMN kind TEXT NOT NULL DEFAULT 'result'")
             st.db.execute('PRAGMA user_version=16')
             st.db.commit()
         with writer(self.root) as st:
             messages.changes(st.db, NOW, self.send, {})
             self.assertEqual(self.sent, [])
-            jobs.job_verb(st.db, 'pause', 'watch', actor='supervisor', now=NOW)
             jobs.job_verb(st.db, 'resume', 'watch', actor='owner', now=NOW)
             messages.changes(st.db, NOW, self.send, {})
             messages.changes(st.db, NOW, self.send, {})
         self.assertEqual(len(self.sent), 1)
-        text = self.sent[0][1]
-        self.assertEqual(text.count('Supervisor:'), 1)
-        self.assertEqual(text.count('You:'), 1)
-        self.assertNotIn('Job add', text)
+        self.assertNotIn('Maintenance:', self.sent[0][1])
+        self.assertIn('You: Job resume watch', self.sent[0][1])
+        self.assertNotIn('Job add', self.sent[0][1])
 
-    def test_external_edits_are_named_once_without_a_wake_cursor(self):
+    def test_hidden_bookkeeping_never_becomes_reply_undo_target(self):
         with writer(self.root) as st:
             self.add(st.db)
-            jobs.job_verb(st.db, 'pause', 'watch', actor='supervisor', now=NOW)
-            jobs.job_verb(st.db, 'resume', 'watch', actor='owner', now=NOW)
-            messages.changes(st.db, NOW, self.send, {})
-            messages.changes(st.db, NOW, self.send, {})
-            rows = st.db.execute("SELECT id FROM changes WHERE verb IN ('job pause','job resume')").fetchall()
-        text = '\n'.join(m[1] for m in self.sent if m[0] == 'Changes')
-        self.assertEqual(text.count('Supervisor:'), 1)
-        self.assertEqual(text.count('You: Job resume'), 1)
-        for row in rows:
-            self.assertNotIn(row[0][:8], text)
-        self.assertEqual(len([m for m in self.sent if m[0] == 'Changes']), 1)
-
-    def test_identical_change_lines_collapse_in_order_but_keep_all_undo_links(self):
-        with writer(self.root) as st:
             with st.db:
-                ids = [jobs.change(st.db, verb, NOW, actor) for verb, actor in [
-                    ('block choose', 'model'), ('memory write', 'model'),
-                    ('block choose', 'model'), ('block choose', 'owner'),
-                    ('block choose', 'model')]]
+                for verb in ('page put', 'page rm', 'interest set', 'interest rm',
+                             'memory write', 'block demand add', 'block demand edit',
+                             'block demand rm', 'undo block demand', 'mind', 'release',
+                             'tick skip', 'external-change', 'inbox done'):
+                    jobs.change(st.db, verb, NOW, 'model')
             messages.changes(st.db, NOW, self.send, {})
-            self.assertEqual(self.sent[0][1].splitlines(), [
-                'Steward: Block choose (×3)', 'Steward: Memory write', 'You: Block choose'])
-            linked = [r[0] for r in st.db.execute(
-                'SELECT change_id FROM message_changes ORDER BY rowid')]
-            self.assertEqual(linked, ids)
             messages.changes(st.db, NOW, self.send, {})
             self.assertEqual(len(self.sent), 1)
+            self.assertEqual(self.sent[0][1], '<b>Changes</b>\n\nYou: Job add watch\nKeep inputs fresh\n\nReply &quot;undo&quot; to undo it.')
             self.poll(st.db, [self.update(9, 'undo', reply=1)])
-            self.assertIn('ambiguous', self.sent[-1][1])
-            self.assertEqual(st.db.execute(
-                "SELECT count(*) FROM changes WHERE verb='undo'").fetchone()[0], 0)
+            self.assertIn('Restored watch', self.sent[-1][1])
+            self.assertEqual(jobs.get(st.db, 'jobs', 'watch')['state'], 'removed')
 
-    def test_change_summary_reads_plainly(self):
+    def test_bookkeeping_alone_sends_nothing_and_is_not_recollected(self):
         with writer(self.root) as st:
             with st.db:
-                cid=jobs.change(st.db,'block demand add',NOW,'model')
-                st.db.execute('UPDATE changes SET summary=? WHERE id=?',('add demand gym: three slots a week',cid))
-            messages.changes(st.db, NOW,self.send,{})
-        self.assertEqual(self.sent[0][1], 'Steward: Add demand gym: three slots a week')
-        self.assertTrue(self.sent[0][2]['disable_notification'])
+                jobs.change(st.db, 'memory write', NOW, 'model')
+            messages.changes(st.db, NOW, self.send, {})
+            with patch('steward.messages.visible_change', side_effect=AssertionError('recollected')):
+                messages.changes(st.db, NOW, self.send, {})
+        self.assertEqual(self.sent, [])
+
+    def test_cli_keeps_owner_request_on_job_run_and_undo(self):
+        from contextlib import redirect_stdout
+        import io
+        import json
+        import os
+        from steward.cli import main
+        with writer(self.root) as st:
+            self.poll(st.db, [self.update(1, 'Pause the watch, undo it, then plan a run')])
+            self.add(st.db)
+            messages.changes(st.db, NOW, self.send, {})
+        def invoke(argv):
+            output = io.StringIO()
+            with redirect_stdout(output), patch.dict(os.environ, STEWARD_ACTOR='model'), patch('steward.jobs.now_utc', return_value=NOW):
+                self.assertEqual(main([*argv, '--state', str(self.root), '--owner-message', '1']), 0)
+            with writer(self.root) as st:
+                messages.changes(st.db, NOW, self.send, {})
+            return json.loads(output.getvalue())
+        paused = invoke(['job', 'pause', 'watch'])
+        self.assertIn('\n\nJob pause watch\nKeep inputs fresh', self.sent[-1][1])
+        invoke(['undo', paused['change_id']])
+        self.assertIn('\n\nUndo watch\nKeep inputs fresh', self.sent[-1][1])
+        invoke(['run', 'plan', 'watch', '--at', (NOW + timedelta(hours=1)).isoformat(), '--reason', 'Owner asked'])
+        self.assertIn('\n\nRun plan watch\nOwner asked', self.sent[-1][1])
+        self.assertNotIn('You:', self.sent[-1][1])
+
+    def test_owner_request_requires_real_inbox_message(self):
+        with writer(self.root) as st:
+            self.add(st.db)
+            with self.assertRaisesRegex(StateError, 'unknown owner message'):
+                jobs.job_verb(st.db, 'pause', 'watch', actor='model', owner_message=999)
+            self.assertEqual(jobs.get(st.db, 'jobs', 'watch')['state'], 'active')
 
     def test_failed_wakes_and_provider_limit_alert(self):
         with writer(self.root) as st:
@@ -512,13 +565,15 @@ class MessagesTests(unittest.TestCase):
             messages.alerts(st.db,NOW,self.send,{})
             self.assertEqual(len(self.sent),2)
             self.assertTrue(all(m[0]=='Alerts' for m in self.sent))
+            self.assertEqual({m[1].split(' problem since')[0] for m in self.sent},
+                             {'Sol: limit', 'harness: wake'})
             self.assertTrue(all(m[2]['disable_notification'] for m in self.sent))
 
     def test_failed_sender_retries_committed_intent(self):
         def fail(*a,**k):
             raise OSError('TOKEN must stay private')
         with writer(self.root) as st:
-            result=notify(st.db,'Talk','result','answer',sender=fail,now=NOW)
+            result=notify(st.db,'Talk','answer',sender=fail,now=NOW)
             self.assertEqual(result['status'],'pending')
             self.assertNotIn('TOKEN',str(result))
             flush(st.db,self.send,NOW,{})
@@ -532,4 +587,11 @@ class MessagesTests(unittest.TestCase):
             self.poll(st.db,[self.update(1,'instruction')])
         with redirect_stdout(io.StringIO()):
             self.assertEqual(main(['inbox','--state',str(self.root),'done','1']),0)
-            self.assertEqual(main(['notify','--state',str(self.root),'--topic','Today','--kind','result','x'*2000]),2)
+        with writer(self.root) as st:
+            self.assertEqual(messages.inbox(st.db), [])
+        output = io.StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(main(['notify','--state',str(self.root),'--topic','Today','x'*2000]),2)
+        self.assertIn('put the detail on a page', output.getvalue())
+        with writer(self.root) as st:
+            self.assertEqual(st.db.execute('SELECT count(*) FROM outbox').fetchone()[0], 0)

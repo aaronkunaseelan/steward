@@ -23,30 +23,24 @@ class SenseAgeTests(unittest.TestCase):
                 self.assertEqual(senses.freshness(name, reading, NOW)['verdict'], expected)
 
     def test_planned_skip_cannot_make_old_cached_reading_fresh(self):
-        with tempfile.TemporaryDirectory() as root, writer(Path(root), initialize=True) as st:
-            observed = NOW - timedelta(hours=3)
-            end = observed + timedelta(hours=3, minutes=20)
-            tick_skips.skip(st.db, observed.isoformat(), end.isoformat(), 'planned night', now=observed)
-            senses.save(st.db, {'calendars': dict(status='ok', data={'events': []})}, observed,
-                        jobs.change(st.db, 'fixture', observed, 'tick'))
-            reading = senses.snapshot(st.db, NOW)['calendars']
-            self.assertEqual(reading['age'], 10800)
-            self.assertEqual(reading['verdict'], 'stale')
-            page = briefing.render({'senses': senses.snapshot(st.db, NOW)}, NOW, {})
-            self.assertIn('## Calendar [stale]', page)
-            self.assertEqual(senses.snapshot(st.db, end + timedelta(minutes=30))['calendars']['verdict'], 'stale')
-            self.assertEqual(senses.snapshot(st.db, end + timedelta(minutes=31))['calendars']['verdict'], 'stale')
-
-    def test_overlapping_skips_do_not_change_elapsed_read_age(self):
-        with tempfile.TemporaryDirectory() as root, writer(Path(root), initialize=True) as st:
-            observed = NOW - timedelta(hours=4)
-            tick_skips.skip(st.db, (observed - timedelta(hours=1)).isoformat(),
-                            (observed + timedelta(hours=1)).isoformat(), 'first', now=observed - timedelta(hours=2))
-            tick_skips.skip(st.db, (observed + timedelta(minutes=30)).isoformat(),
-                            (observed + timedelta(hours=2)).isoformat(), 'second', now=observed)
-            senses.save(st.db, {'machine': dict(status='ok', data={})}, observed,
-                        jobs.change(st.db, 'fixture', observed, 'tick'))
-            self.assertEqual(senses.snapshot(st.db, NOW)['machine']['age'], 14400)
+        for overlapping in (False, True):
+            with self.subTest(overlapping=overlapping), tempfile.TemporaryDirectory() as root, writer(Path(root), initialize=True) as st:
+                observed = NOW - timedelta(hours=3)
+                end = observed + timedelta(hours=3, minutes=20)
+                tick_skips.skip(st.db, observed.isoformat(), end.isoformat(), 'planned night', now=observed)
+                if overlapping:
+                    tick_skips.skip(st.db, (observed - timedelta(hours=1)).isoformat(),
+                                    (observed + timedelta(hours=1)).isoformat(),
+                                    'overlapping window', now=observed - timedelta(hours=2))
+                senses.save(st.db, {'calendars': dict(status='ok', data={'events': []})}, observed,
+                            jobs.change(st.db, 'fixture', observed, 'tick'))
+                reading = senses.snapshot(st.db, NOW)['calendars']
+                self.assertEqual(reading['age'], 10800)
+                self.assertEqual(reading['verdict'], 'stale')
+                page = briefing.render({'senses': senses.snapshot(st.db, NOW)}, NOW, {})
+                self.assertIn('## Calendar [stale]', page)
+                self.assertEqual(senses.snapshot(st.db, end + timedelta(minutes=30))['calendars']['verdict'], 'stale')
+                self.assertEqual(senses.snapshot(st.db, end + timedelta(minutes=31))['calendars']['verdict'], 'stale')
 
     def test_read_age_never_overrides_failed_reads_or_producer_expiry(self):
         failed = dict(status='unknown', at=NOW.isoformat(), reason='read failed')

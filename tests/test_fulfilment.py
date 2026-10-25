@@ -116,7 +116,7 @@ class FulfilmentReaderTests(unittest.TestCase):
             b.change(self.db, 'fixture', NOW, 'owner'))
         return key
 
-    def test_old_monday_cache_is_unknown_until_sunday_week_read(self):
+    def test_cache_without_sunday_week_is_unknown_until_refreshed(self):
         self.program()
         self.health([session()])
         row = self.db.execute("SELECT id,payload FROM senses WHERE name='health' ORDER BY id DESC LIMIT 1").fetchone()
@@ -262,7 +262,7 @@ class FulfilmentReaderTests(unittest.TestCase):
         self.assertEqual({c['action'] for c in plan['candidates']['choices']}, {'keep', 'drop'})
         result = self.choose(next(c for c in plan['candidates']['choices'] if c['action'] == 'drop'))
         self.assertFalse(self.gog.events['schedule'])
-        self.assertIn('deleted from', self.db.execute('SELECT summary FROM changes WHERE id=?',
+        self.assertIn('· removed', self.db.execute('SELECT summary FROM changes WHERE id=?',
                                                      (result['change_id'],)).fetchone()[0])
 
     def test_cached_watch_expires_at_planning_time(self):
@@ -282,9 +282,10 @@ class FulfilmentReaderTests(unittest.TestCase):
             self.assertIsNone(plan['fulfilment']['movement']['remaining'])
         for bad in (None, 'not-a-time', '2026-10-19T12:00:00'):
             senses.save(self.db, {'health': dict(status='ok', data=dict(
-                date=NOW.date().isoformat(), auth='ok', watch_uploaded_at=NOW.isoformat(), week=[], watch_fresh_until=bad))}, NOW,
+                date=NOW.date().isoformat(), week_start='2026-10-18', auth='ok', watch_uploaded_at=NOW.isoformat(), week=[], watch_fresh_until=bad))}, NOW,
                 b.change(self.db, 'fixture', NOW, 'owner'))
-            self.assertTrue(self.plan()['movement']['unknown'])
+            self.assertEqual(self.plan()['movement']['unknown'],
+                             'Garmin health unknown' if bad is None else 'Garmin health stale')
 
     def test_unknown_watch_holds_existing_dose_and_movement(self):
         self.program()
@@ -313,7 +314,11 @@ class FulfilmentReaderTests(unittest.TestCase):
         self.health([session()])
         plan = self.plan()
         key, text = next(iter(plan['description_refreshes'].items()))
-        self.assertIn('Strength, 50 min: 1/3', text)
+        self.assertEqual(text, '1. VO2 max, 45 min: 0/2 this week\n'
+                         '2. Anaerobic, 30 min: 0/1 this week\n'
+                         '3. Long-duration, ≥30 min: 0/150 min this week\n'
+                         '4. Strength, 50 min: 1/3 this week\n'
+                         '2 h: warm-up, shower and walking included.')
         keep = next(c for c in plan['candidates']['choices']
                     if c['task_id'] == key and c['action'] == 'keep')
         old_span = b.event_span(self.gog.events['schedule'][0])
@@ -327,7 +332,7 @@ class FulfilmentReaderTests(unittest.TestCase):
         messages.changes(self.db, NOW, lambda topic, text, **options:
                          sent.append((topic, text)) or {'message_id': 1}, fixtures.SETTINGS)
         self.assertEqual(len(sent), 1)
-        self.assertIn('options updated at ' + b.block_time(*(t.isoformat() for t in old_span)), sent[0][1])
+        self.assertIn(b.block_time(*(t.isoformat() for t in old_span)) + ' Movement · updated', sent[0][1])
         writes = sum('update' in call for call in self.gog.calls)
         self.choose(keep)
         self.assertEqual(sum('update' in call for call in self.gog.calls), writes)
@@ -415,8 +420,7 @@ class FulfilmentReaderTests(unittest.TestCase):
         plan = self.plan()
         self.assertEqual(plan['movement'], b.briefing(self.db, NOW)['movement'])
         self.assertEqual(plan['movement'], jobs.snapshot(self.db, now=NOW)['calendar_b']['movement'])
-        with patch.object(intent, 'ticks', return_value={}):
-            doc = intent.steward_doc(self.db, NOW, {})
+        doc = intent.steward_doc(self.db, NOW, {})
         learned = next(x for x in doc['blocks'] if x['kind'] == 'learned')
         self.assertEqual(plan['movement']['description'].splitlines(),
                          [row[1] for row in learned['demands'] if row[0] == 'Movement options'])

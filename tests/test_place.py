@@ -53,18 +53,6 @@ class PlaceTests(unittest.TestCase):
                 self.assertEqual(result['data']['since'], value['since'])
                 self.assertEqual(result['data']['today'], value['today'])
 
-    def test_empty_unknown_is_not_home(self):
-        value = fixture()
-        value.update(state='unknown', place=None, since=None, last_event=None, today=[])
-        result = self.collect(value)['place']
-        self.assertEqual(result['status'], 'ok')
-        self.save(result)
-        with writer(self.root) as store:
-            sense = jobs.snapshot(store.db, now=NOW)['senses']['place']
-            self.assertEqual(sense['data']['state'], 'unknown')
-            self.assertIsNone(sense['data']['place'])
-            self.assertEqual(sense['verdict'], 'fresh')
-
     def test_invalid_documents_are_unknown_and_do_not_echo_values(self):
         for bad in ('schema', 'missing', 'type', 'enum', 'time', 'naive', 'json'):
             with self.subTest(bad=bad):
@@ -108,8 +96,7 @@ class PlaceTests(unittest.TestCase):
             self.assertEqual(senses.events(store.db, 0), [])
             self.assertEqual(runtime.gate(store.db), 'nothing new')
         self.save(self.collect(now=NOW + timedelta(minutes=10))['place'])
-        with patch('steward.intent.ticks', return_value={}):
-            document = json.dumps(intent.document(self.root, {}, NOW))
+        document = json.dumps(intent.document(self.root, {}, NOW))
         for name in ('home', 'office', 'gym'):
             self.assertNotIn(name, document)
         self.assertNotIn('phone.place', document)

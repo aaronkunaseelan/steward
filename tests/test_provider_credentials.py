@@ -1,5 +1,5 @@
-from fixture_mind import use_settings
 """Runtime tokens are injected by the service, never discovered in config files."""
+from fixture_mind import use_settings
 import os
 from pathlib import Path
 import tempfile
@@ -52,6 +52,13 @@ class ProviderCredentialsTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         for service in ('steward-tick.service', 'steward-wake.service'):
             with self.subTest(service=service):
-                unit = (root / 'systemd' / service).read_text()
-                self.assertIn('EnvironmentFile=%h/.config/steward/telegram.env\n'
-                              'EnvironmentFile=%h/.config/steward/pages.env\n', unit)
+                section, files = None, []
+                for line in (root / 'systemd' / service).read_text().splitlines():
+                    line = line.strip()
+                    if line.startswith('['):
+                        section = line
+                    key, _, value = line.partition('=')
+                    if section == '[Service]' and key.strip() == 'EnvironmentFile':
+                        files.extend(value.split())
+                self.assertIn('%h/.config/steward/telegram.env', files)
+                self.assertIn('%h/.config/steward/pages.env', files)

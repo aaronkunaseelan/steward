@@ -31,11 +31,12 @@ class PagesRequestTests(unittest.TestCase):
         with patch('steward.pages.token', return_value='test-only'), patch('steward.pages.urllib.request.build_opener') as opener:
             response = opener.return_value.open.return_value.__enter__.return_value
             response.status = 200
-            response.read.return_value = b'object'
-            self.assertEqual(pages.request('GET', '/_api/pages/test'), (200, b'object'))
+            response.read.side_effect = io.BytesIO(b'x' * (10 * 1024 * 1024 + 100)).read
+            status, body = pages.request('GET', '/_api/pages/test')
+            self.assertEqual(status, 200)
+            self.assertEqual(body, b'x' * (10 * 1024 * 1024 + 1))
             req = opener.return_value.open.call_args.args[0]
             self.assertEqual(req.get_header('Authorization'), 'Bearer test-only')
-            response.read.assert_called_once_with(pages.LIMIT + 1)
 
     def test_explicit_user_agent_on_every_pages_request(self):
         with patch('steward.pages.token', return_value='test-only'), patch('steward.pages.urllib.request.build_opener') as opener:
@@ -78,7 +79,6 @@ class PagesTests(unittest.TestCase):
                          now=NOW, transport=self.transport, **kw)
 
     def test_readback_verifies_object_not_login_response(self):
-        # BR2 G4: a 200 login response must never verify an upload.
         for body in (b'<form>login</form>', b'wrong stored bytes'):
             with self.subTest(body=body):
                 page = pages.put(self.db, 'Notes', b'expected', 'x.txt', now=NOW,
@@ -113,8 +113,10 @@ class PagesTests(unittest.TestCase):
         self.assertEqual(len(slugs), 100)
         for slug in slugs:
             self.assertRegex(slug, r'^evidence-better-day-[a-z2-7]{12}$')
-        self.assertTrue(pages.valid_slug(pages.make_slug('x' * 1000)))
-        self.assertTrue(pages.valid_slug(pages.make_slug('the and of')))
+        long_slug = pages.make_slug('x' * 1000)
+        self.assertRegex(long_slug, r'^x{18}-[a-z2-7]{12}$')
+        self.assertLessEqual(len(long_slug), 80)
+        self.assertRegex(pages.make_slug('the and of'), r'^page-[a-z2-7]{12}$')
         self.assertFalse(pages.valid_slug('a--b'))
 
     def test_template_and_redaction_before_upload(self):
@@ -155,9 +157,14 @@ class PagesTests(unittest.TestCase):
             render(self.db, '[Evidence](' + page['url'] + ')', NOW)
 
     def test_upload_failure_is_recorded_and_does_not_read(self):
-        page = pages.put(self.db, 'Notes', b'Hi', 'x.txt', now=NOW, transport=lambda *a, **k: (503, b''))
+        calls = []
+        def unavailable(method, path, **options):
+            calls.append(method)
+            return 503, b''
+        page = pages.put(self.db, 'Notes', b'Hi', 'x.txt', now=NOW, transport=unavailable)
         self.assertEqual(page['state'], 'failed')
         self.assertEqual(pages.read_meta(self.db, 'pages_put_error')['code'], 'put_503')
+        self.assertEqual(calls, ['PUT'])
         with patch('steward.pages.request', side_effect=OSError('secret must not leak')):
             page = pages.put(self.db, 'Notes', b'Hi', 'x.txt', now=NOW)
         self.assertEqual(page['state'], 'failed')
@@ -250,7 +257,7 @@ class PagesTests(unittest.TestCase):
         sent = []
         sender = lambda topic, text, **options: sent.append((text, options)) or 1
         text = 'A < B & "C" [notes & details](https://example.org/?a=1&b=2)'
-        notify(self.db, 'Changes', 'result', text, sender=sender, now=NOW)
+        notify(self.db, 'Changes', text, sender=sender, now=NOW)
         self.assertEqual(sent[0][0], 'A &lt; B &amp; &quot;C&quot; <a href="https://example.org/?a=1&amp;b=2">notes &amp; details</a>')
         self.assertEqual(sent[0][1]['parse_mode'], 'HTML')
         adjacent, visible = render(self.db, '[a](https://a.test)[b](https://b.test)', NOW)
@@ -261,19 +268,36 @@ class PagesTests(unittest.TestCase):
             from steward.notify import telegram_sender
             telegram_sender('Changes', 'text', parse_mode='HTML')
             self.assertEqual(api.call_args.args[1]['link_preview_options'], {'is_disabled':True})
-        notify(self.db, 'Today', 'result', '[x](https://example.org/' + 'a'*5000 + ')', now=NOW, sender=sender)
+        notify(self.db, 'Today', '[x](https://example.org/' + 'a'*5000 + ')', now=NOW, sender=sender)
         self.assertEqual(len(sent), 2)
+
+    def test_bold_is_escaped_local_markup_with_matching_visible_text(self):
+        cases = [
+            ('**Fri 23 Oct**\nToday', '<b>Fri 23 Oct</b>\nToday', 'Fri 23 Oct\nToday'),
+            ('**Today** [Notes](https://example.org) **Ready**',
+             '<b>Today</b> <a href="https://example.org">Notes</a> <b>Ready</b>', 'Today Notes Ready'),
+            ('**<script>x & y</script>**', '<b>&lt;script&gt;x &amp; y&lt;/script&gt;</b>', '<script>x & y</script>'),
+            ('**Unpaired', '**Unpaired', '**Unpaired'),
+            ('**Across [Notes](https://example.org) link**',
+             '**Across <a href="https://example.org">Notes</a> link**', '**Across Notes link**'),
+            ('**Across [Notes](https://example.org) link** **Next**',
+             '**Across <a href="https://example.org">Notes</a> link** <b>Next</b>', '**Across Notes link** Next'),
+            ('<b>literal</b> _plain_ *plain*', '&lt;b&gt;literal&lt;/b&gt; _plain_ *plain*', '<b>literal</b> _plain_ *plain*'),
+        ]
+        for source, markup, visible in cases:
+            with self.subTest(source=source):
+                self.assertEqual(render(self.db, source, NOW), (markup, visible))
 
     def test_notify_refuses_bare_urls_and_unsafe_links(self):
         for text in ['see https://example.org', 'www.example.org', '<a href="https://example.org">x</a>', '[x](https://user:pass@example.org)']:
             with self.subTest(text=text), self.assertRaises(StateError):
-                notify(self.db, 'Changes', 'result', text, now=NOW)
+                notify(self.db, 'Changes', text, now=NOW)
 
     def test_live_dead_expired_links_and_expiry_at_delivery(self):
         page = self.put()
         link = '[Evidence](' + page['url'] + ')'
         self.assertIn('<a href=', render(self.db, link, NOW)[0])
-        notify(self.db, 'Finds', 'result', link, now=NOW)
+        notify(self.db, 'Finds', link, now=NOW)
         sent = []
         flush(self.db, sender=lambda *a, **k: sent.append(a) or 1, now=NOW+timedelta(days=29))
         self.assertEqual(sent, [('Finds', 'Evidence (page expired)')])
@@ -288,7 +312,7 @@ class PagesTests(unittest.TestCase):
 
     def test_removed_page_label_is_plain_escaped_text_at_send(self):
         page = self.put()
-        result = notify(self.db, 'Finds', 'result', 'Read [A < B & notes](' + page['url'] + ') or [source](https://example.org).', now=NOW)
+        result = notify(self.db, 'Finds', 'Read [A < B & notes](' + page['url'] + ') or [source](https://example.org).', now=NOW)
         pages.remove(self.db, page['slug'], now=NOW, transport=self.transport)
         sent = []
         flush(self.db, sender=lambda topic, text, **kw: sent.append(text) or 1, now=NOW+timedelta(days=1))
@@ -298,8 +322,8 @@ class PagesTests(unittest.TestCase):
         self.assertIn(page['url'], row['text'])  # Preserve the original intent.
 
     def test_unrenderable_row_fails_visibly_without_blocking_other_digest_rows(self):
-        bad = notify(self.db, 'Finds', 'result', 'Valid at enqueue', now=NOW)
-        good = notify(self.db, 'Finds', 'result', 'Useful finding', now=NOW)
+        bad = notify(self.db, 'Finds', 'Valid at enqueue', now=NOW)
+        good = notify(self.db, 'Finds', 'Useful finding', now=NOW)
         with self.db:
             self.db.execute('UPDATE outbox SET text=? WHERE id=?', ('Legacy bare https://example.org/private', bad['outbox_id']))
         sent = []
@@ -316,7 +340,7 @@ class PagesTests(unittest.TestCase):
     def test_expiry_suffixes_split_overflowing_digest(self):
         page = self.put()
         for _ in range(2):
-            notify(self.db, 'Finds', 'result', 'x'*1989 + ' [notes](' + page['url'] + ')', now=NOW)
+            notify(self.db, 'Finds', 'x'*1989 + ' [notes](' + page['url'] + ')', now=NOW)
         sent = []
         flush(self.db, sender=lambda topic, text, **kw: sent.append(text) or 1, now=NOW+timedelta(days=29))
         self.assertEqual(len(sent), 2)
@@ -325,7 +349,7 @@ class PagesTests(unittest.TestCase):
 
     def test_unrenderable_length_fails_without_sending(self):
         page = self.put()
-        result = notify(self.db, 'Finds', 'result', 'x'*3994 + ' [note](' + page['url'] + ')', now=NOW)
+        result = notify(self.db, 'Finds', 'x'*3994 + ' [note](' + page['url'] + ')', now=NOW)
         later = NOW+timedelta(days=29)
         flush(self.db, sender=lambda *a, **k: self.fail('oversized message sent'), now=later)
         failure = jobs.snapshot(self.db, now=later)['notifications']['failed']
@@ -343,15 +367,19 @@ class IntegrationTests(unittest.TestCase):
         with writer(self.root, initialize=True) as st:
             self.page = pages.put(st.db, 'Evidence notes', b'<p>Notes</p>', 'x.html', now=NOW)
 
-    def test_cli_public_flag_and_transport_header(self):
+    def test_cli_visibility_is_persisted(self):
         from steward.cli import main
         for public in (False, True):
             stdin = io.TextIOWrapper(io.BytesIO(b'notes'))
-            with patch('sys.stdin', stdin), patch('sys.stdout', new_callable=io.StringIO) as output, patch('steward.pages.request', wraps=pages.request) as transport:
+            with patch('sys.stdin', stdin), patch('sys.stdout', new_callable=io.StringIO) as output:
                 argv = ['page', 'put', '--state', str(self.root), '--title', 'CLI visibility']
                 self.assertEqual(main(argv + (['--public'] if public else []) + ['-']), 0)
-                self.assertEqual(json.loads(output.getvalue())['public'], public)
-                self.assertEqual(transport.call_args_list[0].kwargs['public'], public)
+                report = json.loads(output.getvalue())
+            self.assertEqual(report['public'], public)
+            self.assertEqual(report['state'], 'live')
+            with writer(self.root) as st:
+                row = next(r for r in jobs.snapshot(st.db)['pages']['items'] if r['slug'] == report['slug'])
+                self.assertEqual(row['public'], public)
 
     def test_tick_polls_receipts_once_even_during_skip(self):
         from steward.tick_skips import skip
@@ -365,7 +393,7 @@ class IntegrationTests(unittest.TestCase):
         self.assertTrue(result['pages_poll_ok'])
         self.assertIn('skipping', result)
         self.assertEqual(sum(call.args[1].startswith('/_api/opens?') for call in transport.call_args_list), 1)
-        self.assertIn('your_items', result)
+        self.assertIn('your_list', result)
         with writer(self.root) as st:
             self.assertEqual(st.db.execute('SELECT opens FROM pages WHERE slug=?', (self.page['slug'],)).fetchone()[0], 1)
 
@@ -433,11 +461,11 @@ class MarkdownTests(unittest.TestCase):
         self.assertIn('ready_by and told_key_x', result)
         self.assertIn('<em>this</em>', result)
 
-    def test_redaction_precedes_rendering(self):
-        with patch('steward.pages.transcripts.redact', side_effect=lambda s: s.replace('PRIVATE', '**safe**')):
-            result = self.render('PRIVATE')
-        self.assertIn('<strong>safe</strong>', result)
-        self.assertNotIn('PRIVATE', result)
+    def test_credentials_are_redacted_before_markdown_creates_tags(self):
+        result = self.render('token=**private-credential**')
+        self.assertIn('token=&quot;[REDACTED]&quot;', result)
+        self.assertNotIn('private-credential', result)
+        self.assertNotIn('<strong>', result)
 
     def test_unclosed_fence_and_unsupported_blocks_are_safe(self):
         result = self.render('> quote\n\n```\n<img src=x onerror=alert(1)>')
@@ -459,6 +487,7 @@ class MigrationTests(unittest.TestCase):
                 st.db.execute('ALTER TABLE pages DROP COLUMN public')
                 st.db.execute('DROP TABLE moments'); st.db.execute("DELETE FROM changes WHERE actor=\'migration\'")
                 st.db.execute('ALTER TABLE runs DROP COLUMN retry_of')
+                st.db.execute("ALTER TABLE outbox ADD COLUMN kind TEXT NOT NULL DEFAULT 'result'")
                 st.db.execute('PRAGMA user_version=12')
                 st.db.commit()
             with writer(root) as st:
@@ -466,7 +495,7 @@ class MigrationTests(unittest.TestCase):
                 self.assertEqual(rows[0]['slug'], page['slug'])
                 self.assertIs(rows[0]['public'], False)
 
-    def test_schema_10_to_11_and_backup_restore(self):
+    def test_pages_migration_preserves_metadata_and_backup_restores_pages(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / 'state'
             with writer(root, initialize=True) as st:
@@ -476,15 +505,16 @@ class MigrationTests(unittest.TestCase):
                 st.db.execute('DROP TABLE outbox_keys')
                 st.db.execute('DROP TABLE moments'); st.db.execute("DELETE FROM changes WHERE actor=\'migration\'")
                 st.db.execute('ALTER TABLE runs DROP COLUMN retry_of')
+                st.db.execute("ALTER TABLE outbox ADD COLUMN kind TEXT NOT NULL DEFAULT 'result'")
                 st.db.execute('PRAGMA user_version=10')
                 st.db.commit()
             with writer(root) as st:
-                self.assertEqual(st.db.execute('PRAGMA user_version').fetchone()[0], 17)
+                self.assertEqual(st.db.execute('PRAGMA user_version').fetchone()[0], 18)
                 self.assertEqual(st.db.execute('SELECT value FROM message_meta WHERE key="keep"').fetchone()[0], 'value')
                 self.assertEqual(st.db.execute('SELECT count(*) FROM pages').fetchone()[0], 0)
                 pages.put(st.db, 'Notes', b'text', 'x.txt', now=NOW, transport=lambda *a, **k: (200, b'text'))
                 st.backup(Path(tmp) / 'backup')
-            self.assertEqual(json.loads((Path(tmp)/'backup/manifest.json').read_text())['schema'], 17)
+            self.assertEqual(json.loads((Path(tmp)/'backup/manifest.json').read_text())['schema'], 18)
             restore(Path(tmp)/'backup', Path(tmp)/'restored')
             with writer(Path(tmp)/'restored') as st:
                 self.assertEqual(st.db.execute('SELECT state FROM pages').fetchone()[0], 'live')

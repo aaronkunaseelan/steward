@@ -70,10 +70,11 @@ class ObligationTests(unittest.TestCase):
                     self.assertEqual(result['state'], 'missed')
 
     def test_target_day_midnight_and_dst(self):
-        for text in ('2026-10-22T00:10:00+03:00', '2026-10-25T06:30:00+02:00',
-                     '2026-03-29T06:30:00+03:00'):
+        for text, lower in (('2026-10-22T00:10:00+03:00', '2026-10-21T15:10:00+00:00'),
+                            ('2026-10-25T06:30:00+02:00', '2026-10-24T22:30:00+00:00'),
+                            ('2026-03-29T06:30:00+03:00', '2026-03-28T21:30:00+00:00')):
             target = dt(text).astimezone(TEST_ZONE)
-            lo, _ = timing.deadline_window(target)
+            lo = dt(lower)
             self.assertEqual(timing.obligation(target, [(lo, None)], target)['state'], 'kept')
             self.assertEqual(timing.obligation(target, [(lo - timedelta(seconds=1), None)], target)['state'], 'missed')
             late = target + timedelta(minutes=10)

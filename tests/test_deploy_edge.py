@@ -1,5 +1,5 @@
-from fixture_mind import use_settings
 """Deploy secret plumbing, using only synthetic credentials and no deployment."""
+from fixture_mind import use_settings
 import importlib.machinery
 import importlib.util
 import json
@@ -39,5 +39,13 @@ class DeploySecrets(unittest.TestCase):
 
     def test_missing_password_does_not_generate(self):
         with tempfile.TemporaryDirectory() as tmp, patch.object(Path, 'home', return_value=Path(tmp)):
-            with self.assertRaises(SystemExit):
+            config = Path(tmp) / '.config'
+            (config / 'steward').mkdir(parents=True)
+            (config / 'mech-d').mkdir()
+            pages = config / 'steward/pages.env'
+            original = 'STEWARD_PAGES_TOKEN=synthetic-token\n'
+            pages.write_text(original)
+            (config / 'mech-d/credentials.json').write_text('{}')
+            with self.assertRaisesRegex(SystemExit, '^Page password unavailable$'):
                 deploy.page_secrets()
+            self.assertEqual(pages.read_text(), original)

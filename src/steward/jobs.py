@@ -79,6 +79,7 @@ def view_row(db, table, row):
 
 
 def change(db, verb, now, actor='owner', undo_of=None):
+    require(actor in ('owner', 'model', 'maintenance', 'tick', 'migration'), 'invalid actor')
     identity = uuid.uuid4().hex
     db.execute('INSERT INTO changes VALUES (?,?,?,?,?,?)', (identity, now.isoformat(), actor, verb, verb, undo_of))
     return identity
@@ -136,7 +137,15 @@ def validate_spec(spec, name, qmd_status=None):
     return spec
 
 
-def job_verb(db, verb, name, spec=None, now=None, actor='owner'):
+def owner_request(db, cid, owner_message):
+    if owner_message is not None:
+        require(db.execute('SELECT 1 FROM inbox WHERE update_id=?', (owner_message,)).fetchone(),
+                'unknown owner message')
+        db.execute('INSERT INTO message_meta VALUES (?,?)',
+                   ('owner_request:' + cid, json.dumps(owner_message)))
+
+
+def job_verb(db, verb, name, spec=None, now=None, actor='owner', owner_message=None):
     now = now or now_utc()
     with db:
         previous = next((r for r in current(db, 'jobs') if r['name'] == name), None)
@@ -151,6 +160,7 @@ def job_verb(db, verb, name, spec=None, now=None, actor='owner'):
         else:
             row['state'] = {'pause': 'paused', 'resume': 'active', 'rm': 'removed'}[verb]
         cid = change(db, 'job ' + verb, now, actor)
+        owner_request(db, cid, owner_message)
         append(db, 'jobs', row, cid)
         if verb == 'edit' and any(json.loads(previous['spec_json'])[key] != json.loads(row['spec_json'])[key]
                                   for key in ('heavy', 'max_minutes')):
@@ -179,16 +189,18 @@ def job_verb(db, verb, name, spec=None, now=None, actor='owner'):
 def check_overlap(db, name, spec, at, exclude=None):
     if not spec['heavy']:
         return
+    from .planner import expected
     runs = current(db, 'runs')
-    end = at + timedelta(minutes=execution_profile(db, name, spec, runs)['limit_minutes'])
+    # Reservations last their expected duration; the runaway limit bounds only started runs.
+    end = at + timedelta(minutes=expected(runs, name, spec))
     for r in runs:
         if r['run_id'] == exclude or r['state'] not in ('planned', 'started'):
             continue
         other = json.loads(r['spec_json'])
         start = instant(r['started_at'] or r['planned_for'])
         if other['heavy']:
-            limit = other.get('_limit_minutes') if r['state'] == 'started' else execution_profile(db, r['job'], other, runs)['limit_minutes']
-            require(not (at < start + timedelta(minutes=limit or other['max_minutes']) and start < end), 'heavy runs overlap')
+            minutes = other.get('_limit_minutes') or other['max_minutes'] if r['state'] == 'started' else expected(runs, r['job'], other)
+            require(not (at < start + timedelta(minutes=minutes) and start < end), 'heavy runs overlap')
 
 
 def plan(db, name, at, reason, now, cid, explicit=False, move=True, retry_of=None, extra=False):
@@ -215,10 +227,11 @@ def plan(db, name, at, reason, now, cid, explicit=False, move=True, retry_of=Non
     return append(db, 'runs', row, cid)
 
 
-def run_verb(db, verb, identity, reason, at=None, now=None, actor='owner'):
+def run_verb(db, verb, identity, reason, at=None, now=None, actor='owner', owner_message=None):
     now = now or now_utc()
     with db:
         cid = change(db, 'run ' + verb, now, actor)
+        owner_request(db, cid, owner_message)
         if verb == 'cancel':
             row = get(db, 'runs', identity)
             require(row['state'] == 'planned', 'only planned runs can be cancelled')
@@ -237,7 +250,7 @@ def run_verb(db, verb, identity, reason, at=None, now=None, actor='owner'):
         return {'change_id': cid, 'run_id': row['run_id'], 'status': row['state']}
 
 
-def undo(db, identity, now=None, actor='owner'):
+def undo(db, identity, now=None, actor='owner', owner_message=None):
     now = now or now_utc()
     with db:
         original = db.execute('SELECT * FROM changes WHERE id=?', (identity,)).fetchone()
@@ -261,6 +274,7 @@ def undo(db, identity, now=None, actor='owner'):
                 affected.append((table, restored))
         require(affected, 'change has no reversible versions')
         cid = change(db, 'undo', now, actor, identity)
+        owner_request(db, cid, owner_message)
         for table, row in affected:
             append(db, table, row, cid)
         for table, row in affected:

@@ -1,4 +1,4 @@
-"""BR2 counterexamples; fixtures only, never production state or providers."""
+"""Tracked calendar identities survive bounded lists and failed provider reads."""
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
@@ -7,9 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from fixture_mind import install
-from steward import calendar_b, intent, jobs, messages, pages, planner, runtime, senses, timing
-from steward.capabilities import told_check
-from steward.notify import notification_status, notify, flush
+from steward import calendar_b, jobs, senses
 from steward.state import writer
 
 
@@ -101,7 +99,6 @@ class CalendarIdentityTests(unittest.TestCase):
             self.assertEqual(len(gog.events['schedule']), 1)
 
     def test_missing_identity_is_not_confused_with_failed_read(self):
-        import subprocess
         with writer(self.root) as st:
             gog, now, settings, proposal = self.calendar(st.db)
             def unreadable(argv):
@@ -111,7 +108,7 @@ class CalendarIdentityTests(unittest.TestCase):
                     raise OSError('read failed')
                 return gog(argv)
             before = calendar_b.latest(st.db, 'blocks')
-            with self.assertRaises(OSError):
+            with self.assertRaisesRegex(OSError, 'read failed'):
                 calendar_b.plan(st.db, settings, now, unreadable)
             self.assertEqual(calendar_b.latest(st.db, 'blocks'), before)
             self.assertEqual(len(gog.events['schedule']), 1)
@@ -124,7 +121,7 @@ class CalendarIdentityTests(unittest.TestCase):
                 calendar_b.plan(st.db, settings, now, gog)
             self.assertEqual(len(gog.events['schedule']), 1)
 
-    def test_gog_not_found_is_typed_but_auth_and_missing_cli_are_not_absence(self):
+    def test_gog_not_found_is_typed_but_other_read_failures_are_not_absence(self):
         import subprocess
         for code in (5, 4, 7):
             with patch('steward.senses.subprocess.run', return_value=subprocess.CompletedProcess(
@@ -133,5 +130,9 @@ class CalendarIdentityTests(unittest.TestCase):
                     with self.assertRaises(senses.ReadNotFound):
                         senses.run(['gog', '--readonly', 'calendar', 'event', 'schedule', 'event-id'])
                 else:
-                    with self.assertRaises(ValueError):
+                    with self.assertRaises(ValueError) as error:
                         senses.run(['gog', '--readonly', 'calendar', 'event', 'schedule', 'event-id'])
+                    self.assertNotIsInstance(error.exception, senses.ReadNotFound)
+        with patch('steward.senses.subprocess.run', side_effect=FileNotFoundError('gog')):
+            with self.assertRaises(FileNotFoundError):
+                senses.run(['gog', '--readonly', 'calendar', 'event', 'schedule', 'event-id'])

@@ -1,4 +1,3 @@
-from fixture_mind import use_settings
 from datetime import timedelta
 import json
 import io
@@ -14,7 +13,7 @@ import unittest
 import test_jobs
 from test_jobs import NOW, spec
 from steward import capabilities as c, jobs, runtime
-from steward.notify import notify
+from steward.notify import notify, send_rows
 from steward.state import StateError, writer
 from steward.cli import main
 
@@ -105,9 +104,16 @@ class CapabilityTests(unittest.TestCase):
 
     def test_told_check_pending_and_sent(self):
         with writer(self.root) as store:
-            notify(store.db,'Finds','result','paper','10.1/paper',deliver='digest',now=NOW)
+            notify(store.db,'Finds','paper','10.1/paper',deliver='digest',now=NOW)
             self.assertEqual(c.told_check(store.db,['10.1/paper','new']), {'10.1/paper':True,'new':False})
-            self.assertEqual(notify(store.db,'Finds','result','paper','10.1/paper',now=NOW)['status'],'already_told')
+            self.assertEqual(notify(store.db,'Finds','paper','10.1/paper',now=NOW)['status'],'already_told')
+            send_rows(store.db, store.db.execute("SELECT * FROM outbox WHERE state='pending'").fetchall(),
+                      lambda *args, **kwargs: 123, NOW, {})
+            self.assertEqual(store.db.execute('SELECT state FROM outbox').fetchone()[0], 'sent')
+            self.assertEqual(c.told_check(store.db, ['10.1/paper', 'new']),
+                             {'10.1/paper': True, 'new': False})
+            self.assertEqual(notify(store.db, 'Finds', 'paper', '10.1/paper', now=NOW)['status'],
+                             'already_told')
         output=io.StringIO()
         with redirect_stdout(output):
             self.assertEqual(main(['told','--state',str(self.root),'check','10.1/paper','new']),0)
@@ -125,10 +131,11 @@ class CapabilityTests(unittest.TestCase):
                     ended_at=NOW.isoformat(), unit=None, exit_code=0, manifest=None,
                     spec_json=json.dumps(spec(capability='sample'))), cid)
             db.commit()
-        self.tick()
+        with self.valid():
+            result = self.tick()
+        self.assertEqual(result['invalid_specs'], {})
         with writer(self.root) as store:
             self.assertEqual(jobs.get(store.db, 'jobs', 'test')['state'], 'active')
-            self.assertIsNone(store.db.execute("SELECT name FROM sqlite_master WHERE name='retirements'").fetchone())
 
     def test_declared_permissions_not_capability_name_control_packet(self):
         import runpy
@@ -217,14 +224,33 @@ class CapabilityTests(unittest.TestCase):
 
 
 class ModelChoiceTests(unittest.TestCase):
-    setUp = use_settings
-
-    """Owner decisions: the wake is Opus at medium; async work is Sol or Haiku at high (2026-10-16),
-    or Opus at medium like the wake (2026-10-18, consolidate)."""
-
-    def test_async_models_at_high_effort(self):
-        self.assertEqual(set(c.AGENTS), {'sol', 'haiku', 'opus'})
-        self.assertIn('model_reasoning_effort=high', c.VENDOR_ARGS['sol'])
-        self.assertEqual(c.VENDOR_ARGS['haiku'][-2:], ['--effort', 'high'])
-        self.assertEqual(c.AGENTS['opus'], ['-a', 'claude', '-m', 'claude-opus-5-5'])
-        self.assertEqual(c.VENDOR_ARGS['opus'][-2:], ['--effort', 'medium'])
+    def test_async_harness_uses_selected_model_and_effort(self):
+        import runpy
+        from fixture_mind import install
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            install(self, root)
+            (root / 'mind/capabilities/sample.md').write_text(
+                '---\nname: "sample"\nreads: []\ncalls: []\nrecord: []\n---\nDo the task.')
+            for model, agent, vendor_model, effort in [
+                ('sol', 'codex', 'gpt-6.1-sol', ['-c', 'model_reasoning_effort=high']),
+                ('haiku', 'claude', 'claude-haiku-5-5', ['--effort', 'high']),
+                ('opus', 'claude', 'claude-opus-5-5', ['--effort', 'medium']),
+            ]:
+                with self.subTest(model=model):
+                    with writer(root / 'state', initialize=True) as store:
+                        jobs.job_verb(store.db, 'add', model, spec(capability='sample', model=model))
+                    directory = root / model
+                    with patch.dict(os.environ, STEWARD_RUN_DIR=str(directory),
+                                    STEWARD_STATE=str(root / 'state'), STEWARD_JOB=model), \
+                         patch.object(sys, 'argv', ['agent-run', 'sample']), \
+                         patch.object(c, 'shell_scope', return_value=([], {})), \
+                         patch.object(runtime, 'harness', return_value='fixture-run') as harness, \
+                         redirect_stdout(io.StringIO()):
+                        runpy.run_path(str(Path('jobs/agent-run').resolve()), run_name='__main__')
+                    argv = harness.call_args.args[0]
+                    self.assertEqual(argv[:6], ['tty', 'run', '-a', agent, '-m', vendor_model])
+                    vendor_args = argv[argv.index('--') + 1:]
+                    self.assertEqual(vendor_args[-2:], effort)
+                    if agent == 'claude':
+                        self.assertEqual(vendor_args[:2], ['--permission-mode', 'bypassPermissions'])

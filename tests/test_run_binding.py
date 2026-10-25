@@ -18,23 +18,6 @@ class RunBindingTests(unittest.TestCase):
     tick = test_jobs.JobsTests.tick
     run_now = test_jobs.JobsTests.run_now
 
-    def test_job_edit_reaches_reserved_execution(self):
-        from fixture_mind import command
-        with writer(self.root) as st:
-            spec = dict(justification='fixture', argv=[command('/bin/echo'), 'old'],
-                        needs={'every': {'min': '1h', 'max': '1d'}})
-            jobs.job_verb(st.db, 'add', 'edited', spec, now=self.now)
-            planned = jobs.run_verb(st.db, 'now', 'edited', 'fixture', now=self.now)
-            jobs.job_verb(st.db, 'edit', 'edited', dict(spec, argv=[command('/bin/echo'), 'new']), now=self.now)
-            row = jobs.get(st.db, 'runs', planned['run_id'])
-            cid = jobs.change(st.db, 'fixture', self.now)
-            jobs.append(st.db, 'runs', dict(row, state='started', started_at=self.now.isoformat()), cid)
-            st.db.commit()
-        result = runtime.execute(self.root, planned['run_id'], Path(self.tmp.name) / 'data', clock=lambda: self.now)
-        path = Path(result['manifest']) if 'manifest' in result else Path(self.tmp.name) / 'data' / 'runs' / 'edited' / planned['run_id'] / 'manifest.json'
-        self.assertEqual(json.loads(path.read_text())['argv'][-1], 'new', 'F-43: run launches captured old argv')
-
-
     def test_capacity_edit_replans_an_unstarted_reservation(self):
         for capacity in ('max_minutes', 'heavy'):
             with self.subTest(capacity=capacity), writer(self.root) as st:
@@ -58,7 +41,6 @@ class RunBindingTests(unittest.TestCase):
         identity = self.run_now()
         with writer(self.root) as st:
             before = jobs.get(st.db, 'runs', identity)
-            self.assertEqual(st.db.execute('SELECT spec_json FROM runs WHERE run_id=?', (identity,)).fetchone()[0], '{}')
             jobs.job_verb(st.db, 'edit', 'test', test_jobs.spec(
                 argv=[command('/bin/echo'), 'new'], env_file='/tmp/new-fixture.env'), now=self.now)
             planned = jobs.get(st.db, 'runs', identity)
@@ -66,6 +48,11 @@ class RunBindingTests(unittest.TestCase):
             self.assertEqual(json.loads(planned['spec_json'])['argv'][-1], 'new')
         self.tick()
         self.assertIn('/tmp/new-fixture.env', self.launched[0])
+        result = runtime.execute(self.root, identity, self.data, clock=lambda: self.now)
+        self.assertEqual(result['status'], 'succeeded')
+        directory = self.data / 'runs' / 'test' / identity
+        self.assertEqual(json.loads((directory / 'manifest.json').read_text())['argv'][-1], 'new')
+        self.assertEqual((directory / 'stdout.txt').read_text(), 'new\n')
         with writer(self.root) as st:
             bound = jobs.get(st.db, 'runs', identity)
             jobs.job_verb(st.db, 'edit', 'test', test_jobs.spec(argv=[command('/bin/false')]), now=self.now)

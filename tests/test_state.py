@@ -1,10 +1,15 @@
 from fixture_mind import use_settings
+from contextlib import redirect_stdout
+import io
 import json
 import multiprocessing
 from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
+
+from steward.cli import main
 
 from steward.state import StateError, WriterBusy, restore, writer
 
@@ -55,18 +60,33 @@ class CoreTests(unittest.TestCase):
         with self.assertRaises(StateError):
             restore(backup,Path(self.tmp.name)/'bad')
 
-    def test_schema15_drops_retirements_and_preserves_jobs(self):
+    def test_upgrade_drops_retired_table_and_preserves_jobs(self):
+        spec = json.dumps({'argv': ['/fixture/job'], 'justification': 'retained job'})
         with writer(self.root) as store:
+            store.db.execute("INSERT INTO jobs VALUES ('kept', 1, 'fixture', ?, 'active')", (spec,))
             store.db.execute('CREATE TABLE retirements (job TEXT PRIMARY KEY, justification TEXT, cutoff TEXT)')
             store.db.execute("INSERT INTO retirements VALUES ('old', 'reason', '2026-10-20')")
             store.db.execute('DROP TABLE moments'); store.db.execute("DELETE FROM changes WHERE actor=\'migration\'")
             store.db.execute('ALTER TABLE runs DROP COLUMN retry_of')
+            store.db.execute("ALTER TABLE outbox ADD COLUMN kind TEXT NOT NULL DEFAULT 'result'")
             store.db.execute('PRAGMA user_version=14')
             store.db.commit()
         with writer(self.root) as store:
-            self.assertEqual(store.db.execute('PRAGMA user_version').fetchone()[0], 17)
+            self.assertEqual(store.db.execute('PRAGMA user_version').fetchone()[0], 18)
             self.assertIsNone(store.db.execute("SELECT name FROM sqlite_master WHERE name='retirements'").fetchone())
+            self.assertEqual([tuple(row) for row in store.db.execute('SELECT * FROM jobs')],
+                             [('kept', 1, 'fixture', spec, 'active')])
             self.assertEqual(store.db.execute('PRAGMA integrity_check').fetchone()[0], 'ok')
+
+    def test_init_reports_the_created_schema(self):
+        root = Path(self.tmp.name) / 'new-state'
+        output = io.StringIO()
+        with redirect_stdout(output), patch('steward.runtime.config', return_value={}):
+            code = main(['init-state', '--state', str(root)])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(output.getvalue()), {'status': 'initialized', 'schema': 18})
+        with writer(root) as store:
+            self.assertEqual(store.db.execute('PRAGMA user_version').fetchone()[0], 18)
 
     def test_missing_state_and_unsupported_schema(self):
         with self.assertRaises(StateError):
@@ -82,7 +102,7 @@ class CoreTests(unittest.TestCase):
 class WriterWaitTests(unittest.TestCase):
     setUp = use_settings
 
-    """2026-10-17 live: a job launched by the tick failed WriterBusy; jobs and verbs now wait."""
+    """A competing writer may fail fast or wait for the same lock."""
 
     def test_waiting_writer_gets_lock_after_release_and_default_fails_fast(self):
         import threading, time

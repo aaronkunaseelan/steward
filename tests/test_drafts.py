@@ -131,14 +131,27 @@ class DraftTests(unittest.TestCase):
         body.write_text('file body')
         for args, expected in [(['--reply-to', 'abc', '--body-file', str(body)], 'file body'),
                                (['--to', 'a@example.com', '--subject', 's', '--body-file', '-'], 'stdin body')]:
-            with patch('steward.drafts.create', return_value={'status': 'created'}) as create, \
-                 patch('sys.stdin', io.StringIO('stdin body')), redirect_stdout(io.StringIO()):
+            output = io.StringIO()
+            with patch('subprocess.run', return_value=subprocess.CompletedProcess([], 0, '{"draftId":"r-123"}')) as provider, \
+                 patch('sys.stdin', io.StringIO('stdin body')), redirect_stdout(output):
                 self.assertEqual(main(['draft', '--state', str(self.root), *args]), 0)
-                self.assertEqual(create.call_args.args[2], expected)
-        result = self.create(reply_to='abc')
-        with patch('steward.drafts.undo', return_value={'status': 'deleted'}) as undo, redirect_stdout(io.StringIO()):
+            result = json.loads(output.getvalue())
+            self.assertEqual(result['status'], 'created')
+            self.assertEqual(provider.call_args.kwargs['input'], expected)
+            self.assertEqual(provider.call_args.args[0][:7], ['gog', '--enable-commands-exact=gmail.drafts.create',
+                             '--gmail-no-send', '-j', 'gmail', 'drafts', 'create'])
+            with writer(self.root) as store:
+                self.assertEqual(store.db.execute('SELECT state FROM drafts WHERE change_id=?',
+                                                  (result['change_id'],)).fetchone()[0], 'created')
+        output = io.StringIO()
+        with patch('subprocess.run', return_value=subprocess.CompletedProcess([], 0, '{}')) as provider, redirect_stdout(output):
             self.assertEqual(main(['undo', '--state', str(self.root), result['change_id']]), 0)
-            self.assertEqual(undo.call_args.args[1], result['change_id'])
+        self.assertEqual(json.loads(output.getvalue())['status'], 'deleted')
+        self.assertEqual(provider.call_args.args[0][:7], ['gog', '--enable-commands-exact=gmail.drafts.delete',
+                         '--gmail-no-send', '-j', 'gmail', 'drafts', 'delete'])
+        with writer(self.root) as store:
+            self.assertEqual(store.db.execute('SELECT state FROM drafts WHERE change_id=?',
+                                              (result['change_id'],)).fetchone()[0], 'deleted')
 
     def job_context(self, permits):
         meta = dict(name='sample', reads=[], calls=['steward'], record=['key'], permits=permits)
@@ -226,7 +239,7 @@ class DraftTests(unittest.TestCase):
         self.check_cli_draft(context, 'requires a capability job')
 
     def test_cli_owner_and_wake_drafts_keep_authority_without_job_context(self):
-        for context in ({}, {'STEWARD_ACTOR': 'model'}):
+        for context in ({'STEWARD_ACTOR': 'owner'}, {'STEWARD_ACTOR': 'model'}):
             with self.subTest(context=context):
                 self.check_cli_draft(context)
 
@@ -235,10 +248,16 @@ class DraftTests(unittest.TestCase):
         update = {'update_id': 1, 'message': {'message_id': 2, 'chat': {'id': 1},
                   'from': {'id': 2}, 'text': 'undo', 'reply_to_message': {'message_id': 42}}}
         sent = []
-        with writer(self.root) as store, patch('steward.drafts.undo', return_value={'change_id': 'f' * 32}) as undo:
+        with writer(self.root) as store, \
+             patch('subprocess.run', return_value=subprocess.CompletedProcess([], 0, '{}')) as provider:
             messages.poll(store.db, NOW, {}, sender=lambda topic, text, **kw: sent.append(text) or 43,
                           fetcher=lambda offset: [update], telegram={'chat_id': 1, 'owner_user_id': 2, 'topics': {'Talk': 6}})
-            self.assertEqual(undo.call_args.args[1], result['change_id'])
+            self.assertEqual(store.db.execute('SELECT state FROM drafts WHERE change_id=?',
+                                              (result['change_id'],)).fetchone()[0], 'deleted')
+            undo = store.db.execute('SELECT actor,undo_of FROM changes WHERE verb=?', ('undo draft',)).fetchone()
+            self.assertEqual(tuple(undo), ('owner', result['change_id']))
+            self.assertEqual(provider.call_args.args[0][:7], ['gog', '--enable-commands-exact=gmail.drafts.delete',
+                             '--gmail-no-send', '-j', 'gmail', 'drafts', 'delete'])
             self.assertIn('Deleted Gmail draft', sent[0])
             self.assertNotIn('undo ', sent[0])
 
@@ -250,13 +269,19 @@ class DraftTests(unittest.TestCase):
 
     def test_schema_11_migration_preserves_state(self):
         with writer(self.root) as store:
+            store.db.execute("INSERT INTO message_meta VALUES ('preserved', 'fixture value')")
             store.db.execute('DROP TABLE drafts')
             store.db.execute('DROP TABLE outbox_keys')
             store.db.execute('ALTER TABLE pages DROP COLUMN public')
             store.db.execute('DROP TABLE moments'); store.db.execute("DELETE FROM changes WHERE actor=\'migration\'")
             store.db.execute('ALTER TABLE runs DROP COLUMN retry_of')
+            store.db.execute("ALTER TABLE outbox ADD COLUMN kind TEXT NOT NULL DEFAULT 'result'")
             store.db.execute('PRAGMA user_version=11')
             store.db.commit()
         with writer(self.root) as store:
-            self.assertEqual(store.db.execute('PRAGMA user_version').fetchone()[0], 17)
+            self.assertEqual(store.db.execute('PRAGMA user_version').fetchone()[0], 18)
             self.assertEqual(store.db.execute('SELECT count(*) FROM drafts').fetchone()[0], 0)
+            self.assertEqual(store.db.execute("SELECT value FROM message_meta WHERE key='preserved'").fetchone()[0],
+                             'fixture value')
+        result = self.create(reply_to='abc')
+        self.assertEqual(result['status'], 'created')

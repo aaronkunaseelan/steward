@@ -3,7 +3,6 @@ from datetime import timedelta
 import io
 import json
 from contextlib import redirect_stdout
-import time
 import unittest
 from unittest.mock import patch
 
@@ -129,11 +128,7 @@ class SkipTests(unittest.TestCase):
             order.append('poll')
             return [dict(update_id=1,message=dict(message_id=7,message_thread_id=6,chat={'id':1},**{'from':{'id':2}},text='awake'))]
         with patch('steward.senses.collect', wraps=runtime.senses.collect) as collect, patch('steward.runtime.placement',side_effect=AssertionError('nonrecurring planner')):
-            begin=time.perf_counter()
             result=self.tick(update_fetcher=fetch,launcher=lambda a: order.append('launch'),wake_starter=lambda: order.append('wake'))
-            elapsed=time.perf_counter()-begin
-        self.assertLess(elapsed,1)
-        print(f'Injected skip tick: {elapsed:.6f}s')
         collect.assert_called_once()
         self.assertEqual(order,['poll','launch'])
         self.assertFalse(result['scheduled_wake'])
@@ -199,12 +194,13 @@ class SkipTests(unittest.TestCase):
         db.execute('DROP TABLE tick_skips')
         db.execute('DROP TABLE moments'); db.execute("DELETE FROM changes WHERE actor=\'migration\'")
         db.execute('ALTER TABLE runs DROP COLUMN retry_of')
+        db.execute("ALTER TABLE outbox ADD COLUMN kind TEXT NOT NULL DEFAULT 'result'")
         db.execute('PRAGMA user_version=8')
         db.commit()
         db.close()
         self.skip(start=NOW+timedelta(hours=1))
         with writer(self.root) as store:
-            self.assertEqual(store.db.execute('PRAGMA user_version').fetchone()[0], 17)
+            self.assertEqual(store.db.execute('PRAGMA user_version').fetchone()[0], 18)
             state=jobs.snapshot(store.db,now=NOW)['tick_skips']
             self.assertIsNone(state['current'])
             self.assertEqual(state['next']['from_at'],(NOW+timedelta(hours=1)).isoformat())

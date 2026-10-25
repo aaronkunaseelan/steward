@@ -21,6 +21,7 @@ from .memory import local_day
 from .timing import owner_time
 
 from .settings import pages_host
+TOKEN_ENV = 'STEWARD_PAGES_TOKEN'
 LIMIT = 10 * 1024 * 1024
 SLUG = re.compile(r'[a-z0-9]+(-[a-z0-9]+)*\Z')
 STOP = set('a an the and or of for to in on at with from is it this that'.split())
@@ -156,7 +157,7 @@ def prepare(title, data, filename, as_html=False):
 
 
 def token():
-    value = os.environ.get('STEWARD_PAGES_TOKEN')
+    value = os.environ.get(TOKEN_ENV)
     require(bool(value), 'pages token unavailable')
     return value
 
@@ -239,36 +240,36 @@ def prep_header(db, items, block, now, runner):
     return '\n'.join(lines + ['', cut_line(raw['cut'])]) + '\n\n'
 
 
-def sync_your_items(db, sense, now, transport=None):
+def sync_your_list(db, sense, now, transport=None):
     """Each tick: render and hash locally; only changed content makes a PUT/read-back."""
     if not sense:
-        return your_items(db)  # gsd not read this tick (interval not due): the last page stands.
+        return your_list(db)  # gsd not read this tick (interval not due): the last page stands.
     if sense.get('status') != 'ok':
-        text = '# Your items\n\ngsd: unknown (' + sense.get('reason', 'not observed') + ')\n'
+        text = '# Your list\n\ngsd: unknown (' + sense.get('reason', 'not observed') + ')\n'
     else:
         data = sense['data']
-        lines = ['# Your items', '', cut_line(data['cut']), '']
+        lines = ['# Your list', '', cut_line(data['cut']), '']
         for item in data['waiting_on_you']:
             lines.append(item_line(item, item['project'], data.get('notion_urls', {}).get(item['id'])))
         if not data['waiting_on_you']:
             lines.append('No open items of yours.')
         text = '\n'.join(lines) + '\n'
-    rendered, _ = prepare('Your items', text.encode(), 'your-items.md')
+    rendered, _ = prepare('Your list', text.encode(), 'your-list.md')
     digest = hashlib.sha256(rendered).hexdigest()
-    slug = read_meta(db, 'your_items_slug')
+    slug = read_meta(db, 'your_list_slug')
     if slug is None:
-        slug = make_slug('Your items')
+        slug = make_slug('Your list')
         with db:
-            meta(db, 'your_items_slug', slug)
+            meta(db, 'your_list_slug', slug)
     row = db.execute('SELECT sha256,state FROM pages WHERE slug=?', (slug,)).fetchone()
     if row and row['sha256'] == digest and row['state'] == 'live':
         return dict(slug=slug, url=pages_host() + '/' + slug, state='live', changed=False)
-    return put(db, 'Your items', text.encode(), 'your-items.md', slug=slug,
+    return put(db, 'Your list', text.encode(), 'your-list.md', slug=slug,
                now=now, actor='tick', transport=transport)
 
 
-def your_items(db):
-    slug = read_meta(db, 'your_items_slug')
+def your_list(db):
+    slug = read_meta(db, 'your_list_slug')
     row = db.execute('SELECT state FROM pages WHERE slug=?', (slug,)).fetchone() if slug else None
     return dict(slug=slug, url=pages_host() + '/' + slug, state=row['state']) if row else 'unknown: not rendered yet'
 

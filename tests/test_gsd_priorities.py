@@ -1,5 +1,5 @@
+"""Producer priority order and project labels survive state and message rendering."""
 from fixture_mind import use_settings
-"""BR4 G5: producer ordering and project labels survive the installed read path."""
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -29,16 +29,6 @@ def worklist():
 class PrioritiesTests(unittest.TestCase):
     setUp = use_settings
 
-    def test_live_worklist_priority_order_survives_steward(self):
-        raw = worklist()
-        result = senses.gsd(NOW, lambda argv: json.dumps(raw))
-        self.assertEqual(result['waiting_on_you'], raw['priorities']['mine'])
-
-    def test_waiting_on_other_people_survives_steward(self):
-        raw = worklist()
-        result = senses.gsd(NOW, lambda argv: json.dumps(raw))
-        self.assertEqual(result.get('waiting_on_others'), raw['priorities']['waiting_on_others'])
-
     def test_state_briefing_and_fallback_render_the_same_producer_lists(self):
         raw = worklist()
         projected = senses.gsd(NOW, lambda argv: json.dumps(raw))
@@ -47,9 +37,10 @@ class PrioritiesTests(unittest.TestCase):
                         jobs.change(st.db, 'fixture', NOW, 'tick'))
             state = jobs.snapshot(st.db, now=NOW)
             self.assertEqual(state['senses']['gsd']['data']['waiting_on_you'], raw['priorities']['mine'])
+            self.assertEqual(state['senses']['gsd']['data']['waiting_on_others'], raw['priorities']['waiting_on_others'])
             page = briefing.render(state, NOW, {})
             fallback = messages.fallback(st.db, NOW)
-        self.assertIn('## Your items', page)
+        self.assertIn('## Your list', page)
         self.assertIn('## Waiting on others', page)
         for text in (page, fallback):
             positions = [text.index(row['title']) for row in raw['priorities']['mine']]
@@ -58,4 +49,6 @@ class PrioritiesTests(unittest.TestCase):
             for row in raw['priorities']['waiting_on_others']:
                 self.assertIn(row['title'], text)
         self.assertIn('Producer project', page)
-        self.assertLess(fallback.index('gsd unknown:'), fallback.index('Canonical task 1'))
+        self.assertLess(fallback.index('Last seen, not current'), fallback.index('Canonical task 1'))
+        self.assertIn("**Can't see**", fallback)
+        self.assertIn('your list unknown:', fallback)

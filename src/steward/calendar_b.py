@@ -14,8 +14,22 @@ from .timing import planning_end, owner_time
 
 def block_time(start, end):
     start, end = (instant(t).astimezone(local_zone()) for t in (start, end))
-    return owner_time(start, '%a %d %b %H:%M') + '–' + owner_time(
-        end, '%H:%M' if start.date() == end.date() else '%a %d %b %H:%M')
+    return start.strftime('%a %d %b %H:%M') + '–' + end.strftime(
+        '%H:%M' if start.date() == end.date() else '%a %d %b %H:%M')
+
+
+def change_summary(before, after, action, reason):
+    """The calendar's owner-facing change, shared by the log and delivery."""
+    when = before if action == 'drop' else after
+    happened = 'removed' if action == 'drop' else 'updated' if action == 'keep' else 'added'
+    if action == 'place' and before:
+        old = instant(before['start']).astimezone(local_zone())
+        new = instant(after['start']).astimezone(local_zone())
+        happened = 'moved from ' + old.strftime('%H:%M' if old.date() == new.date() else '%a %d %b %H:%M')
+    # A model sometimes repeats the move before its explanation. Keep the reason once.
+    reason = re.sub(r'^Moved from \d{2}:\d{2} to \d{2}:\d{2}[-–]\d{2}:\d{2}:\s*', '', reason, flags=re.I)
+    line = block_time(when['start'], when['end']) + ' ' + when['title'] + ' · ' + happened
+    return line + '\n' + reason.strip()
 
 
 def latest(db, table):
@@ -109,7 +123,7 @@ def validate(spec):
     if 'deadline' in spec:
         instant(spec['deadline'])
     if 'items' in spec:
-        # A bundle: gsd ids the block is for. gsd owns the items; only their ids are kept here.
+        # A block with items: gsd ids the block is for. gsd owns the items; only their ids are kept here.
         items = spec['items']
         require(isinstance(items, list) and 1 <= len(items) <= 5 and len(set(items)) == len(items)
                 and all(isinstance(i, str) and re.fullmatch(r'[A-Za-z0-9-]{1,64}', i) for i in items)
@@ -248,12 +262,12 @@ def read(settings, now, runner, db=None):
     observation = senses.calendars(settings, now, runner, deadlines(db, now) if db is not None else (),
                                    tracked_events(db) if db is not None else {})
     if db is not None and any('items' in json.loads(r['spec_json']) for r in live_demands(db, now)):
-        observation['worklist'] = worklist(runner)  # None holds bundles as they are
+        observation['worklist'] = worklist(runner)  # None holds blocks with items as they are
     return observation
 
 
-def bundle_description(db, name, spec, start, worklist, now):
-    """Code renders a bundle's block: the prepared page when live, then its still-open items."""
+def item_block_description(db, name, spec, start, worklist, now):
+    """Render a block's prepared page when live, then its still-open items."""
     start = instant(start) if isinstance(start, str) else start
     slug = f"prep-{name}-{start.astimezone(local_zone()):%Y%m%d}"
     row = db.execute("SELECT expires_at FROM pages WHERE slug=? AND state='live'", (slug,)).fetchone()
@@ -471,7 +485,7 @@ def description_refreshes(db, settings, now, observation, accounting):
                 continue
             text = ranking['description']
         elif spec.get('items') and observation.get('worklist') is not None:
-            text = bundle_description(db, row['demand'], spec, start, observation['worklist'], now)
+            text = item_block_description(db, row['demand'], spec, start, observation['worklist'], now)
         else:
             continue
         if observed[key].get('description', '') != text:
@@ -538,7 +552,7 @@ def choose(db, settings, proposal, now=None, actor='owner', runner=senses.run, u
     intents = []
     with db:
         cid = change(db, 'block choose', now, actor, undo_of)
-        reconcile(db, observation, settings, cid)
+        learned = reconcile(db, observation, settings, cid)
         reasons = []
         for selection in proposal['selections']:
             c = items[selection['candidate_id']]
@@ -555,7 +569,7 @@ def choose(db, settings, proposal, now=None, actor='owner', runner=senses.run, u
                 p['description'] = movement_options(demands, accounting[str(memory.week_start(day))])['description']
             elif spec.get('items') and c['action'] != 'drop':
                 require(observation.get('worklist') is not None, 'gsd worklist unknown')
-                p['description'] = bundle_description(db, names[key], spec, c['start'], observation['worklist'], now)
+                p['description'] = item_block_description(db, names[key], spec, c['start'], observation['worklist'], now)
             if restoring and key in restoring:
                 p['description'] = restoring[key].get('description', '')
             if key in observed:
@@ -568,17 +582,10 @@ def choose(db, settings, proposal, now=None, actor='owner', runner=senses.run, u
                 p.update(payload(observed[key]), delete=True, reason=selection['reason'])
             row = dict(event_key=key, version=latest_version(db, key), demand=names[key], state='intended', payload=json.dumps(p))
             intents.append(append(db, 'blocks', row, cid))
-            detail = spec['title']
-            if key in observed:
-                old = payload(observed[key])
-                old_time = block_time(old['start'], old['end'])
-                detail += (': deleted from ' + old_time if c['action'] == 'drop' else
-                           ': options updated at ' + old_time if c['action'] == 'keep' else
-                           ': moved from ' + old_time + ' to ' + block_time(p['start'], p['end']))
-            else:
-                detail += ': placed ' + block_time(p['start'], p['end'])
-            reasons.append(detail + ': ' + selection['reason'])
-        db.execute('UPDATE changes SET summary=summary || ? WHERE id=?', ('\n' + '\n'.join(reasons), cid))
+            before = payload(observed[key]) if key in observed else None
+            reasons.append(change_summary(before, p, c['action'], selection['reason']))
+        summary = '\n\n'.join(reasons + (['Learned: ' + '; '.join(learned)] if learned else []))
+        db.execute('UPDATE changes SET summary=? WHERE id=?', (summary, cid))
     for row in intents:
         apply_one(db, settings, row, cid, runner)
     return dict(change_id=cid, status='applied', checked=checked)

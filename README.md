@@ -21,7 +21,7 @@ This is an integration of an existing personal stack, not a standalone hosted as
 
 `steward-wake.service` runs `steward wake`. Scheduled slots and events request wakes; a gate checks for owner instructions, due moments, failures or relevant changes. A passing, enabled wake starts **one model harness invocation**, not a resident agent loop. That invocation can contain model/tool turns; it is not a promise of one provider API request. The wake service has a 40-minute bound. The current wake harness is Opus at medium effort; async agent jobs select Sol, Haiku or Opus through their job spec.
 
-The wake reads `prompts/wake.md`, its trigger, the full Now section, an index of rendered sections, and the live mind. Index lines report line counts and changes since the last model wake (unknown reads never say unchanged), and name sections required by due rituals. Pull detail with `steward briefing "SECTION" ["SECTION" …] [--wake ID]`; `steward briefing --list` lists the latest wake's sections. The full `briefing.md` remains in each wake archive; section digests and exact text boundaries are recorded with that wake. It is instructed to act through `steward` verbs. Writer locks cover individual operations, not the whole model session. `steward tick skip --from ISO --to ISO --reason TEXT` records an undoable window that suppresses wakes, not deterministic sensing, planning or dispatch.
+The wake reads `prompts/wake.md`, its trigger, the full Now section, an index of rendered sections, and the live mind. Index lines report line counts and changes since the last model wake (unknown reads never say unchanged), and name sections required by due moments. Pull detail with `steward briefing "SECTION" ["SECTION" …] [--wake ID]`; `steward briefing --list` lists the latest wake's sections. The full `briefing.md` remains in each wake archive; section digests and exact text boundaries are recorded with that wake. It is instructed to act through `steward` verbs. Writer locks cover individual operations, not the whole model session. `steward tick skip --from ISO --to ISO --reason TEXT` records an undoable window that suppresses wakes, not deterministic sensing, planning or dispatch.
 
 ### A mind outside the release
 
@@ -58,7 +58,7 @@ Producer schemas are vendored in `contracts/vendor/` and validated on reads. The
 
 Calendar B is the writable schedule calendar; main calendars remain read-only, with no attendee or invitation writes.
 
-1. `steward block demand add|edit|rm` records scheduling needs. A bundle references gsd item ids, a title and a deadline.
+1. `steward block demand add|edit|rm` records scheduling needs. A block with items references gsd item ids, a title and a deadline.
 2. `steward block plan` reads the calendar and produces candidate ids.
 3. `steward block choose --spec FILE` takes selections and reasons. An independent checker validates candidate references, time windows, durations, deadlines and overlap before any calendar effect.
 4. Apply records intended effects before provider writes, then confirms them. `steward block apply CHANGE_ID` resumes a partial apply only after a fresh check.
@@ -84,9 +84,11 @@ A capability is data plus prose, never an in-process plugin. Its frontmatter use
 
 Telegram topics are Today, Changes, Finds, Alerts and Talk. Only the configured owner's messages are accepted. `steward inbox --outstanding --json` exposes unhandled instructions; `steward inbox done ID…` acknowledges addressed messages.
 
-`steward notify` records outbox intent before sending. `--told-key` and `steward told check KEY…` deduplicate canonical finding identities, including pending delivery. Text delivery is at least once: a crash after sending but before recording the receipt can repeat a message. Delivered messages cannot be unsent by runtime undo.
+Writes require an explicit `STEWARD_ACTOR=owner`, `model` or `maintenance`; reads need none. Internal runtime operations use `tick` or `migration` in code.
 
-All delivery is silent unless `notify --interrupt REASON` explicitly requests sound; even `--deliver immediate` is silent by default. Code enforces the daily interrupt cap; quiet hours, focus and urgency are model judgement. Automatic Changes includes model, owner and supervisor edits.
+`steward notify` records outbox intent before sending. The topic determines the route; there is no separate message kind. `--told-key` and `steward told check KEY…` deduplicate canonical finding identities, including pending delivery. Text delivery is at least once: a crash after sending but before recording the receipt can repeat a message. Delivered messages cannot be unsent by runtime undo.
+
+All delivery is silent unless `notify --interrupt REASON` explicitly requests sound; even `--deliver immediate` is silent by default. Code enforces the daily interrupt cap; quiet hours, focus and urgency are model judgement. Automatic Changes includes owner-visible edits by the owner and model; maintenance stays in the journal.
 
 `steward page put --title TITLE FILE` uploads Markdown, HTML or an attachment to the Worker edge in `edge/`, backed by R2. Generated slugs combine descriptive words with randomness; local page metadata expires after 28 days and records read receipts. Configure the R2 bucket lifecycle separately to expire stored objects. Pages are password-protected by default; `--public` is explicit. The upload API uses a separate bearer credential. Notifications require hyperlinks; the message should carry the point and the page the evidence. `bin/deploy-edge` tests and deploys the edge from an exact commit; it does not provision the bucket lifecycle.
 
@@ -100,7 +102,7 @@ All delivery is silent unless `notify --interrupt REASON` explicitly requests so
 
 `steward transcript wake-N --json` and `steward transcript run-HEX --json` read Steward's own archives. `steward contract steward.transcript.v1` and `steward contract steward.run-summary.v1` print their schemas. Raw native sessions remain unchanged in private local files; exported views are bounded and credential-redacted. Missing archives are unknown, not empty success. Finalizers and tick sweeps prepare transcript and summary files for the edge shipper; qmd is not this archive.
 
-`steward journal --outcomes --week YYYY-MM-DD --json` (the Sunday's date; weeks run Sunday–Saturday in Athens) computes observations without storing another score ledger: owner moves/deletions, replies to Finds, gsd amendment rates, bundle use, preparation-page opens and closed items. Definitions travel with counts. An unchanged block is not affirmative acceptance, a page open is not proof of reading, and missing denominators or history stay unknown.
+`steward journal --outcomes --week YYYY-MM-DD --json` (the Sunday's date; weeks run Sunday–Saturday in Athens) computes observations without storing another score ledger: owner moves/deletions, replies to Finds, gsd amendment rates, use of blocks with items, preparation-page opens and closed items. Definitions travel with counts. An unchanged block is not affirmative acceptance, a page open is not proof of reading, and missing denominators or history stay unknown.
 
 ## Design decisions
 

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "Read-only view for the supervisor watch. Unhandled owner messages in any topic, using the wake inbox predicate; no polling, writes or message bodies. id is the Telegram update id accepted by inbox done; at is Steward's arrival time (ISO 8601 with offset). Ordered by id; no age cutoff or truncation.",
+  "description": "Read-only view of unhandled owner messages in any topic, using the wake inbox predicate; no polling, writes or message bodies. id is the Telegram update id accepted by inbox done; at is Steward's arrival time (ISO 8601 with offset). Ordered by id; no age cutoff or truncation.",
   "type": "object",
   "required": ["schema", "outstanding"],
   "properties": {

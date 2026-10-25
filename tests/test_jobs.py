@@ -50,7 +50,7 @@ class JobsTests(unittest.TestCase):
 
     def tick(self, at=NOW, **extra):
         return runtime.tick(self.root, self.data, clock=lambda: at,
-                            **{'sender': lambda *a, **k: 1, 'update_fetcher': lambda offset: [], 'telegram': {'chat_id': 1, 'owner_user_id': 2, 'topics': {'Talk': 6}}, 'sense_runner': lambda argv: (_ for _ in ()).throw(OSError()), 'rollout_root': self.root / 'no-rollouts', 'launcher': self.launched.append, 'wake_starter': lambda: None, 'load_reader': lambda: (0.1, 20 * 1024**3), 'lock_reader': lambda: False, **extra})
+                            **{'sender': lambda *a, **k: 1, 'update_fetcher': lambda offset: [], 'telegram': {'chat_id': 1, 'owner_user_id': 2, 'topics': {'Talk': 6}}, 'launcher': self.launched.append, 'wake_starter': lambda: None, 'load_reader': lambda: (0.1, 20 * 1024**3), 'lock_reader': lambda: False, **extra})
 
     def test_invalid_json_spec_is_unknown_without_breaking_state_or_intent(self):
         self.add()
@@ -102,13 +102,19 @@ class JobsTests(unittest.TestCase):
         self.assertEqual(len(result['started']), 1)
 
     def test_state_includes_whole_spec(self):
-        self.add(model='haiku', cwd='/tmp', env_file='/tmp/job.env', min_gap='1h',
-                 heavy=True, recurring=False, deliver='immediate', max_minutes=7)
+        env_file = Path(self.tmp.name) / 'job.env'
+        env_file.write_text('PRIVATE_ENV_CONTENT=must-not-appear\n')
+        expected = dict(justification='keeps a test input fresh',
+                        argv=[released('/bin/echo'), 'PRIVATE_JOB_INPUT'],
+                        needs={'every': {'min': '4h', 'max': '1d'}},
+                        model='haiku', cwd='/tmp', env_file=str(env_file), min_gap='1h',
+                        heavy=True, recurring=False, deliver='immediate', max_minutes=7)
+        self.add(**expected)
         with writer(self.root) as st:
             row = jobs.snapshot(st.db, now=NOW)['jobs'][0]
-            stored = json.loads(jobs.get(st.db, 'jobs', 'test')['spec_json'])
-        for key, value in stored.items():
-            self.assertEqual(row[key], value)
+        for key, value in expected.items():
+            self.assertEqual(row[key], value, key)
+        self.assertNotIn('PRIVATE_ENV_CONTENT', json.dumps(row))
         for key in ('capability', 'capability_sha'):
             self.assertIsNone(row[key])
 
@@ -244,15 +250,21 @@ class JobsTests(unittest.TestCase):
 
     def test_spec_validation_is_atomic(self):
         with writer(self.root) as store:
-            for bad in (spec(justification=''), spec(model='unknown'), spec(heavy=1), spec(needs={'every': {'min': '2d', 'max': '4h'}}), spec(env_file='relative')):
-                with self.assertRaises(StateError):
+            for bad, reason in ((spec(justification=''), 'justification required'),
+                                (spec(model='unknown'), 'job model'),
+                                (spec(heavy=1), 'invalid boolean'),
+                                (spec(needs={'every': {'min': '2d', 'max': '4h'}}), 'reversed every'),
+                                (spec(env_file='relative'), 'absolute path required')):
+                with self.assertRaisesRegex(StateError, reason):
                     jobs.job_verb(store.db, 'add', 'bad', bad, now=NOW)
                 self.assertEqual(store.db.execute('SELECT count(*) FROM jobs').fetchone()[0], 0)
                 self.assertEqual(store.db.execute('SELECT count(*) FROM changes WHERE actor!=\'migration\'').fetchone()[0], 0)
             jobs.job_verb(store.db, 'add', 'j0', spec(), now=NOW)
             self.assertEqual(store.db.execute('SELECT count(*) FROM changes WHERE actor!=\'migration\'').fetchone()[0], 1)
             jobs.job_verb(store.db, 'pause', 'j0', now=NOW)
+            self.assertEqual(jobs.get(store.db, 'jobs', 'j0')['state'], 'paused')
             jobs.job_verb(store.db, 'resume', 'j0', now=NOW)
+            self.assertEqual(jobs.get(store.db, 'jobs', 'j0')['state'], 'active')
 
     def test_append_only_and_undo(self):
         self.add()
@@ -310,6 +322,23 @@ class JobsTests(unittest.TestCase):
             jobs.job_verb(store.db, 'edit', 'test', spec(argv=[released('/bin/false')]), now=NOW)
             self.assertEqual(json.loads(jobs.get(store.db, 'runs', rid)['spec_json'])['argv'], [released()])
 
+    def test_pages_token_is_passed_by_name_not_in_launch_argv_or_manifest(self):
+        from steward import pages
+        secret = 'synthetic-pages-secret-do-not-archive'
+        self.add(recurring=False)
+        rid = self.run_now()
+        with patch.dict('os.environ', {pages.TOKEN_ENV: secret, 'UNRELATED_SECRET': 'not-forwarded'}):
+            self.tick()
+            argv = self.launched[0]
+            self.assertEqual(argv[argv.index('--pass') + 1], pages.TOKEN_ENV)
+            self.assertEqual(argv.count('--pass'), 1)
+            self.assertNotIn(secret, json.dumps(argv))
+            self.assertNotIn('UNRELATED_SECRET', json.dumps(argv))
+            runtime.execute(self.root, rid, self.data, clock=lambda: NOW)
+        manifest = self.data / 'runs' / 'test' / rid / 'manifest.json'
+        self.assertNotIn(secret, manifest.read_text())
+        self.assertNotIn(pages.TOKEN_ENV, manifest.read_text())
+
     def test_manifest_and_fold_success_failure_links_and_tails(self):
         for name, exit_code in [('ok', 0), ('bad', 3)]:
             command = [released(sys.executable), '-c', "import os,pathlib,sys; p=pathlib.Path(os.environ['STEWARD_RUN_DIR']); (p/'links.json').write_text('[\"https://example.org/full\"]'); (p/'records.jsonl').write_text('{}\\n'); print('x'*70000); sys.exit(" + str(exit_code) + ')']
@@ -319,10 +348,10 @@ class JobsTests(unittest.TestCase):
             runtime.execute(self.root, rid, self.data, clock=lambda: NOW)
             directory = self.data / 'runs' / name / rid
             manifest = json.loads((directory / 'manifest.json').read_text())
-            from steward.contracts import DIRECTORY
-            protocol = (DIRECTORY / 'steward.job.v1.md').read_text()
-            declared = protocol.split('7. **Manifest.**', 1)[1].split(': ', 1)[1].split('. A job', 1)[0]
-            self.assertTrue(set(declared.split(', ')) <= manifest.keys())
+            self.assertEqual(manifest['schema'], 'steward.job.v2')
+            self.assertTrue({'job', 'run_id', 'host', 'argv', 'cwd', 'started_at', 'ended_at',
+                             'exit_code', 'status', 'duration', 'links', 'record_errors',
+                             'transcript_collection'} <= manifest.keys())
             self.assertEqual(manifest['exit_code'], exit_code)
             self.assertEqual(manifest['links'], ['https://example.org/full'])
             self.assertEqual(manifest['record_errors'], [])
@@ -353,8 +382,6 @@ class JobsTests(unittest.TestCase):
                 jobs.append(store.db, 'runs', row, row['change_id'])
 
     def test_served_staleness_job_is_not_rerun_every_tick(self):
-        # 2026-10-17 live: backup (max_staleness 24h, 2 s runs) ran at 06:30, 06:45, 07:00 and 07:15:
-        # its default time was off the grid, and the fallback took "now".
         self.add(needs={'max_staleness': '24h'})
         self.succeeded('test', NOW - timedelta(minutes=15), NOW - timedelta(minutes=15) + timedelta(seconds=2), 0.03)
         result = self.tick()
@@ -372,18 +399,24 @@ class JobsTests(unittest.TestCase):
         self.assertEqual(result['later'], {'test': (NOW + timedelta(days=6, hours=-1)).isoformat()})
 
     def test_timeout_sends_term_before_kill(self):
-        import subprocess, time
+        import select
+        import subprocess
         marker = Path(self.tmp.name) / 'finalized'
-        polite = subprocess.Popen([sys.executable, '-c', f"import signal,sys,time,pathlib\ndef bye(*a):\n    pathlib.Path({str(marker)!r}).write_text('x'); sys.exit(0)\nsignal.signal(signal.SIGTERM, bye)\ntime.sleep(60)"], start_new_session=True)
-        time.sleep(0.3)
-        runtime.stop(polite, grace=5)
-        self.assertTrue(marker.exists())  # its finalizer ran
-        stubborn = subprocess.Popen([sys.executable, '-c', "import signal,time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\ntime.sleep(60)"], start_new_session=True)
-        time.sleep(0.3)
-        started = time.monotonic()
-        runtime.stop(stubborn, grace=0.5)
-        self.assertEqual(stubborn.returncode, -9)
-        self.assertLess(time.monotonic() - started, 5)
+        scripts = [
+            f"import signal,sys,time,pathlib\ndef bye(*a):\n    pathlib.Path({str(marker)!r}).write_text('x'); sys.exit(0)\nsignal.signal(signal.SIGTERM, bye)\nprint('ready', flush=True)\ntime.sleep(60)",
+            "import signal,time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\nprint('ready', flush=True)\ntime.sleep(60)",
+        ]
+        for index, script in enumerate(scripts):
+            with self.subTest(handler=index):
+                proc = subprocess.Popen([sys.executable, '-c', script], start_new_session=True,
+                                        stdout=subprocess.PIPE, text=True)
+                self.addCleanup(proc.stdout.close)
+                self.addCleanup(lambda p=proc: runtime.stop(p, grace=0.5) if p.poll() is None else None)
+                self.assertTrue(select.select([proc.stdout], [], [], 10)[0], 'handler did not become ready')
+                self.assertEqual(proc.stdout.readline(), 'ready\n')
+                runtime.stop(proc, grace=0.5)
+                self.assertEqual(proc.returncode, 0 if index == 0 else -9)
+        self.assertTrue(marker.exists())
 
     def test_job_rm_cancels_its_reservations_and_undo_restores_them(self):
         # Removing a job must cancel its reservations, not leave them planned.
@@ -460,8 +493,8 @@ class JobsTests(unittest.TestCase):
                 self.assertEqual(other.execute('SELECT count(*) FROM changes WHERE actor!=\'migration\'').fetchone()[0], 1)
                 other.close()
                 return 42
-            first = notify(store.db, 'Finds', 'result', 'useful source', 'https://example.org', sender=send, now=NOW, deliver='immediate')
-            second = notify(store.db, 'Finds', 'result', 'again', 'https://example.org', sender=lambda *args, **options: self.fail('duplicate send'), now=NOW)
+            first = notify(store.db, 'Finds', 'useful source', 'https://example.org', sender=send, now=NOW, deliver='immediate')
+            second = notify(store.db, 'Finds', 'again', 'https://example.org', sender=lambda *args, **options: self.fail('duplicate send'), now=NOW)
             self.assertEqual(first['message_id'], 42)
             self.assertEqual(second['status'], 'already_told')
             self.assertEqual(store.db.execute('SELECT message_id FROM told').fetchone()[0], 42)
@@ -472,7 +505,7 @@ class JobsTests(unittest.TestCase):
         def fail(*args, **options):
             raise OSError('SECRET_TOKEN')
         with writer(self.root) as store:
-            result = notify(store.db, 'Alerts', 'alert', 'delivery test', sender=fail, now=NOW)
+            result = notify(store.db, 'Alerts', 'delivery test', sender=fail, now=NOW)
             self.assertEqual(result['status'], 'pending')
             self.assertNotIn('SECRET', json.dumps(result))
             self.assertEqual(store.db.execute('SELECT count(*) FROM told').fetchone()[0], 0)
@@ -487,7 +520,7 @@ class JobsTests(unittest.TestCase):
         db.commit(); db.close()
         backup = Path(self.tmp.name) / 'backup'
         with writer(legacy) as store:
-            self.assertEqual(store.db.execute('PRAGMA user_version').fetchone()[0], 17)
+            self.assertEqual(store.db.execute('PRAGMA user_version').fetchone()[0], 18)
             self.assertIsNone(store.db.execute("SELECT name FROM sqlite_master WHERE name='history'").fetchone())
             self.assertEqual(store.db.execute('SELECT status FROM wakes').fetchone()[0], 'skipped')
             store.backup(backup)
@@ -534,7 +567,7 @@ class JobsTests(unittest.TestCase):
         self.assertNotIn('SYNTHETIC_CHARTER_MARKER', page)
         self.assertEqual(page_path.name, 'index.md')
         self.assertIn('- What I carry:', page)
-        self.assertNotIn('## What I carry', page)
+        self.assertIn('## What I carry', page)  # every wake carries the synthesis (memory law, F-67)
         self.assertIn('## What I carry', page_path.with_name('briefing.md').read_text())
         self.assertIn('## Now [', page)
 
@@ -606,8 +639,9 @@ class JobsTests(unittest.TestCase):
         self.tick()
         with writer(self.root) as store:
             runs = jobs.current(store.db, 'runs')
-            ready = next(r for r in runs if r['job'] == 'ready')
-            self.assertEqual(jobs.instant(ready['planned_for']), NOW + timedelta(hours=2, minutes=0))
+            self.assertEqual({r['job']: (jobs.instant(r['planned_for']), r['state']) for r in runs},
+                             {'ready': (NOW + timedelta(hours=2), 'planned'),
+                              'every': (NOW, 'started'), 'fresh': (NOW, 'started')})
 
     def test_ready_by_served_deadline_is_not_run_again(self):
         # A successful run must serve its ready_by target only once.
@@ -632,8 +666,7 @@ class JobsTests(unittest.TestCase):
         self.assertEqual(at.astimezone(athens).strftime('%H:%M'), '17:00')  # too late to finish by 06:30
 
     def test_tick_and_wake_refuse_outside_their_unit(self):
-        # 2026-10-17 live: a manual tick from a shell read no calendars (no keyring), and the
-        # next tick's normal read looked like a change: two needless Opus wakes per manual tick.
+        # The unit supplies credentials; shell execution would manufacture unknown reads.
         out = io.StringIO()
         with patch.dict('os.environ', {'INVOCATION_ID': 'from-another-service'}), redirect_stdout(out), redirect_stderr(out):
             for command in ('tick', 'wake'):
@@ -652,7 +685,7 @@ class JobsTests(unittest.TestCase):
             events = [r[0] for r in db.execute("SELECT event FROM senses WHERE name='calendars' ORDER BY id")]
         self.assertEqual(events, [0, 0, 0, 1])
 
-    def test_cli_config_cap_and_state_read_only_and_retired_verbs(self):
+    def test_cli_job_add_uses_config_and_state_is_read_only(self):
         config = Path(self.tmp.name) / 'config.toml'
         config.write_text(TEST_CONFIG)
         source = Path(self.tmp.name) / 'spec.json'
@@ -689,17 +722,20 @@ class JobsTests(unittest.TestCase):
         with writer(self.root) as store:
             self.assertEqual(jobs.get(store.db, 'runs', rid)['state'], 'failed')
 
-    def test_default_placement_visits_unplaceable_job_once(self):
-        self.add('blocked')
+    def test_no_feasible_time_does_not_starve_a_healthy_peer(self):
+        self.add('blocked', min_gap='30h')
+        rid = self.run_now('blocked')
+        self.tick()
+        runtime.execute(self.root, rid, self.data, clock=lambda: NOW + timedelta(minutes=1))
+        self.launched.clear()
         self.add('good')
-        placement = runtime.placement
-        def choose(job, runs, now):
-            return (None, 'not feasible') if job['name'] == 'blocked' else placement(job, runs, now)
-        with patch('steward.runtime.placement', side_effect=choose) as calls:
-            self.tick()
-        self.assertEqual([call.args[0]['name'] for call in calls.call_args_list], ['blocked', 'good'])
+        result = self.tick(at=NOW + timedelta(minutes=20))
+        self.assertEqual(result.get('unplanned'), {'blocked': 'no feasible time'})
+        self.assertEqual(len(result['started']), 1)
+        self.assertEqual(len(self.launched), 1)
         with writer(self.root) as store:
-            self.assertEqual([r['job'] for r in jobs.current(store.db, 'runs')], ['good'])
+            pending = [r['job'] for r in jobs.current(store.db, 'runs') if r['state'] in ('planned', 'started')]
+            self.assertEqual(pending, ['good'])
 
     def test_heavy_default_placement_has_no_overlap_and_started_lane_defers(self):
         self.add('first', heavy=True, max_minutes=30)
@@ -750,13 +786,6 @@ class JobsTests(unittest.TestCase):
                 runtime.harness(['tty', 'run', '-C', str(directory), 'briefing.md'])
             self.assertEqual(error.exception.run_id, 'tty-test')
             self.assertEqual(stop.call_args.args[0], ['tty', 'stop', 'tty-test'])
-
-    def test_state_shows_arguments_and_env_path_but_not_file_contents(self):
-        self.add(argv=[released('/bin/echo'), 'PRIVATE_JOB_INPUT'], env_file='/private/SECRET.env')
-        with writer(self.root) as store:
-            encoded = json.dumps(jobs.snapshot(store.db, now=NOW))
-        self.assertIn('PRIVATE_JOB_INPUT', encoded)
-        self.assertIn('SECRET.env', encoded)
 
     def test_tick_records_changed_release_and_mind_before_its_change(self):
         with patch('steward.runtime.release_sha', return_value='release-fixture'), patch('steward.mind.history', return_value={'status':'ok', 'sha':'mind-fixture'}):

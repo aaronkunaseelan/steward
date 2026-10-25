@@ -38,10 +38,12 @@ class TimelineTests(unittest.TestCase):
         from steward.memory import wake_journal
         with patch('steward.runtime.release_sha', return_value='a'*40):
             runtime.log_revisions(self.db, {'status': 'ok', 'sha': 'mind-a'}, NOW)
+        previous_cursor = self.db.execute('SELECT max(rowid) FROM changes').fetchone()[0]
         cid = jobs.change(self.db, 'memory write', NOW)
         self.db.execute("INSERT INTO memories VALUES ('synthesis','current',1,?,'then')", (cid,))
-        self.db.execute("INSERT INTO wakes(id,started_at,status,checkpoint,change_cursor) VALUES (1,?,'completed','{}',3)", (NOW.isoformat(),))
-        self.db.execute("INSERT INTO wakes(id,started_at,status,checkpoint,change_cursor) VALUES (2,?,'completed','{}',4)", (NOW.isoformat(),))
+        cursor = self.db.execute('SELECT max(rowid) FROM changes').fetchone()[0]
+        self.db.execute("INSERT INTO wakes(id,started_at,status,checkpoint,change_cursor) VALUES (1,?,'completed','{}',?)", (NOW.isoformat(), previous_cursor))
+        self.db.execute("INSERT INTO wakes(id,started_at,status,checkpoint,change_cursor) VALUES (2,?,'completed','{}',?)", (NOW.isoformat(), cursor))
         cid = jobs.change(self.db, 'memory write', NOW)
         self.db.execute("INSERT INTO memories VALUES ('synthesis','current',2,?,'later')", (cid,))
         report = wake_journal(self.db, 2)
@@ -50,7 +52,7 @@ class TimelineTests(unittest.TestCase):
         self.assertEqual(report['synthesis']['version'], 1)
         self.assertEqual([r['verb'] for r in report['changes']], ['memory write'])
         self.assertIsNone(wake_journal(self.db, 1)['synthesis'])
-        self.assertEqual(report['previous_cursor'], 3)
+        self.assertEqual(report['previous_cursor'], previous_cursor)
 
     def test_release_identity_is_the_running_archive_not_current_symlink(self):
         with patch('steward.runtime.__file__', '/opt/steward/releases/' + 'a'*40 + '/src/steward/runtime.py'):

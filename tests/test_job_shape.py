@@ -1,4 +1,4 @@
-"""X-30: model shell scope, pull packets and measured execution limits."""
+"""Declared tool scope and measured execution limits."""
 from datetime import timedelta
 import json
 import os
@@ -90,6 +90,9 @@ class JobShapeTests(unittest.TestCase):
             bound = json.loads(jobs.get(store.db, 'runs', identity)['spec_json'])
             self.assertEqual(bound['_limit_minutes'], 60)
         self.assertIn('65m', self.launched[0])
+        with writer(self.root) as store:
+            jobs.job_verb(store.db, 'edit', 'test', test_jobs.spec(max_minutes=1), now=test_jobs.NOW)
+            self.assertEqual(json.loads(jobs.get(store.db, 'runs', identity)['spec_json'])['_limit_minutes'], 60)
         with patch('steward.runtime.subprocess.Popen') as popen, patch('steward.runtime.archive_attempt', return_value='complete'):
             popen.return_value.wait.return_value = 0
             runtime.execute(self.root, identity, self.data, clock=lambda: test_jobs.NOW)
@@ -149,8 +152,7 @@ class JobShapeTests(unittest.TestCase):
             choice = planner.choices(store.db, test_jobs.NOW)[0]
             self.assertEqual(choice['measurement'], 'measuring')
             self.assertIsNone(choice['missed_at'])
-            with patch('steward.intent.ticks', return_value={}):
-                doc = intent.steward_doc(store.db, test_jobs.NOW, {}, self.data)
+            doc = intent.steward_doc(store.db, test_jobs.NOW, {}, self.data)
             day = next(b for b in doc['blocks'] if b['kind'] == 'day')
             promise = next(p for p in day['promises'] if p['label'] == 'test')
             self.assertEqual(promise['state'], 'quiet')
