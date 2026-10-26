@@ -384,7 +384,10 @@ def tick(root, data=None, clock=now_utc, load_reader=host_load, lock_reader=heav
                 append(db, 'runs', row, cid)
             # run-exec owns the deadline (TERM, grace, KILL, manifest); the unit's limit
             # is only a backstop after it, or systemd would kill run-exec first.
-            argv = ['batch-run', '--pass', pages.TOKEN_ENV] + (['--heavy'] if spec['heavy'] else []) + ['--name', name, '--max', str(spec['_limit_minutes'] + 5) + 'm']
+            argv = ['batch-run']
+            for env_name in capabilities.credential_names(spec.get('capability')):
+                argv += ['--pass', env_name]
+            argv += (['--heavy'] if spec['heavy'] else []) + ['--name', name, '--max', str(spec['_limit_minutes'] + 5) + 'm']
             if spec.get('env_file'):
                 argv += ['--env-file', spec['env_file']]
             # batch-run does not preserve PYTHONPATH, so explicitly bind the current code root.

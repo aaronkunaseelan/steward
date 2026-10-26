@@ -30,8 +30,27 @@ Edge deploy reads `~/.config/mech-d/credentials.json` key `PAGE_PASSWORD`;
 `edge/wrangler.toml` declares Worker name, R2 binding/bucket and deployment options.
 Do not commit credential files; use mode 0600. Examples omit secret values.
 
-Units load those two env files plus `~/.config/agent-secrets/credentials.env`
-(`GOG_KEYRING_PASSWORD` for gog). Scripts read `EXA_API_KEY` from the environment
+Tick/wake units start through `python -m steward.service`. At each start its
+allowlist (`capabilities.UNIT_CREDENTIALS`) reads only `GOG_KEYRING_PASSWORD`
+from `~/.config/agent-secrets/credentials.env`, `STEWARD_TELEGRAM_BOT_TOKEN` from
+`telegram.env`, and `STEWARD_PAGES_TOKEN` from `pages.env`. Other names (including
+edge-only `SESSION_SECRET`) are not loaded. The original files remain the only
+definitions; no credential copies, shell sourcing, argv values or logging.
+Assignments must be single-line `NAME=value` (one literal, optionally shell-quoted
+value; no expansion). Missing, empty or malformed required values fail visibly by
+name before Steward starts. Ordinary CLI calls do not discover secrets in files.
+
+A capability run receives credentials from its permits via `batch-run --pass NAME`:
+`draft` brings `GOG_KEYRING_PASSWORD`; `page` brings `STEWARD_PAGES_TOKEN`
+(`capabilities.PERMIT_ENV`). Other permits bring none. A capability with no permits,
+or a non-capability job, gets no credential passes; an explicit job `env_file`
+remains independent. Telegram notifications from credentialless runs queue for the
+tick. Drafts keep the exact-command gate and permanent `--gmail-no-send`: known
+keyring/config/auth/refusal failures are recorded as `not made: <reason class>`;
+a timeout or unusable provider reply stays unknown and needs a Drafts check before
+retrying. Provider stderr never enters the row or change summary.
+
+Scripts read `EXA_API_KEY` from the environment
 or `~/.config/agent-secrets/workbench.env`. Pocket Casts reads
 `~/.config/pocketcasts/credentials.env`: `POCKETCASTS_EMAIL`, `POCKETCASTS_PASSWORD`.
 `HOME`, `PATH`, `PYTHONPATH`, `LANG` have their usual process meanings.

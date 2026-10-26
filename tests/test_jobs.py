@@ -325,7 +325,9 @@ class JobsTests(unittest.TestCase):
     def test_pages_token_is_passed_by_name_not_in_launch_argv_or_manifest(self):
         from steward import pages
         secret = 'synthetic-pages-secret-do-not-archive'
-        self.add(recurring=False)
+        capability = Path(self.tmp.name) / 'mind/capabilities/page-writer.md'
+        capability.write_text('---\nname: "page-writer"\nreads: []\ncalls: []\nrecord: []\npermits: ["page"]\n---\nFixture')
+        self.add(recurring=False, capability='page-writer')
         rid = self.run_now()
         with patch.dict('os.environ', {pages.TOKEN_ENV: secret, 'UNRELATED_SECRET': 'not-forwarded'}):
             self.tick()

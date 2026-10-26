@@ -26,14 +26,48 @@ def command(action, account):
             '-j', 'gmail', 'drafts', action, '--account', account]
 
 
+class NotMade(StateError):
+    def __init__(self, reason, action='made'):
+        self.reason = reason
+        super().__init__('Gmail draft not ' + action + ': ' + reason)
+
+
+# gog v0.39.1: `gog --help`, internal/cmd/exit_codes.go. Exit 1 includes
+# keyring/preflight errors; exit 8 includes both retryable HTTP errors and timeouts.
+EXIT_REASONS = {1: 'provider', 2: 'usage', 3: 'empty', 4: 'auth', 5: 'not found',
+                6: 'refusal', 7: 'rate limited', 8: 'retryable', 10: 'config',
+                11: 'orphaned', 130: 'interrupted'}
+UNKNOWN = 'Gmail draft outcome unknown; inspect Drafts before retrying'
+
+
 def run(argv, body=None):
+    action = 'deleted' if '--enable-commands-exact=gmail.drafts.delete' in argv else 'made'
     try:
         result = subprocess.run(argv, input=body, text=True, capture_output=True,
                                 timeout=60, check=True)
         return json.loads(result.stdout)
-    except (OSError, ValueError, subprocess.SubprocessError):
-        # Never return stderr: provider errors may contain owner mail or credentials.
-        raise StateError('Gmail draft outcome unknown; inspect Drafts before retrying') from None
+    except subprocess.CalledProcessError as error:
+        # Inspect only to classify. Never persist or return stderr (owner mail).
+        detail = (error.stderr or '').lower()
+        if 'keyring' in detail or 'gog_keyring_password' in detail:
+            reason = 'keyring'
+        elif any(marker in detail for marker in ('context deadline exceeded', 'i/o timeout',
+                                                'timed out', 'client.timeout exceeded')):
+            raise StateError(UNKNOWN) from None
+        elif any(marker in detail for marker in ('read-only', 'readonly', 'disabled',
+                                                'not enabled', 'gmail_no_send', 'gmail-no-send')):
+            reason = 'refusal'
+        else:
+            reason = EXIT_REASONS.get(error.returncode, 'provider')
+        if reason in ('provider', 'retryable', 'interrupted'):
+            # No trustworthy success reply: transport/server failures or interruption
+            # do not prove that Gmail never committed the request.
+            raise StateError(UNKNOWN) from None
+        raise NotMade(reason, action) from None
+    except OSError:
+        raise NotMade('executable', action) from None
+    except (ValueError, subprocess.TimeoutExpired):
+        raise StateError(UNKNOWN) from None
 
 
 def create(db, settings, body, reply_to=None, reply_all=False, to=None, subject=None,
@@ -63,18 +97,31 @@ def create(db, settings, body, reply_to=None, reply_all=False, to=None, subject=
         cid = jobs.change(db, 'draft', now, actor)
         db.execute('INSERT INTO drafts(change_id,account,state) VALUES (?,?,?)', (cid, account, 'unknown'))
         db.execute('UPDATE changes SET summary=? WHERE id=?', ('Gmail draft outcome unknown; inspect Drafts before retrying', cid))
-    result = runner(argv, body)
+    try:
+        result = runner(argv, body)
+    except NotMade as error:
+        with db:
+            db.execute('UPDATE drafts SET state=? WHERE change_id=?',
+                       ('not made: ' + error.reason, cid))
+            db.execute('UPDATE changes SET summary=? WHERE id=?', (str(error), cid))
+        raise
+    jobs.require(isinstance(result, dict), UNKNOWN)
     draft = result.get('draft', result)
+    jobs.require(isinstance(draft, dict), UNKNOWN)
     identity = draft.get('draftId') or draft.get('id')
     jobs.require(isinstance(identity, str) and bool(re.fullmatch(r'[a-zA-Z0-9_-]+', identity)),
                  'Gmail draft outcome unknown: missing draft id')
-    thread = draft.get('message', {}).get('threadId') or result.get('threadId')
+    message = draft.get('message')
+    thread = (message.get('threadId') if isinstance(message, dict) else None) or result.get('threadId')
     url = result.get('url') or draft.get('url') or result.get('threadUrl')
     if not url:
         target = '#all/' + quote(thread, safe='') if isinstance(thread, str) and thread else '#drafts'
         url = 'https://mail.google.com/mail/u/' + quote(account, safe='') + '/' + target
-    parsed = urlsplit(url)
-    jobs.require(parsed.scheme == 'https' and parsed.netloc == 'mail.google.com'
+    try:
+        parsed = urlsplit(url) if isinstance(url, str) else None
+    except ValueError:
+        parsed = None
+    jobs.require(parsed is not None and parsed.scheme == 'https' and parsed.netloc == 'mail.google.com'
                  and not any(c in url for c in '\r\n()'), 'Gmail draft outcome unknown: invalid URL')
     # No subject, recipients or body in outward notifications or the change log.
     summary = ('Created reply draft' if reply_to else 'Created new email draft') + ' · [Open draft](' + url + ')'
@@ -95,7 +142,12 @@ def undo(db, identity, actor='owner', runner=run, now=None):
     with db:
         cid = jobs.change(db, 'undo draft', now, actor, identity)
         db.execute('UPDATE changes SET summary=? WHERE id=?', ('Delete Gmail draft (outcome pending)', cid))
-    runner(command('delete', row['account']) + [row['draft_id'], '--force', '--no-input'])
+    try:
+        runner(command('delete', row['account']) + [row['draft_id'], '--force', '--no-input'])
+    except NotMade as error:
+        with db:
+            db.execute('UPDATE changes SET summary=? WHERE id=?', (str(error), cid))
+        raise
     with db:
         db.execute("UPDATE drafts SET state='deleted' WHERE change_id=?", (identity,))
         db.execute('UPDATE changes SET summary=? WHERE id=?', ('Deleted Gmail draft', cid))

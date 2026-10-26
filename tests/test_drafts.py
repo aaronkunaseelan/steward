@@ -267,6 +267,81 @@ class DraftTests(unittest.TestCase):
                 drafts.run(['gog'], 'body')
         self.assertNotIn('secret', str(error.exception))
 
+    def stub_gog(self, source):
+        directory = Path(self.tmp.name) / 'bin'
+        directory.mkdir(exist_ok=True)
+        path = directory / 'gog'
+        path.write_text('#!/usr/bin/python3\n' + source)
+        path.chmod(0o755)
+        return patch.dict(os.environ, PATH=str(directory) + os.pathsep + os.environ['PATH'])
+
+    def test_keyring_stub_records_not_made_and_redacts_provider_error(self):
+        with self.stub_gog('import sys\nprint("keyring locked synthetic-private-mail", file=sys.stderr)\nsys.exit(1)\n'), \
+             writer(self.root) as store:
+            with self.assertRaisesRegex(StateError, '^Gmail draft not made: keyring$'):
+                drafts.create(store.db, {'gmail_account': 'owner@example.test'}, 'body', reply_to='abc')
+            row = store.db.execute('SELECT * FROM drafts').fetchone()
+            self.assertEqual(row['state'], 'not made: keyring')
+            self.assertIsNone(row['draft_id'])
+            summary = store.db.execute('SELECT summary FROM changes WHERE id=?', (row['change_id'],)).fetchone()[0]
+            self.assertEqual(summary, 'Gmail draft not made: keyring')
+            self.assertNotIn('synthetic-private-mail', summary)
+            self.assertEqual(store.db.execute('SELECT count(*) FROM outbox').fetchone()[0], 0)
+
+    def test_gog_documented_preflight_exits_are_not_made(self):
+        for code, reason in ((2, 'usage'), (4, 'auth'), (5, 'not found'), (6, 'refusal'),
+                             (7, 'rate limited'), (10, 'config'), (11, 'orphaned')):
+            with self.subTest(code=code), patch('subprocess.run', side_effect=
+                    subprocess.CalledProcessError(code, [], stderr='synthetic-private-mail')):
+                with self.assertRaisesRegex(StateError, '^Gmail draft not made: ' + reason + '$'):
+                    drafts.run(['gog'])
+
+    def test_timeout_and_unreadable_reply_stubs_keep_unknown_intent(self):
+        native_run = subprocess.run
+        def short_timeout(*args, **kwargs):
+            return native_run(*args, **dict(kwargs, timeout=0.1))
+        for source in ('import time\ntime.sleep(2)\n',
+                       'print("synthetic-private-mail")\n',
+                       'print(\'{"id": "invalid id"}\')\n',
+                       'print(\'{"id": "r-123", "url": "http://invalid.test"}\')\n',
+                       'print("[]")\n', 'print(\'{"draft": null}\')\n'):
+            with self.subTest(source=source), self.stub_gog(source), \
+                 patch('subprocess.run', side_effect=short_timeout), writer(self.root) as store:
+                with self.assertRaisesRegex(StateError, '^Gmail draft outcome unknown'):
+                    drafts.create(store.db, {'gmail_account': 'owner@example.test'}, 'body', reply_to='abc')
+                row = store.db.execute('SELECT * FROM drafts ORDER BY rowid DESC LIMIT 1').fetchone()
+                self.assertEqual(row['state'], 'unknown')
+                summary = store.db.execute('SELECT summary FROM changes WHERE id=?', (row['change_id'],)).fetchone()[0]
+                self.assertIn('outcome unknown', summary)
+                self.assertNotIn('synthetic-private-mail', summary)
+
+    def test_keyring_timeout_is_preflight_and_missing_executable_is_not_made(self):
+        with patch('subprocess.run', side_effect=subprocess.CalledProcessError(
+                1, [], stderr='keyring connection timed out synthetic-private-mail')):
+            with self.assertRaisesRegex(StateError, '^Gmail draft not made: keyring$'):
+                drafts.run(['gog'])
+        with patch('subprocess.run', side_effect=FileNotFoundError('synthetic-private-mail')):
+            with self.assertRaisesRegex(StateError, '^Gmail draft not made: executable$'):
+                drafts.run(['gog'])
+
+    def test_failed_undo_does_not_claim_existing_draft_was_not_made(self):
+        created = self.create(reply_to='abc')
+        with writer(self.root) as store, patch('subprocess.run', side_effect=
+                subprocess.CalledProcessError(4, [], stderr='synthetic-private-mail')):
+            with self.assertRaisesRegex(StateError, '^Gmail draft not deleted: auth$'):
+                drafts.undo(store.db, created['change_id'], now=NOW)
+            self.assertEqual(store.db.execute('SELECT state FROM drafts').fetchone()[0], 'created')
+            summary = store.db.execute("SELECT summary FROM changes WHERE verb='undo draft'").fetchone()[0]
+            self.assertEqual(summary, 'Gmail draft not deleted: auth')
+
+    def test_gog_internal_timeout_and_ambiguous_failure_stay_unknown(self):
+        for code, stderr in ((8, 'context deadline exceeded'), (1, 'synthetic-private-mail'),
+                             (8, 'server unavailable'), (130, 'interrupted')):
+            with self.subTest(code=code), patch('subprocess.run', side_effect=
+                    subprocess.CalledProcessError(code, [], stderr=stderr)):
+                with self.assertRaisesRegex(StateError, '^Gmail draft outcome unknown'):
+                    drafts.run(['gog'])
+
     def test_schema_11_migration_preserves_state(self):
         with writer(self.root) as store:
             store.db.execute("INSERT INTO message_meta VALUES ('preserved', 'fixture value')")

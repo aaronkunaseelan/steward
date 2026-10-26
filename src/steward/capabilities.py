@@ -6,7 +6,7 @@ import shutil
 import shlex
 import subprocess
 
-from . import contracts, jobs, mind
+from . import contracts, jobs, mind, pages
 from .state import StateError
 
 # Async work runs on Sol by default, or on Haiku where a capability's work is mechanical
@@ -34,6 +34,27 @@ PERMITS = {
            'records each attempted/applied fix through the runtime CLI. Never bypass refusals or run raw upgrades. '
            'External effects are not reversible through runtime undo.',
 }
+
+
+# A permit brings the credential its verbs need; dispatch passes names, never values.
+PERMIT_ENV = {
+    'draft': ('GOG_KEYRING_PASSWORD',),
+    'page': (pages.TOKEN_ENV,),
+}
+# Loaded at service start from the original files, not a second copy of each secret.
+UNIT_CREDENTIALS = {
+    'agent-secrets/credentials.env': PERMIT_ENV['draft'],
+    'steward/pages.env': PERMIT_ENV['page'],
+    'steward/telegram.env': ('STEWARD_TELEGRAM_BOT_TOKEN',),
+}
+
+
+def credential_names(name):
+    if not name:
+        return ()
+    meta, _ = load(name)
+    return tuple(dict.fromkeys(env for permit in meta.get('permits', [])
+                               for env in PERMIT_ENV.get(permit, ())))
 
 
 BASIC_TOOLS = ('ls', 'cat', 'head', 'tail', 'wc', 'sort', 'uniq', 'cut', 'grep', 'rg',

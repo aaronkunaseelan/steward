@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from steward import notify, pages
+from steward import notify, pages, service
 from steward.state import StateError
 
 
@@ -48,17 +48,55 @@ class ProviderCredentialsTests(unittest.TestCase):
             self.assertEqual(pages.token(), 'synthetic-env-pages')
             self.assertEqual(notify.bot_token(), 'synthetic-env-telegram')
 
-    def test_services_load_page_and_telegram_tokens_from_environment_files(self):
+    def service_files(self):
+        secrets = self.config.parent / 'agent-secrets'
+        secrets.mkdir()
+        (secrets / 'credentials.env').write_text(
+            'GOG_KEYRING_PASSWORD=synthetic-gog\nUNRELATED_SECRET=synthetic-extra\n'
+            'MALFORMED_EXTRA="ignored\n')
+        with (self.config / 'pages.env').open('a') as stream:
+            stream.write('SESSION_SECRET=synthetic-edge-only\n')
+        return secrets
+
+    def test_unit_loader_reads_only_listed_names_from_original_files(self):
+        self.service_files()
+        self.assertEqual(service.credentials(), {
+            'GOG_KEYRING_PASSWORD': 'synthetic-gog',
+            'STEWARD_PAGES_TOKEN': 'synthetic-file-pages',
+            'STEWARD_TELEGRAM_BOT_TOKEN': 'synthetic-file-telegram',
+        })
+
+    def test_unit_exec_receives_credentials_not_argv_or_extra_secrets(self):
+        self.service_files()
+        with patch.dict(os.environ, {'PATH': '/usr/bin', 'HOME': str(self.config.parent)}, clear=True), \
+             patch('steward.service.config_dir', return_value=self.config), \
+             patch('sys.argv', ['steward.service', 'tick', '--state', 'fixture']), \
+             patch('os.execvpe') as execute:
+            service.main()
+        _, argv, env = execute.call_args.args
+        self.assertEqual(argv[1:], ['-m', 'steward', 'tick', '--state', 'fixture'])
+        self.assertIn('GOG_KEYRING_PASSWORD', env)
+        for name in ('UNRELATED_SECRET', 'MALFORMED_EXTRA', 'SESSION_SECRET'):
+            self.assertNotIn(name, env)
+        self.assertNotIn('synthetic', ' '.join(argv))
+
+    def test_unit_loader_quotes_are_literal_and_required_errors_are_redacted(self):
+        secrets = self.service_files()
+        path = secrets / 'credentials.env'
+        path.write_text('GOG_KEYRING_PASSWORD="synthetic $literal # value"\n')
+        self.assertEqual(service.credentials()['GOG_KEYRING_PASSWORD'], 'synthetic $literal # value')
+        for content in ('UNRELATED_SECRET=synthetic-extra\n', 'GOG_KEYRING_PASSWORD=\n',
+                        'GOG_KEYRING_PASSWORD="synthetic-unclosed\n'):
+            path.write_text(content)
+            with self.subTest(content=content), self.assertRaises(StateError) as error:
+                service.credentials()
+            self.assertIn('GOG_KEYRING_PASSWORD', str(error.exception))
+            self.assertNotIn('synthetic', str(error.exception))
+
+    def test_services_use_loader_without_broad_environment_files(self):
         root = Path(__file__).resolve().parents[1]
-        for service in ('steward-tick.service', 'steward-wake.service'):
-            with self.subTest(service=service):
-                section, files = None, []
-                for line in (root / 'systemd' / service).read_text().splitlines():
-                    line = line.strip()
-                    if line.startswith('['):
-                        section = line
-                    key, _, value = line.partition('=')
-                    if section == '[Service]' and key.strip() == 'EnvironmentFile':
-                        files.extend(value.split())
-                self.assertIn('%h/.config/steward/telegram.env', files)
-                self.assertIn('%h/.config/steward/pages.env', files)
+        for verb in ('tick', 'wake'):
+            unit = (root / 'systemd' / ('steward-' + verb + '.service')).read_text()
+            with self.subTest(verb=verb):
+                self.assertIn('-m steward.service ' + verb, unit)
+                self.assertNotIn('EnvironmentFile=', unit)

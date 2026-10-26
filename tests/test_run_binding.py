@@ -71,6 +71,27 @@ class RunBindingTests(unittest.TestCase):
             self.assertEqual(planned[0]['planned_for'], at)
             self.assertEqual(json.loads(planned[0]['spec_json'])['max_minutes'], 30)
 
+    def test_dispatch_passes_exactly_the_capability_permit_credentials(self):
+        for name, permits, expected in (
+                ('prepare-like', ['page', 'draft', 'page'], ['STEWARD_PAGES_TOKEN', 'GOG_KEYRING_PASSWORD']),
+                ('no-permits', [], []),
+                ('page-only', ['page', 'alert', 'health'], ['STEWARD_PAGES_TOKEN']),
+                ('plain-job', None, [])):
+            if permits is not None:
+                path = Path(self.tmp.name) / 'mind/capabilities' / (name + '.md')
+                path.write_text('---\nname: ' + json.dumps(name) +
+                                '\nreads: []\ncalls: []\nrecord: []\npermits: ' + json.dumps(permits) +
+                                '\n---\nFixture')
+            self.add(name, **({'capability': name} if permits is not None else {}))
+            self.run_now(name)
+            self.tick()
+            argv = self.launched[-1]
+            passed = [argv[i + 1] for i, value in enumerate(argv) if value == '--pass']
+            with self.subTest(name=name):
+                self.assertEqual(passed, expected)
+                self.assertEqual(argv[0], 'batch-run')
+                self.assertNotIn('--env-file', argv)
+
     def test_dispatch_validates_current_spec_before_binding_execution(self):
         self.add()
         identity = self.run_now()

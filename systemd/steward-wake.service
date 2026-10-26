@@ -4,12 +4,9 @@ ConditionPathExists=%h/.local/state/steward/state.sqlite
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/python3.12 -m steward wake --state %h/.local/state/steward
+ExecStart=/usr/bin/python3.12 -m steward.service wake --state %h/.local/state/steward
 Environment=PYTHONPATH=%h/.local/lib/steward/current/src
 Environment=PATH=%h/.local/bin:/home/ubuntu/workbench/scripts/run-tools:/usr/local/bin:/usr/bin:/bin
-EnvironmentFile=%h/.config/agent-secrets/credentials.env
-EnvironmentFile=%h/.config/steward/telegram.env
-EnvironmentFile=%h/.config/steward/pages.env
 UMask=0077
 TimeoutStartSec=40min
 KillMode=control-group
