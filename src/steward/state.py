@@ -244,6 +244,27 @@ PRAGMA user_version=18;
 """
 
 
+SCHEMA_V19 = """
+CREATE TABLE IF NOT EXISTS subject_showings (
+ subject TEXT NOT NULL, outbox_id TEXT NOT NULL, PRIMARY KEY(subject,outbox_id));
+CREATE INDEX IF NOT EXISTS message_changes_change ON message_changes(change_id);
+CREATE INDEX IF NOT EXISTS blocks_change ON blocks(change_id);
+CREATE INDEX IF NOT EXISTS moments_change ON moments(change_id);
+PRAGMA user_version=19;
+"""
+
+
+SCHEMA_V20 = """
+-- Keep the three v19 indexes: Changes still queries message_changes, blocks
+-- and moments by change_id. outbox_reply remains the reply delivery primitive.
+DROP TABLE IF EXISTS subject_showings;
+DELETE FROM message_meta WHERE key IN ('changes_cursor','changes_waiting')
+ OR key GLOB 'change_subjects:*' OR key GLOB 'change_context:*'
+ OR key GLOB 'outbox_subjects:*';
+PRAGMA user_version=20;
+"""
+
+
 @contextmanager
 def writer(root, initialize=False, wait=0):
     """Never delete/replace the lock inode; every local writer uses this lock.
@@ -313,7 +334,11 @@ def writer(root, initialize=False, wait=0):
                 db.executescript('BEGIN;\n' + SCHEMA_V17 + '\nCOMMIT;')
             if db.execute('PRAGMA user_version').fetchone()[0] == 17:
                 db.executescript('BEGIN;\n' + SCHEMA_V18 + '\nCOMMIT;')
-            if db.execute('PRAGMA user_version').fetchone()[0] != 18:
+            if db.execute('PRAGMA user_version').fetchone()[0] == 18:
+                db.executescript('BEGIN;\n' + SCHEMA_V19 + '\nCOMMIT;')
+            if db.execute('PRAGMA user_version').fetchone()[0] == 19:
+                db.executescript('BEGIN;\n' + SCHEMA_V20 + '\nCOMMIT;')
+            if db.execute('PRAGMA user_version').fetchone()[0] != 20:
                 raise StateError('unsupported state schema')
             db.execute('PRAGMA journal_mode=WAL')
             db.execute('PRAGMA synchronous=FULL')
@@ -339,7 +364,7 @@ class Store:
             destination.close()
         os.chmod(target / 'state.sqlite', 0o600)
         hashes = {path.name: digest(path.read_bytes()) for path in target.iterdir()}
-        atomic_file(target / 'manifest.json', json.dumps({'schema':18,'sha256':hashes}, sort_keys=True).encode())
+        atomic_file(target / 'manifest.json', json.dumps({'schema':20,'sha256':hashes}, sort_keys=True).encode())
         return {'status':'backup_complete', 'files':len(hashes)}
 
 
@@ -350,14 +375,14 @@ def restore(source, target):
         raise StateError('restore requires absolute source and fresh isolated target')
     manifest = json.loads((source / 'manifest.json').read_text())
     names = set(manifest.get('sha256', {}))
-    if manifest.get('schema') not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18) or names not in ({'state.sqlite'}, {'state.sqlite','memory.md'}):
+    if manifest.get('schema') not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20) or names not in ({'state.sqlite'}, {'state.sqlite','memory.md'}):
         raise StateError('invalid backup manifest')
     for name, expected in manifest['sha256'].items():
         if digest((source / name).read_bytes()) != expected:
             raise StateError('backup digest mismatch')
     db = sqlite3.connect(f'file:{source / "state.sqlite"}?mode=ro', uri=True)
     try:
-        if db.execute('PRAGMA integrity_check').fetchone()[0] != 'ok' or db.execute('PRAGMA user_version').fetchone()[0] not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18):
+        if db.execute('PRAGMA integrity_check').fetchone()[0] != 'ok' or db.execute('PRAGMA user_version').fetchone()[0] not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20):
             raise StateError('backup integrity/schema invalid')
         target.mkdir(mode=0o700, parents=True)
         out = sqlite3.connect(target / 'state.sqlite')

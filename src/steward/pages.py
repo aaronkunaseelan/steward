@@ -274,6 +274,19 @@ def your_list(db):
     return dict(slug=slug, url=pages_host() + '/' + slug, state=row['state']) if row else 'unknown: not rendered yet'
 
 
+def get(slug, transport=None):
+    """Read the authenticated live object without recording or changing local state."""
+    require(valid_slug(slug), 'invalid page slug')
+    try:
+        status, body = (transport or request)('GET', '/_api/pages/' + slug)
+    except (OSError, StateError, ValueError):
+        raise StateError('page read failed: network or configuration') from None
+    require(status != 404, 'unknown page')
+    require(status == 200, 'page read failed: HTTP ' + str(status))
+    require(len(body) <= LIMIT, 'page exceeds 10 MiB')
+    return body
+
+
 def put(db, title, data, filename='', slug=None, as_html=False, now=None, actor='owner', transport=None, public=False,
         items=None, block=None, runner=senses.run):
     now, transport = now or now_utc(), transport or request

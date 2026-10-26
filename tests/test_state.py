@@ -72,7 +72,7 @@ class CoreTests(unittest.TestCase):
             store.db.execute('PRAGMA user_version=14')
             store.db.commit()
         with writer(self.root) as store:
-            self.assertEqual(store.db.execute('PRAGMA user_version').fetchone()[0], 18)
+            self.assertEqual(store.db.execute('PRAGMA user_version').fetchone()[0], 20)
             self.assertIsNone(store.db.execute("SELECT name FROM sqlite_master WHERE name='retirements'").fetchone())
             self.assertEqual([tuple(row) for row in store.db.execute('SELECT * FROM jobs')],
                              [('kept', 1, 'fixture', spec, 'active')])
@@ -84,9 +84,9 @@ class CoreTests(unittest.TestCase):
         with redirect_stdout(output), patch('steward.runtime.config', return_value={}):
             code = main(['init-state', '--state', str(root)])
         self.assertEqual(code, 0)
-        self.assertEqual(json.loads(output.getvalue()), {'status': 'initialized', 'schema': 18})
+        self.assertEqual(json.loads(output.getvalue()), {'status': 'initialized', 'schema': 20})
         with writer(root) as store:
-            self.assertEqual(store.db.execute('PRAGMA user_version').fetchone()[0], 18)
+            self.assertEqual(store.db.execute('PRAGMA user_version').fetchone()[0], 20)
 
     def test_missing_state_and_unsupported_schema(self):
         with self.assertRaises(StateError):

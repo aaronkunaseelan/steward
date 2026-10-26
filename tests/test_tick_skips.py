@@ -200,7 +200,7 @@ class SkipTests(unittest.TestCase):
         db.close()
         self.skip(start=NOW+timedelta(hours=1))
         with writer(self.root) as store:
-            self.assertEqual(store.db.execute('PRAGMA user_version').fetchone()[0], 18)
+            self.assertEqual(store.db.execute('PRAGMA user_version').fetchone()[0], 20)
             state=jobs.snapshot(store.db,now=NOW)['tick_skips']
             self.assertIsNone(state['current'])
             self.assertEqual(state['next']['from_at'],(NOW+timedelta(hours=1)).isoformat())

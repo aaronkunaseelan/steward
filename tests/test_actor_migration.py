@@ -95,7 +95,7 @@ class ActorTests(unittest.TestCase):
         db.close()
         with state.writer(self.root) as store:
             db = store.db
-            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 18)
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 20)
             actor_tables = [r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
                             if 'actor' in {c[1] for c in db.execute('PRAGMA table_info(' + r[0] + ')')}]
             self.assertEqual(actor_tables, ['changes'])

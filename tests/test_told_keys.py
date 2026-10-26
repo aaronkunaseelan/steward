@@ -56,7 +56,7 @@ class ManyToldKeys(unittest.TestCase):
             st.db.execute('PRAGMA user_version=12')
             st.db.commit()
         with writer(self.root) as st:
-            self.assertEqual(st.db.execute('PRAGMA user_version').fetchone()[0], 18)
+            self.assertEqual(st.db.execute('PRAGMA user_version').fetchone()[0], 20)
             self.assertEqual(told_check(st.db, ['old-key']), {'old-key': True})
             self.assertIsNone(st.db.execute('SELECT told_key FROM outbox').fetchone()[0])
             flush(st.db, sender=lambda *a, **kw: 99, now=NOW + timedelta(days=1))

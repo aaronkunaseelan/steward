@@ -88,9 +88,16 @@ Writes require an explicit `STEWARD_ACTOR=owner`, `model` or `maintenance`; read
 
 `steward notify` records outbox intent before sending. The topic determines the route; there is no separate message kind. `--told-key` and `steward told check KEY…` deduplicate canonical finding identities, including pending delivery. Text delivery is at least once: a crash after sending but before recording the receipt can repeat a message. Delivered messages cannot be unsent by runtime undo.
 
+`steward notify --reply-to MESSAGE_ID TEXT` replies to a message Steward sent.
+Its topic and thread come from the outbox; `--topic` is optional but must agree.
+Replies use ordinary immediate notification delivery, including from Finds, and
+credentialless runs queue them for the tick. All limits apply, including Today's
+character limit. The model decides whether an update matters and writes it;
+code never derives an update from a changed page or memory.
+
 All delivery is silent unless `notify --interrupt REASON` explicitly requests sound; even `--deliver immediate` is silent by default. Code enforces the daily interrupt cap; quiet hours, focus and urgency are model judgement. Automatic Changes includes owner-visible edits by the owner and model; maintenance stays in the journal.
 
-`steward page put --title TITLE FILE` uploads Markdown, HTML or an attachment to the Worker edge in `edge/`, backed by R2. Generated slugs combine descriptive words with randomness; local page metadata expires after 28 days and records read receipts. Configure the R2 bucket lifecycle separately to expire stored objects. Pages are password-protected by default; `--public` is explicit. The upload API uses a separate bearer credential. Notifications require hyperlinks; the message should carry the point and the page the evidence. `bin/deploy-edge` tests and deploys the edge from an exact commit; it does not provision the bucket lifecycle.
+`steward page put --title TITLE FILE` uploads Markdown, HTML or an attachment to the Worker edge in `edge/`, backed by R2. Generated slugs combine descriptive words with randomness; local page metadata expires after 28 days and records read receipts. Configure the R2 bucket lifecycle separately to expire stored objects. Pages are password-protected by default; `--public` is explicit. The upload API uses a separate bearer credential. `steward page get SLUG` prints the current authenticated object body without recording or changing local state; unknown pages and failed reads exit non-zero. Notifications require hyperlinks; the message should carry the point and the page the evidence. `bin/deploy-edge` tests and deploys the edge from an exact commit; it does not provision the bucket lifecycle.
 
 `steward draft` creates Gmail drafts when the model judges they serve the owner, including during preparation. Capability jobs need the `draft` permit; the CLI checks the stored run and job context before calling the provider. Provider commands use a draft-only allowlist and `--gmail-no-send`; no send verb exists. Undo deletes the draft. After an ambiguous provider failure, inspect Drafts before retrying.
 

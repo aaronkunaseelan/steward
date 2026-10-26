@@ -509,12 +509,12 @@ class MigrationTests(unittest.TestCase):
                 st.db.execute('PRAGMA user_version=10')
                 st.db.commit()
             with writer(root) as st:
-                self.assertEqual(st.db.execute('PRAGMA user_version').fetchone()[0], 18)
+                self.assertEqual(st.db.execute('PRAGMA user_version').fetchone()[0], 20)
                 self.assertEqual(st.db.execute('SELECT value FROM message_meta WHERE key="keep"').fetchone()[0], 'value')
                 self.assertEqual(st.db.execute('SELECT count(*) FROM pages').fetchone()[0], 0)
                 pages.put(st.db, 'Notes', b'text', 'x.txt', now=NOW, transport=lambda *a, **k: (200, b'text'))
                 st.backup(Path(tmp) / 'backup')
-            self.assertEqual(json.loads((Path(tmp)/'backup/manifest.json').read_text())['schema'], 18)
+            self.assertEqual(json.loads((Path(tmp)/'backup/manifest.json').read_text())['schema'], 20)
             restore(Path(tmp)/'backup', Path(tmp)/'restored')
             with writer(Path(tmp)/'restored') as st:
                 self.assertEqual(st.db.execute('SELECT state FROM pages').fetchone()[0], 'live')

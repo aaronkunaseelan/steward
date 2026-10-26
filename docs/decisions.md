@@ -306,3 +306,35 @@ last changed (at least five minutes).
 slow one; a tight limit killed useful work.
 
 **Rules out:** limits as performance targets.
+
+## X-41: updates belong where the owner saw the subject (superseded by X-42)
+
+**Decision:** confirmed delivery records the subjects shown by a message. A changing
+verb records the before/after; the model supplies a one-line reason. At wake or run
+end, updates to previously shown subjects reply silently to their latest showing
+message, grouped by message in its topic/thread. Unknown message ids use the day's
+latest Today moment. Changes is for first announcements, not updates.
+
+**Why:** a refreshed prep page, moved block or changed Top of mind should be part
+of the conversation the owner already has, not a silent rewrite or unrelated feed.
+This amends X-36's Changes rule and implements X-38's tell-and-undo for Top of mind.
+
+**Rules out:** treating a queued/failed message as seen, counting a showing sent
+after the change, fetching pages during reporting, or offering page undo that does
+not exist. Existing message/change links retain explicit-id and single-change reply
+undo; page updates carry their current link instead. Runtime state and the outbox
+own routing, so the model does not have to remember Telegram message ids.
+
+## X-42: the model writes updates; code supplies primitives
+
+**Decision:** X-41's derivation is removed. The model judges whether a change to
+something already shown matters and replies freeform where the owner saw it.
+Code supplies `page get`, the capability basic tool `diff`, and `notify --reply-to`.
+Changes returns to its pre-X-41 allow-list: calendar, drafts, moments and
+owner-asked jobs/runs, with undo ids.
+
+**Owner, verbatim** (2026-10-26, supervisor Paseo `1d58f292`): "a sokution like this is over enginerred. instead of the update being derived, the agent should decide if , and be given freeform with instructions (and making sure it is not fail by construction )"; on reverting the derivation and adding these primitives: "go".
+
+**Why:** judgement and explanation belong to the model, not code-written section
+diffs, subject-showing records or Top of mind label matching. Schema 20 removes
+those records going forward without rewriting the outbox or change history.

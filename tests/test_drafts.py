@@ -354,7 +354,7 @@ class DraftTests(unittest.TestCase):
             store.db.execute('PRAGMA user_version=11')
             store.db.commit()
         with writer(self.root) as store:
-            self.assertEqual(store.db.execute('PRAGMA user_version').fetchone()[0], 18)
+            self.assertEqual(store.db.execute('PRAGMA user_version').fetchone()[0], 20)
             self.assertEqual(store.db.execute('SELECT count(*) FROM drafts').fetchone()[0], 0)
             self.assertEqual(store.db.execute("SELECT value FROM message_meta WHERE key='preserved'").fetchone()[0],
                              'fixture value')

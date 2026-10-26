@@ -59,7 +59,7 @@ def credential_names(name):
 
 BASIC_TOOLS = ('ls', 'cat', 'head', 'tail', 'wc', 'sort', 'uniq', 'cut', 'grep', 'rg',
                'find', 'jq', 'sed', 'date', 'mkdir', 'cp', 'mv', 'tee', 'env', 'echo',
-               'printf', 'true', 'false', 'test')
+               'printf', 'true', 'false', 'test', 'diff')
 
 
 def shell_bin(directory, calls):

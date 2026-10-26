@@ -53,7 +53,7 @@ def main(argv=None):
             p.add_argument('keys', nargs='+')
         if name == 'page':
             sub = p.add_subparsers(dest='action', required=True)
-            for action in ('put', 'rm'):
+            for action in ('put', 'get', 'rm'):
                 q = sub.add_parser(action)
                 q.add_argument('--state', type=Path, default=argparse.SUPPRESS)
                 q.add_argument('--config', type=Path, default=argparse.SUPPRESS)
@@ -123,7 +123,8 @@ def main(argv=None):
             p.add_argument('ids', nargs='*', type=int)
             p.add_argument('--outstanding', action='store_true', help='read unhandled owner message ids and arrival times')
         if name == 'notify':
-            p.add_argument('--topic', choices=TOPICS, required=True)
+            p.add_argument('--topic', choices=TOPICS)
+            p.add_argument('--reply-to', type=int, metavar='MESSAGE_ID')
             identity = p.add_mutually_exclusive_group()
             identity.add_argument('--told-key', action='append')
             identity.add_argument('--moment', metavar='NAME', help='address an owner moment in Today; code builds its daily key')
@@ -190,7 +191,11 @@ def main(argv=None):
         from . import mind
         with mind.use(settings):
             actor = os.environ.get('STEWARD_ACTOR')
-            if args.command == 'restore':
+            if args.command == 'page' and args.action == 'get':
+                from . import pages
+                sys.stdout.buffer.write(pages.get(args.slug))
+                return 0
+            elif args.command == 'restore':
                 jobs.require(actor in ('owner', 'model', 'maintenance'),
                              'write requires STEWARD_ACTOR=owner, model or maintenance')
                 report = restore(args.location, args.state)
@@ -308,7 +313,7 @@ def main(argv=None):
                         from .messages import done
                         report = done(db, args.ids, jobs.now_utc(), actor)
                     elif args.command == 'notify':
-                        report = notify(db, args.topic, args.text, args.told_key, actor=actor, deliver=args.deliver, settings=settings, interrupt=args.interrupt, moment=args.moment)
+                        report = notify(db, args.topic, args.text, args.told_key, actor=actor, deliver=args.deliver, settings=settings, interrupt=args.interrupt, moment=args.moment, reply_to=args.reply_to)
                     elif args.command == 'backup':
                         report = store.backup(args.location)
     except WriterBusy:

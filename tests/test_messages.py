@@ -220,7 +220,7 @@ class MessagesTests(unittest.TestCase):
         db.commit()
         db.close()
         with writer(self.root) as st:
-            self.assertEqual(st.db.execute('PRAGMA user_version').fetchone()[0], 18)
+            self.assertEqual(st.db.execute('PRAGMA user_version').fetchone()[0], 20)
             row = messages.inbox(st.db, BINDING)[0]
             self.assertEqual((row['text'], row['topic'], row['attachments']), ('keep this', 'Today', []))
             st.backup(Path(self.tmp.name) / 'backup')

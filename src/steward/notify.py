@@ -208,6 +208,12 @@ def send_rows(db, rows, sender, now, settings):
         options = dict(disable_notification=not interrupt, parse_mode='HTML')
         if rows[0]['thread_id'] is not None:
             options['thread_id'] = rows[0]['thread_id']
+        elif sender is telegram_sender:
+            options['thread_id'] = binding()['topics'][rows[0]['topic']]
+        from .pages import read_meta
+        reply_to = read_meta(db, 'outbox_reply:' + rows[0]['id'])
+        if reply_to is not None:
+            options['reply_parameters'] = dict(message_id=reply_to, allow_sending_without_reply=True)
         mid = sender(rows[0]['topic'], text, **options)
         require(type(mid) is int, 'invalid message id')
     except Exception:
@@ -218,7 +224,8 @@ def send_rows(db, rows, sender, now, settings):
             if data is not None:
                 data['buzz'] = interrupt
                 db.execute('UPDATE outbox SET delivery=? WHERE id=?', (json.dumps(data), row['id']))
-            db.execute("UPDATE outbox SET state='sent',message_id=?,sent_at=? WHERE id=?", (mid, now.isoformat(), row['id']))
+            db.execute("UPDATE outbox SET state='sent',message_id=?,sent_at=?,thread_id=? WHERE id=?",
+                       (mid, now.isoformat(), options.get('thread_id'), row['id']))
             db.execute("DELETE FROM message_meta WHERE key=?", ('outbox_error:' + row['id'],))
             keys = {r[0] for r in db.execute('SELECT key FROM outbox_keys WHERE outbox_id=?', (row['id'],))}
             db.executemany('INSERT OR IGNORE INTO told VALUES (?,?,?,?,?,?)',
@@ -253,8 +260,16 @@ def flush(db, sender=telegram_sender, now=None, settings=None):
 
 def notify(db, topic, text, told_key=None, sender=telegram_sender, now=None,
            actor='owner', deliver=None, settings=None, thread_id=None, change_id=None, related_changes=(),
-           interrupt=None, moment=None):
+           interrupt=None, moment=None, reply_to=None):
     now = now or now_utc()
+    if reply_to is not None:
+        require(type(reply_to) is int and reply_to > 0, 'invalid reply message id')
+        target = db.execute("SELECT topic,thread_id FROM outbox WHERE state='sent' AND message_id=? ORDER BY rowid DESC LIMIT 1",
+                            (reply_to,)).fetchone()
+        require(target is not None, 'reply target is not a message Steward sent')
+        require(topic is None or topic == target['topic'], '--topic disagrees with reply target')
+        require(thread_id is None or thread_id == target['thread_id'], 'thread disagrees with reply target')
+        topic, thread_id = target['topic'], target['thread_id']
     require(topic in TOPICS, 'invalid notification route')
     if moment is not None:
         from .timing import moment_key
@@ -276,7 +291,7 @@ def notify(db, topic, text, told_key=None, sender=telegram_sender, now=None,
         interrupt_status(db, now, (settings or {}).get('interrupt_cap', 3))
     deliver = 'immediate' if interrupt is not None else deliver or os.environ.get('STEWARD_DELIVER', 'digest')
     require(deliver in ('digest', 'immediate', 'silent'), 'invalid delivery')
-    delivery = deliver if topic == 'Finds' else 'immediate'
+    delivery = deliver if topic == 'Finds' and reply_to is None else 'immediate'
     if interrupt is not None:
         delivery = json.dumps(dict(reason=interrupt.strip(), at=None, over_cap=None))
     if actor == 'maintenance':
@@ -291,6 +306,9 @@ def notify(db, topic, text, told_key=None, sender=telegram_sender, now=None,
         db.executemany('INSERT INTO outbox_keys VALUES (?,?)', [(identity, key) for key in keys])
         db.execute('UPDATE outbox SET job=?,run_id=? WHERE id=?', (os.environ.get('STEWARD_JOB'), os.environ.get('STEWARD_RUN_ID'), identity))
         db.executemany('INSERT INTO message_changes VALUES (?,?)', [(identity, c) for c in related_changes])
+        from .pages import meta
+        if reply_to is not None:
+            meta(db, 'outbox_reply:' + identity, reply_to)
     # Credentialless jobs queue; the tick's flush must still expose delivery failures.
     if (delivery == 'immediate' or interrupt is not None) and (
             sender is not telegram_sender or os.environ.get('STEWARD_TELEGRAM_BOT_TOKEN')):

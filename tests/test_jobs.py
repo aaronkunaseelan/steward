@@ -522,7 +522,7 @@ class JobsTests(unittest.TestCase):
         db.commit(); db.close()
         backup = Path(self.tmp.name) / 'backup'
         with writer(legacy) as store:
-            self.assertEqual(store.db.execute('PRAGMA user_version').fetchone()[0], 18)
+            self.assertEqual(store.db.execute('PRAGMA user_version').fetchone()[0], 20)
             self.assertIsNone(store.db.execute("SELECT name FROM sqlite_master WHERE name='history'").fetchone())
             self.assertEqual(store.db.execute('SELECT status FROM wakes').fetchone()[0], 'skipped')
             store.backup(backup)
