@@ -269,7 +269,7 @@ def read(settings, now, runner, db=None):
 def item_block_description(db, name, spec, start, worklist, now):
     """Render a block's prepared page when live, then its still-open items."""
     start = instant(start) if isinstance(start, str) else start
-    slug = f"prep-{name}-{start.astimezone(local_zone()):%Y%m%d}"
+    slug = pages.prep_slug(db, ('block', name), memory.local_day(start))
     row = db.execute("SELECT expires_at FROM pages WHERE slug=? AND state='live'", (slug,)).fetchone()
     lines = ['Prepared: ' + pages.pages_host() + '/' + slug] if row and instant(row['expires_at']) > now else []
     projects = {p['id']: p['name'] for p in worklist['projects']}
@@ -393,7 +393,7 @@ def build(db, settings, now, observation, restoring=None, accounting=None):
                 blocks.append(dict(id=key, task_id=key, kind='scheduled', pinned=False, start=a.astimezone(local_zone()).isoformat(), end=b.astimezone(local_zone()).isoformat()))
     represented = {b['id'] for b in blocks}
     # Future keyed events of non-live demands may be deleted.
-    # Elapsed events stay as history, not planning obstacles.
+    # Started opaque events remain obstacles until their ends pass.
     # Events without a key remain owner obstacles (collected above).
     for key in sorted(set(observed) | set(restoring or {})):
         if key in represented or key in task_demands:
@@ -404,6 +404,8 @@ def build(db, settings, now, observation, restoring=None, accounting=None):
         old = active_rows.get(key)
         name = old['demand'] if old else key.split(':')[0]
         if a < now:
+            if e and b > now and p['transparency'] != 'transparent':
+                busy.append((a, b))
             continue
         if (name not in demands or (demands[name]['kind'] in MOVEMENT_KINDS and name not in held) or key in completed or (key in (restoring or {}) and name not in held)):
             task_demands[key] = name
@@ -592,54 +594,83 @@ def choose(db, settings, proposal, now=None, actor='owner', runner=senses.run, u
 
 
 def resume(db, settings, identity, now=None, runner=senses.run):
-    """Recover a partial APPLY only after a fresh independent check."""
+    """Settle observed effects first; only fresh feasible non-writes may retry."""
     now = now or jobs.now_utc()
     observation = read(settings, now, runner, db)
     rows, observed = projected(db, observation, settings)
     pending = [r for r in rows if r['change_id'] == identity and r['state'] in ('intended', 'written')]
     require(pending, 'no pending block intents')
+    # A bounded planning list cannot prove a pending write absent. Search its key
+    # across the provider, including elapsed events and owner moves.
+    for row in pending:
+        # gog otherwise defaults to the next seven days, even with a key filter.
+        raw = gog(settings, 'events', ['--private-prop-filter', 'event_key=' + row['event_key'],
+                                      '--from', '0001-01-01T00:00:00Z', '--to', '9999-12-31T23:59:59Z',
+                                      '--all-pages', '--max', '250'], runner)
+        events = [e for e in raw['events'] if e.get('status') != 'cancelled'
+                  and e.get('extendedProperties', {}).get('private', {}).get('event_key') == row['event_key']]
+        require(len(events) <= 1, 'duplicate pending event_key; repair calendar first')
+        p = json.loads(row['payload'])
+        if p.get('event_id'):
+            try:
+                actual = gog(settings, 'event', [p['event_id']], runner)
+                actual = actual.get('event', actual)
+                require(actual.get('id') == p['event_id'], 'pending identity read mismatch')
+                if actual.get('status') != 'cancelled':
+                    require(actual.get('extendedProperties', {}).get('private', {}).get('event_key') == row['event_key'],
+                            'pending event changed; refusing overwrite')
+                    require(not events or events[0]['id'] == actual['id'], 'duplicate pending event_key')
+                    events = [actual]
+            except senses.ReadNotFound:
+                require(not events, 'pending identity changed; refusing overwrite')
+        observation['events'] = [e for e in observation['events'] if e.get('event_key') != row['event_key']]
+        observation['events'].extend(senses.calendar_events(target(settings), events, target(settings)))
+    _, observed = projected(db, observation, settings)
     data, _ = build(db, settings, now, observation)
     inventory = scheduler.generate(data)
+    retired, retried = [], []
     proposal = dict(schema_version=1, selections=[])
-    postimages = set()
     for row in pending:
+        key = row['event_key']
         p = json.loads(row['payload'])
-        event = observed.get(row['event_key'])
-        if event:
-            actual = payload(event)
-            prior = db.execute("SELECT payload FROM blocks WHERE event_key=? AND version<? "
-                               "AND state='applied' ORDER BY version DESC LIMIT 1",
-                               (row['event_key'], row['version'])).fetchone()
-            before = json.loads(prior[0]) if prior else None
-            postimage = not p.get('delete') and same(p, actual)
-            preimage = (before and before.get('event_id') == actual['event_id']
-                        and before.get('updated') == actual.get('updated') and same(before, actual))
-            require(postimage or preimage or (p.get('delete') and same(p, actual)),
-                    'pending event changed; refusing overwrite')
-            if postimage:
-                postimages.add(row['event_key'])
-        if p.get('delete') and not event:
-            continue
-        candidate = next((c for c in inventory['choices'] if c['task_id'] == row['event_key'] and ((p.get('delete') and c['action'] == 'drop') or (not p.get('delete') and c['action'] in ('keep', 'place') and c['start'] == p['start'] and c['end'] == p['end']))), None)
-        require(candidate is not None, 'pending intent no longer feasible')
-        proposal['selections'].append(dict(candidate_id=candidate['id'], reason=p['reason']))
-    scheduler.check(data, inventory, proposal, now.astimezone(local_zone()).isoformat())
-    for row in pending:
-        p = json.loads(row['payload'])
-        event = observed.get(row['event_key'])
-        if event:
-            p.update(event_id=event['id'], updated=event.get('updated'))
-        if p.get('delete') and not event:
+        event = observed.get(key)
+        actual = payload(event) if event else None
+        prior = db.execute("SELECT * FROM blocks WHERE event_key=? AND version<? "
+                           "AND state='applied' ORDER BY version DESC LIMIT 1", (key, row['version'])).fetchone()
+        before = json.loads(prior['payload']) if prior else None
+        if (p.get('delete') and not event) or (event and not p.get('delete') and same(p, actual)):
             with db:
-                append(db, 'blocks', dict(row, state='deleted'), identity)
+                if event:
+                    p.update(event_id=actual['event_id'], updated=actual.get('updated'))
+                    confirmed = dict(row, payload=json.dumps(p))
+                    confirm(db, settings, confirmed, identity, runner)
+                else:
+                    append(db, 'blocks', dict(row, state='deleted'), identity)
             continue
-        with db:
-            row = append(db, 'blocks', dict(row, payload=json.dumps(p), state='intended'), identity)
-        if row['event_key'] in postimages:
-            confirm(db, settings, row, identity, runner)
+        preimage = (event and before and before.get('event_id') == actual['event_id']
+                    and before.get('updated') == actual.get('updated') and same(before, actual))
+        preimage = preimage or (event and p.get('delete') and p.get('event_id') == actual['event_id']
+                               and p.get('updated') == actual.get('updated') and same(p, actual))
+        require(preimage or (not event and not before and not p.get('event_id')),
+                'pending event changed; refusing overwrite')
+        candidate = next((c for c in inventory['choices'] if c['task_id'] == key and
+                          ((p.get('delete') and c['action'] == 'drop') or
+                           (not p.get('delete') and c['action'] in ('keep', 'place')
+                            and c['start'] == p['start'] and c['end'] == p['end']))), None)
+        if candidate is None:
+            # Verified non-write, no longer feasible: retain its confirmed baseline,
+            # or absence for a creation. This releases the pending-intent hold.
+            with db:
+                append(db, 'blocks', dict(row, state='applied' if event else 'removed',
+                                         payload=json.dumps(actual if event else p)), identity)
+            retired.append(key)
         else:
-            apply_one(db, settings, row, identity, runner)
-    return dict(change_id=identity, status='applied')
+            proposal['selections'].append(dict(candidate_id=candidate['id'], reason=p['reason']))
+            retried.append(row)
+    scheduler.check(data, inventory, proposal, now.astimezone(local_zone()).isoformat())
+    for row in retried:
+        apply_one(db, settings, row, identity, runner)
+    return dict(change_id=identity, status='resolved' if retired else 'applied', retired=retired)
 
 
 def undo(db, settings, identity, now=None, actor='owner', runner=senses.run):
@@ -666,6 +697,8 @@ def undo(db, settings, identity, now=None, actor='owner', runner=senses.run):
         and x['state'] == 'intended' for x in affected))]
     require(affected, 'change has no reversible block versions')
     observation = read(settings, now, runner, db)
+    fresh_rows, observed = projected(db, observation, settings)
+    fresh = {r['event_key']: r for r in fresh_rows}
     restoring = {}
     for row in affected:
         if row['event_key'] not in restoring:
@@ -681,7 +714,11 @@ def undo(db, settings, identity, now=None, actor='owner', runner=senses.run):
             continue
         seen.add(key)
         current = next(r for r in latest(db, 'blocks') if r['event_key'] == key)
-        require(current['change_id'] == identity and current['state'] in ('applied', 'deleted'), 'later change, owner signal or incomplete apply prevents undo')
+        require(current['change_id'] == identity and current['state'] in ('applied', 'deleted')
+                and fresh[key]['state'] == current['state']
+                and fresh[key]['payload'] == current['payload']
+                and not (current['state'] == 'deleted' and key in observed),
+                'later change, owner signal or incomplete apply prevents undo')
         prior = db.execute("SELECT * FROM blocks WHERE event_key=? AND version<? AND state='applied' ORDER BY version DESC LIMIT 1", (key, row['version'])).fetchone()
         p = json.loads(prior['payload']) if prior else None
         candidate = next((c for c in inventory['choices'] if c['task_id'] == key and ((p is None and c['action'] == 'drop') or (p and c['action'] in ('keep', 'place') and c['start'] == p['start'] and c['end'] == p['end']))), None)

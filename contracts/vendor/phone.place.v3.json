@@ -1,0 +1,266 @@
+{
+  "$id": "phone.place.v3",
+  "description": "Where the owner is, from iPhone Shortcuts snapshots (evidence/WH/snapshot-body.md): each trigger (arrive/leave a named place, night, charger, Wi-Fi join, fixed times) sends one full record. The producer stores every record raw, including coordinates, altitude, street, postcode and BSSID; views carry names and distances, never coordinates or street. Producer: phone (`phone where --json`). Readers: Steward place sense. Every key is present; null means unknown. Times are ISO 8601 UTC. state: at = the newest arrive:/leave: snapshot is arrive:<place> within 24 h; out = it is leave:<place> within 24 h; unknown otherwise. Other triggers never change state. Home is not a producer fact: readers judge it from `nights`. v3 replaces v2's typed events with trigger-labelled snapshots and drops the configured places list. Additive changes keep v3.",
+  "type": "object",
+  "required": [
+    "schema",
+    "at",
+    "state",
+    "place",
+    "since",
+    "last",
+    "today",
+    "places",
+    "last_city",
+    "nights"
+  ],
+  "properties": {
+    "schema": {
+      "const": "phone.place.v3"
+    },
+    "at": {
+      "type": "string"
+    },
+    "state": {
+      "enum": [
+        "at",
+        "out",
+        "unknown"
+      ]
+    },
+    "place": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "since": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "last": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "required": [
+        "at",
+        "trigger",
+        "place",
+        "city",
+        "country",
+        "ssid",
+        "carrier",
+        "battery",
+        "charging"
+      ],
+      "properties": {
+        "at": {
+          "type": "string",
+          "description": "The snapshot's own time (client `at`) when present and sane, else the receive time; UTC ISO 8601."
+        },
+        "trigger": {
+          "type": "string"
+        },
+        "place": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The place of an arrive:/leave: label, else null."
+        },
+        "city": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "country": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ssid": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "carrier": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "battery": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "charging": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "description": "The newest snapshot, any trigger."
+    },
+    "today": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "at",
+          "trigger",
+          "place",
+          "city",
+          "country",
+          "ssid",
+          "carrier",
+          "battery",
+          "charging"
+        ],
+        "properties": {
+          "at": {
+            "type": "string",
+            "description": "The snapshot's own time (client `at`) when present and sane, else the receive time; UTC ISO 8601."
+          },
+          "trigger": {
+            "type": "string"
+          },
+          "place": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The place of an arrive:/leave: label, else null."
+          },
+          "city": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "country": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ssid": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "carrier": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "battery": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "charging": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        }
+      },
+      "description": "Today's snapshots (Europe/Athens), oldest first, at most the newest 50."
+    },
+    "places": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Place names seen in arrive:/leave: labels in the last 90 days."
+    },
+    "last_city": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "required": [
+        "city",
+        "country",
+        "at"
+      ],
+      "properties": {
+        "city": {
+          "type": "string"
+        },
+        "country": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "at": {
+          "type": "string"
+        }
+      }
+    },
+    "nights": {
+      "type": "array",
+      "description": "Exactly the 30 most recent Europe/Athens nights, oldest first, ending with the night that began on the current local date if past 06:00, else the previous one. A night is described by the newest snapshot with a position whose time is 00:00 inclusive to 06:00 exclusive local on `date`; moved_m is the distance in metres from the previous night that has a position (null when either is unknown). All fields but date are null when the night has no such snapshot.",
+      "items": {
+        "type": "object",
+        "required": [
+          "date",
+          "city",
+          "country",
+          "ssid",
+          "at",
+          "moved_m"
+        ],
+        "properties": {
+          "date": {
+            "type": "string"
+          },
+          "city": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "country": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ssid": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "moved_m": {
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

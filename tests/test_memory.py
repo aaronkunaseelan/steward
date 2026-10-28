@@ -37,7 +37,7 @@ class MemoryTests(unittest.TestCase):
             with self.subTest(layer=layer):
                 memory.write(self.db, layer, key, 'x' * cap, now=self.now)
                 self.assertEqual(memory.show(self.db, layer, key)[0]['content'], 'x' * cap)
-                with self.assertRaisesRegex(StateError, 'byte cap exceeded'):
+                with self.assertRaisesRegex(StateError, f'^{layer} memory is {cap + 2} bytes; cap is {cap}$'):
                     memory.write(self.db, layer, key, 'é' * (cap // 2 + 1), now=self.now)
         for layer,key in [('day','2027-02-02'),('week','2027-01-31'),('month','2027-02'),('day','2026-10-15')]:
             with self.assertRaises(StateError):
@@ -243,7 +243,7 @@ class MemoryTests(unittest.TestCase):
         self.assertNotIn('SYNTHETIC_SOUL_MARKER', text)
         self.assertNotIn('PROMPT', text)
         self.assertLess(text.index('## What I carry'), text.index('## Now ['))
-        with self.assertRaisesRegex(StateError, 'byte cap exceeded'):
+        with self.assertRaisesRegex(StateError, '^synthesis memory is 2049 bytes; cap is 2048$'):
             memory.write(self.db,'synthesis','current','x'*2049)
         memory.write(self.db,'synthesis','current','now')  # not period-bound
 
@@ -303,12 +303,17 @@ class MemoryTests(unittest.TestCase):
         day = ['--day', '2027-02-02']
         default = read(*day)
         self.assertEqual(json.loads(default)['messages'][0]['text'], text[:300])
+        self.assertTrue(json.loads(default)['messages'][0]['excerpt'])
+        self.assertTrue(json.loads(default)['truncated'])
         for options in [day, ['--since', '2027-02-02T00:00:00+02:00', '--until', '2027-02-03T00:00:00+02:00']]:
             full = json.loads(read(*options, '--full'))
             self.assertEqual(full['messages'][0]['text'], text)
             self.assertEqual(full['inbox'][0]['text'], text)
         memory.file_days(self.db, datetime.fromisoformat('2027-02-03T00:00:00+02:00'))
-        self.assertEqual(read(*day), default)
+        archived = json.loads(read(*day))
+        self.assertEqual(archived['messages'][0]['text'], text)
+        self.assertFalse(archived['messages'][0]['excerpt'])
+        self.assertFalse(archived['truncated'])
         full = json.loads(read(*day, '--full'))
         self.assertEqual(full['messages'][0]['text'], text)
         self.assertEqual(full['inbox'][0]['text'], text)
@@ -332,6 +337,36 @@ class MemoryTests(unittest.TestCase):
             jobs.change(self.db,'experiment closed: '+cid,self.now)
         self.assertEqual(memory.experiments(self.db),[])
 
+    def test_experiment_discovery_cost_is_independent_of_ordinary_history(self):
+        with self.db:
+            self.db.executemany('INSERT INTO changes(id,at,actor,verb,summary) VALUES (?,?,?,?,?)',
+                [(f'{n:032x}', self.now.isoformat(), 'tick', 'tick', 'tick') for n in range(4000)])
+        queries = []
+        self.db.set_trace_callback(queries.append)
+        try:
+            self.assertEqual(memory.experiments(self.db), [])
+        finally:
+            self.db.set_trace_callback(None)
+        self.assertLessEqual(len(queries), 4)
+
+    def test_experiments_in_run_reasons_close_or_undo_once(self):
+        with self.db:
+            cid = jobs.change(self.db, 'run plan', self.now)
+            jobs.append(self.db, 'runs', dict(run_id='experiment', job='fixture', state='planned',
+                planned_for=self.now.isoformat(), reason='experiment: try mornings; ends 2027-02-08',
+                spec_json='{}'), cid)
+        rows = memory.experiments(self.db)
+        self.assertEqual([(r['id'], r['ends']) for r in rows], [(cid, '2027-02-08')])
+        with self.db:
+            closed = jobs.change(self.db, 'run plan', self.now)
+            jobs.append(self.db, 'runs', dict(run_id='closure', job='fixture', state='planned',
+                planned_for=self.now.isoformat(), reason='experiment closed: ' + cid, spec_json='{}'), closed)
+        self.assertEqual(memory.experiments(self.db), [])
+        with self.db:
+            other = jobs.change(self.db, 'experiment: another test', self.now)
+            jobs.change(self.db, 'undo', self.now, undo_of=other)
+        self.assertEqual(memory.experiments(self.db), [])
+
     def test_capability_context_packet_without_harness_or_effects(self):
         import os
         import runpy
@@ -340,11 +375,14 @@ class MemoryTests(unittest.TestCase):
         with self.db:
             cid=jobs.change(self.db,'fixture',self.now)
             self.db.execute('INSERT INTO jobs VALUES (?,?,?,?,?)',('consolidate',1,cid,json.dumps({'capability':'consolidate','justification':'learn from experience','deliver':'silent','model':'opus'}),'active'))
+            jobs.append(self.db, 'runs', dict(run_id='fixture', job='consolidate', state='started',
+                planned_for=self.now.isoformat(), started_at=self.now.isoformat(), reason='fixture',
+                spec_json=jobs.get(self.db, 'jobs', 'consolidate')['spec_json']), cid)
         # agent-run takes the writer lock to persist its draw; release this fixture lock.
         self.ctx.__exit__(None,None,None)
         self._cleanups.pop()
         directory=Path(self.tmp.name)/'run'
-        with patch.dict(os.environ, STEWARD_RUN_DIR=str(directory), STEWARD_STATE=str(self.root), STEWARD_JOB='consolidate'), patch('sys.argv',['agent-run','consolidate']), patch.object(runtime,'harness',return_value='fixture-session'), patch.object(jobs,'now_utc',return_value=self.now), contextlib.redirect_stdout(io.StringIO()):
+        with patch.dict(os.environ, STEWARD_RUN_DIR=str(directory), STEWARD_STATE=str(self.root), STEWARD_JOB='consolidate', STEWARD_RUN_ID='fixture'), patch('sys.argv',['agent-run','consolidate']), patch.object(runtime,'harness',return_value='fixture-session'), patch.object(jobs,'now_utc',return_value=self.now), contextlib.redirect_stdout(io.StringIO()):
             runpy.run_path(str(SOURCE/'jobs/agent-run'),run_name='__main__')
         packet=(directory/'packet.md').read_text()
         self.assertIn('memory_due',packet)
@@ -355,6 +393,7 @@ class MemoryTests(unittest.TestCase):
         self.assertNotIn('SYNTHETIC_CHARTER_MARKER', packet)
         self.assertIn("~/.local/share/steward/mind/reference/memory.md",packet)
         self.assertIn('memory show|due|recall|write',packet)
+        self.assertIn('steward memory show synthesis current (home and notable whereabouts)', packet)
         self.assertEqual(capabilities.load('consolidate')[0]['context'],['memory_due','provocation'])
 
     def test_cli_memory_roundtrip_and_read_only_queries(self):

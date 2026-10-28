@@ -2,6 +2,8 @@
 from collections import Counter
 from datetime import timedelta
 import json
+import math
+from pathlib import Path
 
 from .jobs import instant
 from .state import StateError, atomic_file
@@ -55,6 +57,39 @@ def tokens(path, agent):
     return calls + len(claude), total
 
 
+def session_tokens(directory, sessions):
+    """Read every session once for both the summary and learned run cost."""
+    calls, total, known = 0, Counter(), bool(sessions)
+    for session in sessions:
+        n, usage = tokens(directory / 'sessions' / session['file'], session['agent'])
+        calls += n
+        total.update(usage)
+        known = known and n > 0
+    if not known:
+        return calls, None
+    return calls, dict(**{k: total[k] for k in ('input', 'output', 'cache_write', 'cache_read')},
+                       weighted=round(total['input'] + total['output'] + 1.25 * total['cache_write'] + 0.1 * total['cache_read']))
+
+
+def recompute_costs(db):
+    """One-time correction of finished run costs from their archived summary unit."""
+    from .runtime import data_root, manifest_path
+    rows = db.execute("SELECT * FROM runs r WHERE state IN ('succeeded','failed') "
+                      "AND version=(SELECT max(version) FROM runs WHERE run_id=r.run_id)").fetchall()
+    for row in rows:
+        directory = Path(row['manifest']).parent if row['manifest'] else manifest_path(data_root(), row).parent
+        value = None
+        try:
+            report = json.loads((directory / 'summary.json').read_text())
+            value = (report.get('tokens') or {}).get('weighted')
+        except (OSError, ValueError, AttributeError):
+            pass
+        if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+            value = None
+        db.execute("UPDATE runs SET cost_tokens=? WHERE run_id=? AND state IN ('succeeded','failed')",
+                   (value, row['run_id']))
+
+
 def landed(directory, kind, row, changes):
     if kind == 'wake':
         start, end = instant(row['started_at']), instant(row['ended_at'])
@@ -70,11 +105,10 @@ def landed(directory, kind, row, changes):
 
 def summary(data, directory, meta, row, changes):
     doc = document(data, meta['id'])
-    agents, calls, total, tools = [], 0, Counter(), Counter()
+    calls, total = session_tokens(directory, meta['sessions'])
+    agents, tools = [], Counter()
     for session in meta['sessions'][:8]:
         path = directory / 'sessions' / session['file']
-        n, t = tokens(path, session['agent'])
-        calls, total = calls + n, total + t
         tools.update(turn['name'] for turn in turns(path, session['agent']) if turn['type'] == 'tool_call' and turn['name'])
         agents.append(dict(agent=session['agent'], model=(session.get('model') or None) and session['model'][:80],
                            label=(session.get('label') or None) and session['label'][:40], turns=session.get('turns', 0)))
@@ -88,9 +122,7 @@ def summary(data, directory, meta, row, changes):
         ended_at=meta['ended_at'], duration_s=round(max(0, (end - start).total_seconds()), 1), status=meta['status'][:40],
         reason=reason[:200] if reason else None, exit_code=manifest.get('exit_code'),
         error=redact(str(error))[:200] if error else None, agents=agents, model_calls=calls,
-        tokens=dict(**{k: total[k] for k in ('input', 'output', 'cache_write', 'cache_read')},
-                    weighted=round(total['input'] + total['output'] + 1.25 * total['cache_write'] + 0.1 * total['cache_read']))
-        if meta['sessions'] else None,
+        tokens=total,
         tools=dict(tools.most_common(40)), landed=landed(directory, meta['kind'], dict(row, ended_at=meta['ended_at']), changes),
         truncated=doc['truncated'], bytes=doc['bytes'])
 

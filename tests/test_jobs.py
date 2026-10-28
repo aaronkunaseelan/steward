@@ -52,6 +52,60 @@ class JobsTests(unittest.TestCase):
         return runtime.tick(self.root, self.data, clock=lambda: at,
                             **{'sender': lambda *a, **k: 1, 'update_fetcher': lambda offset: [], 'telegram': {'chat_id': 1, 'owner_user_id': 2, 'topics': {'Talk': 6}}, 'launcher': self.launched.append, 'wake_starter': lambda: None, 'load_reader': lambda: (0.1, 20 * 1024**3), 'lock_reader': lambda: False, **extra})
 
+    def test_due_reservation_rechecks_gap_after_manual_success(self):
+        self.add(min_gap='4h', needs={'max_staleness': '1d'}, recurring=False)
+        manual = self.run_now()
+        self.tick()
+        at = NOW + timedelta(minutes=40)
+        with writer(self.root) as st:
+            reservation = jobs.run_verb(st.db, 'plan', 'test', 'scheduled work',
+                                        at.isoformat(), now=NOW, actor='model')['run_id']
+        directory = self.data / 'runs' / 'test' / manual
+        directory.mkdir(parents=True)
+        (directory / 'manifest.json').write_text(json.dumps(dict(
+            run_id=manual, job='test', started_at=NOW.isoformat(),
+            ended_at=(NOW + timedelta(minutes=20)).isoformat(), exit_code=0, status='succeeded')))
+        result = self.tick(at=at)
+        self.assertIn(manual, result['folded'])
+        self.assertEqual(result['started'], [])
+        self.assertIn(reservation, result['refused'])
+        with writer(self.root) as st:
+            self.assertIn('min_gap', jobs.get(st.db, 'runs', reservation)['reason'])
+
+    def test_unplaceable_job_reports_its_outcome_without_stopping_peers(self):
+        self.add('blocked', min_gap='7d', needs={'ready_by': ['18:30']})
+        self.add('good', recurring=False)
+        with writer(self.root) as st:
+            spec = jobs.get(st.db, 'jobs', 'blocked')['spec_json']
+            started = (NOW - timedelta(hours=1)).isoformat()
+            jobs.append(st.db, 'runs', dict(run_id='recent', job='blocked', state='succeeded',
+                planned_for=started, started_at=started, ended_at=(NOW - timedelta(minutes=30)).isoformat(),
+                reason='fixture success', spec_json=spec), jobs.change(st.db, 'fixture', NOW))
+            good = jobs.run_verb(st.db, 'now', 'good', 'owner requested', now=NOW)['run_id']
+        result = self.tick()
+        self.assertIn(good, result['started'])
+        self.assertEqual(result['unplanned']['blocked'], 'no feasible time')
+        from steward import planner
+        with writer(self.root) as st:
+            choice = next(c for c in planner.choices(st.db, NOW) if c['job'] == 'blocked')
+        self.assertEqual(choice['feasible'], [])
+        self.assertIsNone(choice['default_choice'])
+
+    def test_day_filing_includes_completions_available_at_first_next_day_tick(self):
+        self.add(recurring=False)
+        rid = self.run_now()
+        self.tick()
+        directory = self.data / 'runs' / 'test' / rid
+        directory.mkdir(parents=True)
+        (directory / 'manifest.json').write_text(json.dumps(dict(run_id=rid, job='test',
+            started_at=NOW.isoformat(), ended_at=(NOW + timedelta(minutes=1)).isoformat(),
+            exit_code=0, status='succeeded')))
+        self.assertIn(rid, self.tick(at=NOW + timedelta(days=1))['folded'])
+        from steward import memory
+        with writer(self.root) as st:
+            doc = memory.journal(st.db, day=memory.local_day(NOW).isoformat())
+        self.assertEqual(next(r['state'] for r in doc['runs'] if r['run_id'] == rid), 'succeeded')
+
     def test_invalid_json_spec_is_unknown_without_breaking_state_or_intent(self):
         self.add()
         self.run_now()

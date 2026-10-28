@@ -228,7 +228,7 @@ class CalendarBTests(unittest.TestCase):
         with patch('steward.calendar_b.undo', side_effect=lambda db, settings, identity, now, actor:
                    undo(db, settings, identity, now, actor, runner=self.gog)):
             messages.poll(self.db, NOW, SETTINGS, send, lambda offset: [update], binding)
-        self.assertIn('Restored calendar change', sent[-1])
+        self.assertIn('Restored change', sent[-1])
         self.assertEqual(self.gog.events['schedule'][0]['start']['dateTime'][11:16], '09:00')
         messages.changes(self.db, NOW, send, SETTINGS)
         self.assertNotIn('memory', sent[-1].lower())
@@ -597,11 +597,30 @@ class CalendarBEdgeTests(unittest.TestCase):
             self.choose(choices[0])
         self.assertEqual(b.latest(self.db, 'blocks'), [])
 
-    def test_undo_can_replace_unpersisted_owner_suggestion(self):
-        first = self.place()
-        self.gog.events['schedule'][0]['summary'] = 'Owner edit'
-        b.undo(self.db, SETTINGS, first['change_id'], NOW, runner=self.gog)
-        self.assertEqual(self.gog.events['schedule'], [])
+    def test_undo_preserves_unreconciled_owner_edit(self):
+        first = self.choose(next(c for c in self.plan()['candidates']['choices']
+                                 if c['action'] == 'place' and c['start'][11:16] == '10:00'))
+        self.gog.events['schedule'][0]['description'] = 'Owner edit after placement'
+        self.gog.events['schedule'][0]['updated'] = (NOW + timedelta(minutes=1)).isoformat()
+        before = copy.deepcopy(self.gog.events)
+        with self.assertRaisesRegex(StateError, 'owner signal'):
+            b.undo(self.db, SETTINGS, first['change_id'], NOW + timedelta(minutes=2), runner=self.gog)
+        self.assertEqual(self.gog.events, before)
+
+    def test_ongoing_opaque_block_remains_a_checked_obstacle(self):
+        candidate = next(c for c in self.plan()['candidates']['choices']
+                         if c['action'] == 'place' and c['start'][11:16] == '10:00')
+        self.choose(candidate)
+        spec = dict(SPEC, kind='other', deadline=(NOW + timedelta(days=1)).isoformat())
+        spec.pop('count')
+        b.demand(self.db, 'add', 'second', spec, NOW)
+        now = NOW + timedelta(hours=1, minutes=15)
+        plan = self.plan(now)
+        self.assertFalse(any(c['task_id'] == 'second:once:0' and c['action'] == 'place'
+                             and c['start'][11:16] == '10:15'
+                             for c in plan['candidates']['choices']))
+        self.assertTrue(any(x['kind'] == 'busy' and x['pinned']
+                            and x['end'][11:16] == '11:00' for x in plan['context']['blocks']))
 
     def test_week_boundary_keys_and_windows(self):
         sunday = datetime(2026, 10, 18, 9, tzinfo=TEST_ZONE)

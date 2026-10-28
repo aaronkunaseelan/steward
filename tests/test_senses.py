@@ -46,6 +46,21 @@ class SensesTests(unittest.TestCase):
                 self.assertNotIn('data', result[name])
                 self.assertNotIn('secret', result[name]['reason'])
 
+    def test_nonfinite_qmd_expiry_is_unknown(self):
+        raw = fixture('qmd.status.v1')
+        source = next(iter(raw['sources'].values()))
+        source.update(current=True, valid_until=float('inf'))
+        def runner(argv):
+            if argv[:2] == ['qmd', 'status']:
+                return json.dumps(raw).replace('Infinity', '1e309')
+            if argv[:2] == ['qmd', 'feed']:
+                return json.dumps(dict(schema='qmd.feed.v1', source=argv[3], items=[],
+                                       next=None, head=None, complete=True))
+            raise OSError('unavailable fixture')
+        result = self.collect(runner)
+        self.assertEqual(result['qmd']['status'], 'unknown')
+        self.assertIn('valid_until: expected number|null', result['qmd']['reason'])
+
     def test_missing_config_is_unknown(self):
         result = self.collect()
         self.assertEqual(result['calendars']['status'], 'unknown')
@@ -86,7 +101,7 @@ class SensesTests(unittest.TestCase):
         result = self.collect(runner, {'schedule_calendar_id': 'b', 'main_calendar_ids': []})
         self.assertEqual(result['calendars']['status'], 'ok')
         self.assertEqual(datetime.fromisoformat(result['calendars']['data']['to']), due)
-        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(calls), 2)  # Near planning read plus the first daily far read.
         self.assertEqual(datetime.fromisoformat(calls[0][calls[0].index('--to') + 1]), due)
 
     def test_calendar_digest_tracks_movement_not_order_or_descriptions(self):

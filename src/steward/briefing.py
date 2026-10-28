@@ -37,7 +37,7 @@ def section_info(text, receipt):
 MOMENT_SECTIONS = {
     'orientation': {'Schedule', 'Limits', 'Calendar', 'Movement', 'Blocks', 'Your list',
                     'Waiting on others', 'Deadlines', 'Compute', 'Finds waiting', 'Inbox'},
-    'day_close': {'Schedule', 'Limits', 'Calendar', 'Blocks', 'Deadlines', 'Compute',
+    'day_close': {'Schedule', 'Limits', 'Calendar', 'Ahead', 'Blocks', 'Deadlines', 'Compute',
                   'Finds waiting', 'Inbox'},
 }
 
@@ -140,7 +140,7 @@ def day_close(db, now):
 def blocks(b, gsd, live_pages, now, end):
     """Blocks through the next two days, with their items, prep page and evidence of use."""
     specs = {r['name']: json.loads(r['spec_json']) for r in b.get('demands', [])}
-    pages = {p['slug']: p for p in live_pages}
+    from . import pages
     done = gsd.get('done')  # today's closures, each at gsd's own closure time
     closed = {row['id']: row['at'] for row in done or []}
     today = memory.local_day(now)
@@ -153,11 +153,10 @@ def blocks(b, gsd, live_pages, now, end):
         row = dict(key=r['event_key'], title=p['title'], start=p['start'], end=p['end'], state=r['state'])
         items = specs.get(r['demand'], {}).get('items')
         if items:
-            slug = f"prep-{r['demand']}-{start.astimezone(local_zone()):%Y%m%d}"
-            page = pages.get(slug)
+            page = pages.prepared_page(live_pages, ('block', r['demand']), memory.local_day(start))
             row.update(
                 items=items,
-                prepared=dict(url=page['url'], opened_at=page['opened_at']) if page else 'no: no live page at ' + slug,
+                prepared=dict(url=page['url'], opened_at=page['opened_at']) if page else 'no: no live prepared page',
                 closed_today=('unknown: gsd done not supplied' if done is None else
                               [f"{datetime.fromisoformat(closed[i]).astimezone(local_zone()):%H:%M} {i}" for i in items if i in closed]),
                 used=('unknown: gsd done not supplied' if done is None else
@@ -166,6 +165,64 @@ def blocks(b, gsd, live_pages, now, end):
                       'not yet known: gsd learns closures at its runs'))
         rows.append(row)
     return rows
+
+
+AHEAD_BYTES = 16384
+
+
+def ahead_lines(calendar, now):
+    """Date bands only: the model, not the renderer, judges what matters."""
+    from .senses import calendar_instant
+    far = calendar.get('ahead', {})
+    through = far.get('to', 'unknown')
+    coverage = f"through {through} (exclusive); beyond is unknown; far read {far.get('at', 'unknown')}"
+    if far.get('status') != 'ok':
+        return [coverage, 'unknown: ' + far.get('reason', 'not observed')]
+    day = memory.local_day(now)
+    first = datetime.combine(day + timedelta(days=3), time.min, local_zone())
+    end = datetime.fromisoformat(through)
+    # Prefer the per-tick observation wherever the near window overlaps the daily view.
+    events = {(e['calendar'], e['id']): e for e in far.get('events', [])}
+    near_from, near_to = calendar.get('from'), calendar.get('to')
+    if near_from and near_to:
+        lo, hi = datetime.fromisoformat(near_from), datetime.fromisoformat(near_to)
+        events = {key: e for key, e in events.items()
+                  if not (calendar_instant(e['start']) < hi and calendar_instant(e['end']) > lo)}
+    events.update({(e['calendar'], e['id']): e for e in calendar.get('events', [])})
+    selected = [e for e in events.values() if e.get('status') != 'cancelled'
+                and calendar_instant(e['start']) < end and calendar_instant(e['end']) > first
+                and not (e['calendar'] == calendar.get('schedule_calendar_id') and e.get('event_key'))]
+    selected.sort(key=lambda e: (calendar_instant(e['start']), e['calendar'], e['id']))
+    entries, series = [], {}
+    def title(event):
+        return ' '.join((event.get('summary') or '(untitled)').split())
+    def stamp(value):
+        return calendar_instant(value).astimezone(local_zone()).strftime('%Y-%m-%d' if 'date' in value else '%Y-%m-%d %H:%M %Z')
+    for event in selected:
+        at = calendar_instant(event['start'])
+        if (at.astimezone(local_zone()).date() - day).days <= 30 or not event.get('recurring_event_id'):
+            entries.append((at, f"{stamp(event['start'])} – {stamp(event['end'])}: {title(event)}" +
+                            (' (all-day; end exclusive)' if event.get('all_day') else '')))
+        else:
+            series.setdefault((event['calendar'], event['recurring_event_id']), []).append(event)
+    for group in series.values():
+        event = group[0]
+        cadence = '; '.join(event.get('recurrence') or []) or 'cadence unknown'
+        entries.append((calendar_instant(event['start']),
+                        f"{title(event)} · {cadence} · first {stamp(event['start'])}; "
+                        f"last {stamp(group[-1]['start'])}; {len(group)} instances"))
+    entries.sort(key=lambda item: item[0])
+    result = [coverage]
+    for i, (_, line) in enumerate(entries):
+        marker = f'truncated: {len(entries) - i} more through {through}'
+        # Account for Markdown bullets/newlines, including the omission marker.
+        candidate = result + [line]
+        reserve = [f'truncated: {len(entries) - i - 1} more through {through}'] if i + 1 < len(entries) else []
+        if len(''.join('- ' + row + '\n' for row in candidate + reserve).encode()) > AHEAD_BYTES:
+            result.append(marker)
+            break
+        result.append(line)
+    return result if entries else result + ['none in the observed window']
 
 
 def render(state, now, receipt):
@@ -225,6 +282,12 @@ def render(state, now, receipt):
                               end=instant(e['end']).isoformat(), calendar=e.get('calendar'),
                               all_day=e.get('all_day'), event_key=e.get('event_key'),
                               transparency=e.get('transparency'), kind=e.get('eventType')) for e in events], ('calendars',))
+    ahead = data('calendars').get('ahead', {})
+    ahead_stale = ahead.get('day') is not None and ahead['day'] != memory.local_day(now).isoformat()
+    verdicts['calendar_ahead'] = dict(verdict=('stale' if ahead_stale else 'fresh') if ahead.get('status') == 'ok' else 'unknown',
+                                    reason=('daily read overdue' if ahead_stale else 'daily read succeeded') if ahead.get('status') == 'ok' else ahead.get('reason', 'not observed'),
+                                    as_of=ahead.get('at'))
+    section('Ahead', ahead_lines(data('calendars'), now), ('calendars', 'calendar_ahead'))
     b = state.get('calendar_b', {})
     section('Movement', dict(ranked_open_doses=b.get('movement'), fulfilment=b.get('fulfilment')), ('health', 'calendars'))
     block_rows = blocks(b, data('gsd'), state.get('live_pages', []), now, end)
@@ -261,14 +324,8 @@ def render(state, now, receipt):
         section('Day close — Next two days', dict(
             through=end.isoformat(), calendar='See Calendar above; re-plan with current senses.',
             blocks='See Blocks above; explain moves rather than repeat Done today.'), ('calendars',))
-        horizon_events = [dict(title=e.get('summary'), start=instant(e['start']).isoformat(),
-                               end=instant(e['end']).isoformat(), kind=e.get('eventType'))
-                          for e in data('calendars').get('events', [])
-                          if e.get('status') != 'cancelled' and instant(e['end']) > end]
         section('Day close — Horizon', dict(
-            calendar_from=data('calendars').get('from', 'unknown: calendar coverage not supplied'),
-            calendar_through=data('calendars').get('to', 'unknown: calendar coverage not supplied'),
-            events=horizon_events,
+            calendar='See Ahead for future events and its observed coverage.',
             gsd_deadlines=data('gsd').get('horizon_deadlines', 'unknown: gsd horizon not supplied'),
             visibility='Calendar sense covers only its stated window; outside it is unknown. '
                        'gsd covers dated worklist items, not unrecorded or undated obligations. '

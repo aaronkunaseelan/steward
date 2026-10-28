@@ -193,6 +193,26 @@ def read_meta(db, key, default=None):
     return json.loads(row[0]) if row else default
 
 
+def prep_reference(subject, day):
+    """One subject/day identity; the old URL is only a compatibility lookup."""
+    kind, identity = subject
+    key = f'prep_page:{kind}:{identity}:{day.isoformat()}'
+    legacy = f"prep-{identity if kind == 'block' else identity[:8]}-{day:%Y%m%d}"
+    return key, legacy
+
+
+def prep_slug(db, subject, day):
+    key, legacy = prep_reference(subject, day)
+    slug = read_meta(db, key)
+    return slug or (legacy if db.execute('SELECT 1 FROM pages WHERE slug=?', (legacy,)).fetchone() else None)
+
+
+def prepared_page(live_pages, subject, day):
+    key, legacy = prep_reference(subject, day)
+    return next((p for p in live_pages if key in p.get('prep_keys', [])), None) or next(
+        (p for p in live_pages if p['slug'] == legacy), None)
+
+
 def cut_line(cut):
     at = cut.get('until')
     return 'gsd as of ' + (owner_time(instant(at), '%d %b %Y %H:%M') + ' (Athens)' if at else 'unknown (no landed cut)')
@@ -297,6 +317,15 @@ def put(db, title, data, filename='', slug=None, as_html=False, now=None, actor=
         require(len(data) <= LIMIT, 'page exceeds 10 MiB')
         data = (prep_header(db, items, block, now, runner) + data.decode('utf-8')).encode('utf-8')
     data, content_type = prepare(title, data, filename, as_html)
+    subjects = ([('block', block)] if block else [('item', i) for i in items or []]) if block or slug is None else []
+    day = local_day(now)
+    if subjects:
+        known = {s for subject in subjects if (s := prep_slug(db, subject, day))}
+        require(len(known) <= 1, 'items already have distinct prepared pages')
+        existing = next(iter(known), None)
+        legacy = prep_reference(subjects[0], day)[1]
+        require(slug in (None, existing, legacy), 'prepared page identity is automatic; omit --slug')
+        slug = existing
     if slug is not None:
         require(valid_slug(slug), 'invalid page slug')
         # A named slug creates or overwrites; a removed page stays removed.
@@ -309,6 +338,8 @@ def put(db, title, data, filename='', slug=None, as_html=False, now=None, actor=
     # Persist intent before any outward effect. A crash leaves an honest failed row.
     with db:
         cid = change(db, 'page put', now, actor)
+        for subject in subjects:
+            meta(db, prep_reference(subject, day)[0], slug)
         db.execute('INSERT INTO pages VALUES (?,?,?,?,?,?,?,?,?,?,0,?,?) ON CONFLICT(slug) DO UPDATE SET '
                    'title=excluded.title,content_type=excluded.content_type,sha256=excluded.sha256,bytes=excluded.bytes,'
                    'change_id=excluded.change_id,wake_id=excluded.wake_id,created_at=excluded.created_at,'
@@ -393,7 +424,11 @@ def poll(db, now=None, transport=None):
 
 
 def live(db, now):
-    return [dict(r, public=bool(r['public']), url=pages_host() + '/' + r['slug']) for r in db.execute("SELECT title,slug,created_at,expires_at,opened_at,opens,public FROM pages WHERE state='live' ORDER BY created_at") if instant(r['expires_at']) > now]
+    references = {}
+    for key, value in db.execute("SELECT key,value FROM message_meta WHERE key LIKE 'prep_page:%'"):
+        references.setdefault(json.loads(value), []).append(key)
+    return [dict(r, public=bool(r['public']), url=pages_host() + '/' + r['slug'],
+                 prep_keys=references.get(r['slug'], [])) for r in db.execute("SELECT title,slug,created_at,expires_at,opened_at,opens,public FROM pages WHERE state='live' ORDER BY created_at") if instant(r['expires_at']) > now]
 
 
 def status(db, now):

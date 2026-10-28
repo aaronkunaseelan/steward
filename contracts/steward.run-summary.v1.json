@@ -38,7 +38,7 @@
     "model_calls": {"type": "integer", "minimum": 0, "description": "Model responses in the sessions (Claude message ids, Codex token_count events, Pi usage messages)"},
     "tokens": {
       "type": ["object", "null"],
-      "description": "Summed over sessions; null when the run had no sessions. weighted = input + output + 1.25 x cache_write + 0.1 x cache_read (the steward.record.v1 unit), rounded.",
+      "description": "Summed over all sessions; null when there are no sessions or a session has no usage evidence. weighted is the weighted-token unit defined in steward.record.v1, rounded once over the run. The same session reader supplies learned run costs.",
       "additionalProperties": false,
       "required": ["input", "output", "cache_write", "cache_read", "weighted"],
       "properties": {

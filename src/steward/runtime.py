@@ -110,6 +110,8 @@ def placement(job, runs, now):
                         continue
                 if start >= now:
                     candidates.append(start)
+        if not candidates:
+            return None, 'no feasible time'
         at = min(candidates)
         reason = 'default: ready_by minus twice the expected duration and 15m'
     if deadline and deadline < now:
@@ -288,8 +290,6 @@ def tick(root, data=None, clock=now_utc, load_reader=host_load, lock_reader=heav
         if skipping:
             result['skipping'] = skipping['to_at']
         from . import memory
-        memory.file_days(db, now)
-        memory.provocations(db, now, source=mind.directory(settings))
         with db:
             senses.save(db, observations, now, cid)
             calendar = observations.get('calendars', {})
@@ -329,6 +329,9 @@ def tick(root, data=None, clock=now_utc, load_reader=host_load, lock_reader=heav
                 if job['state'] != 'active' or not spec['recurring'] or any(r['job'] == job['name'] and r['state'] in ('planned', 'started') for r in runs):
                     continue
                 at, reason = placement(job, runs, now)
+                if at is None:
+                    result.setdefault('unplanned', {})[job['name']] = reason
+                    continue
                 from .planner import rule
                 if at > now + timedelta(hours=36):
                     # Not due inside the planning window: nothing is wrong, it is planned later.
@@ -349,6 +352,9 @@ def tick(root, data=None, clock=now_utc, load_reader=host_load, lock_reader=heav
                     plan(db, job['name'], at, reason, now, cid)
                 except StateError as exc:
                     result.setdefault('unplanned', {})[job['name']] = str(exc)
+        # File only after folding every completion already available at this tick.
+        memory.file_days(db, now)
+        memory.provocations(db, now, source=mind.directory(settings))
         # Commit started intent before crossing the process boundary. The lock serializes ticks.
         for row in current(db, 'runs'):
             if row['state'] != 'planned' or instant(row['planned_for']) > now:
@@ -356,6 +362,14 @@ def tick(root, data=None, clock=now_utc, load_reader=host_load, lock_reader=heav
             job = get(db, 'jobs', row['job'])
             reason = invalid_specs.get(row['job'])
             spec = {} if reason else json.loads(job['spec_json'])
+            if reason is None and not is_extra(row):
+                origin = db.execute('SELECT c.verb,c.actor FROM runs r JOIN changes c ON c.id=r.change_id '
+                                    'WHERE r.run_id=? ORDER BY r.version LIMIT 1', (row['run_id'],)).fetchone()
+                if not (origin['verb'] == 'run now' and origin['actor'] == 'owner'):
+                    from .planner import gap_floor
+                    floor = gap_floor(current(db, 'runs'), row['job'], spec)
+                    if floor and now < floor:
+                        reason = 'min_gap until ' + floor.isoformat()
             try:
                 load, free = load_reader()
                 if not math.isfinite(load) or not math.isfinite(free) or load > load_max or free < 8 * 1024**3:
@@ -514,34 +528,41 @@ def harness(argv, env=None, timeout=38 * 60, links_path=None):
                                 env=dict(os.environ, STEWARD_ACTOR='model', **(env or {})))
         run_id = json.loads(result.stdout)['run']
         atomic_file(links_path, json.dumps({'tty_run': run_id}).encode())
-        subprocess.run(['tty', 'wait', run_id], stdout=subprocess.DEVNULL, timeout=timeout)
-        return run_id
-    # tty's recorded worker has a separate session from the foreground waiter.
-    process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, env=dict(os.environ, STEWARD_ACTOR='model', **(env or {})))
-    try:
-        output, _ = process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        process.terminate()
-        output, _ = process.communicate(timeout=10)
-        tty_root = Path(os.environ.get('TTY_STATE', '~/.local/state/tty')).expanduser()
-        run_id = None
-        for path in (tty_root / 'runs').glob('*/meta.json'):
-            meta = json.loads(path.read_text())
-            if meta.get('cwd') == argv[argv.index('-C') + 1]:
-                run_id = meta['run']
-                subprocess.run(['tty', 'stop', run_id], capture_output=True, timeout=30)
-                break
-        error = StateError('wake harness timed out')
-        error.run_id = run_id
-        raise error from None
+        terminal = subprocess.run(['tty', 'wait', run_id], capture_output=True, text=True, timeout=timeout)
+        output, code = terminal.stdout, terminal.returncode
+    else:
+        # tty's recorded worker has a separate session from the foreground waiter.
+        process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, env=dict(os.environ, STEWARD_ACTOR='model', **(env or {})))
+        try:
+            output, _ = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            process.terminate()
+            output, _ = process.communicate(timeout=10)
+            tty_root = Path(os.environ.get('TTY_STATE', '~/.local/state/tty')).expanduser()
+            run_id = None
+            for path in (tty_root / 'runs').glob('*/meta.json'):
+                meta = json.loads(path.read_text())
+                if meta.get('cwd') == argv[argv.index('-C') + 1]:
+                    run_id = meta['run']
+                    subprocess.run(['tty', 'stop', run_id], capture_output=True, timeout=30)
+                    break
+            error = StateError('wake harness timed out')
+            error.run_id = run_id
+            raise error from None
+        code = process.returncode
     try:
         result = json.loads(output)
         run_id = result.get('run') or result.get('run_id')
         if not isinstance(run_id, str) or not run_id:
             raise ValueError
-        return run_id
     except (ValueError, AttributeError):
         raise StateError('wake harness did not return a run id') from None
+    if not ((code == 0 and result.get('status', 'ok') == 'ok') or
+            (code == 3 and '--no-accept' in argv and result.get('status') == 'unproven' and result.get('exit') == 3)):
+        error = StateError('harness execution failed: exit ' + str(code))
+        error.run_id = run_id
+        raise error
+    return run_id
 
 
 def wake(root, clock=now_utc, runner=harness, settings=None, prompt=None, sender=None,
@@ -656,36 +677,15 @@ def archive_attempt(archiver, *args, **kwargs):
 
 def learned_cost(manifest, directory=None):
     minutes = (instant(manifest['ended_at']) - instant(manifest['started_at'])).total_seconds() / 60
-    tokens = []
-    root = Path(os.environ.get('TTY_STATE', '~/.local/state/tty')).expanduser() / 'runs'
-    links = manifest.get('links', [])
-    if isinstance(links, dict):
-        links = [links]
-    for link in links:
-        if not isinstance(link, dict) or not isinstance(link.get('tty_run'), str):
-            continue
-        identity = link['tty_run']
-        if Path(identity).name != identity or identity in ('.', '..'):
-            continue
-        try:
-            result = json.loads((root / identity / 'result.json').read_text())
-            usage = result['usage']
-            values = [usage['input_tokens'], usage['output_tokens']]
-            if all(type(v) is int and v >= 0 for v in values):
-                tokens.append(sum(values))
-        except (OSError, ValueError, KeyError, TypeError):
-            continue
-    # Jobs without tty report weighted_tokens; validate each key, not the whole record's cost.
+    cost = None
     if directory is not None:
-        # An interrupted tty may have no final usage result; its native transcript does.
+        from .summary import session_tokens
         meta_path = directory / 'transcript-meta.json'
-        if not tokens and meta_path.exists():
-            from .summary import tokens as native_tokens
-            meta = json.loads(meta_path.read_text())
-            for session in meta['sessions']:
-                _, total = native_tokens(directory / 'sessions' / session['file'], session['agent'])
-                if total:
-                    tokens.append(sum(total.values()))
-        reported, _ = records.inspect(directory)
-        tokens.extend(reported)
-    return dict(cost_minutes=minutes, cost_tokens=sum(tokens) if tokens else None)
+        sessions = json.loads(meta_path.read_text())['sessions'] if meta_path.exists() else []
+        if sessions:
+            _, total = session_tokens(directory, sessions)
+            cost = total['weighted'] if total is not None else None
+        else:
+            reported, _ = records.inspect(directory)
+            cost = sum(reported) if reported else None
+    return dict(cost_minutes=minutes, cost_tokens=cost)

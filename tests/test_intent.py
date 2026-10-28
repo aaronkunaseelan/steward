@@ -16,6 +16,8 @@ from unittest.mock import patch
 
 from steward import cli, intent, jobs, messages, notify, senses
 from steward.state import writer
+from steward.contract import problems
+from steward.contracts import load
 
 NOW = datetime(2026, 10, 17, 9, tzinfo=timezone.utc)  # Midday Athens.
 TICKS = dict(window_h=24, total=5, idle=1, launched=1, woke=2, skipped=1)
@@ -82,7 +84,7 @@ class IntentTests(unittest.TestCase):
         readings['gsd']['data']['cut'] = dict(until=now.isoformat(), committed_at=now.isoformat())
         readings['qmd']['data'].update(alive=True, sources={'gmail': dict(
             cadence_s=900, fresh_through=now.timestamp(), current=True, valid_until=now.timestamp() + 86400)})
-        readings['sol']['data']['observed_at'] = now.isoformat()
+        readings['sol']['data'].update(observed_at=now.isoformat(), resets_at=(now + timedelta(days=7)).isoformat())
         senses.save(db, readings, now, cid)
 
     def test_unfolded_completion_keeps_deadline_without_writing_state(self):
@@ -267,6 +269,7 @@ class IntentTests(unittest.TestCase):
                 with writer(self.state) as st:
                     readings = {name: dict(status=sense['status'], data=sense.get('data', {}))
                                 for name, sense in senses.snapshot(st.db, at).items() if sense['status'] == 'ok'}
+                    readings['sol']['data']['observed_at'] = at.isoformat()
                     senses.save(st.db, readings, at, jobs.change(st.db, 'fixture', at, 'tick'))
                     st.db.commit()
                 doc = self.doc(now=at)
@@ -632,7 +635,18 @@ class IntentTests(unittest.TestCase):
         def timeout(*args, **options):
             raise subprocess.TimeoutExpired(args[0], 1)
         result = intent.ticks(NOW, timeout)
-        self.assertEqual(result['total'], 0)
+        self.assertNotIn('total', result)
+        self.assertIn('TimeoutExpired', result['reason'])
+        with patch('steward.intent.subprocess.run', side_effect=subprocess.TimeoutExpired('journalctl', 1)):
+            doc = intent.document(self.state, {}, NOW)
+        self.assertFalse(any(b['kind'] == 'ticks' for b in doc['blocks']))
+        hops = self.block(doc, 'chain')['hops']
+        tick_hop = next(h for h in hops if h['name'] == 'ticks')
+        self.assertTrue(tick_hop['warn'])
+        self.assertIsNone(tick_hop['lag_s'])
+        self.assertEqual(doc['state'], 'red')
+        self.assertIn('tick journal unreadable', doc['headline'])
+        self.assertEqual(problems(load('intent-1', vendor=True), doc), [])
 
     def test_gated_launch_is_launched_failed_model_is_woke_and_run_skip_is_not_tick_skip(self):
         base = NOW - timedelta(hours=1)

@@ -37,7 +37,7 @@ class SkipTests(unittest.TestCase):
                                          waiting_on_you=[], notion_urls={}, digest='unchanged')
             result['qmd']['data'] = dict(alive=True, sources={'files': dict(
                 cadence_s=1200, current=True, fresh_through=now.timestamp(), valid_until=now.timestamp() + 1800)})
-            result['sol']['data'] = dict(observed_at=now.isoformat())
+            result['sol']['data'] = dict(observed_at=now.isoformat(), resets_at=(now + timedelta(days=7)).isoformat())
             return result
         with writer(self.root) as store:
             jobs.job_verb(store.db, 'add', 'gsd-steady', test_jobs.spec(needs={'ready_by': ['00:01']}),

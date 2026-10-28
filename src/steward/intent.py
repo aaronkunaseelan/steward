@@ -69,8 +69,8 @@ def ticks(now, runner=None, db=None):
         lines = (runner or subprocess.run)(['journalctl', '--user', '-u', 'steward-tick.service',
                         '--since', '@' + str((now - timedelta(hours=24)).timestamp()), '--until', '@' + str(now.timestamp()),
                         '-o', 'json', '--no-pager'], capture_output=True, text=True, timeout=1, check=True).stdout.splitlines()
-    except (OSError, subprocess.SubprocessError):
-        return out
+    except (OSError, subprocess.SubprocessError) as exc:
+        return dict(reason='tick journal unreadable: ' + type(exc).__name__)
     for line in lines:
         if not line.startswith('{'):
             continue
@@ -251,10 +251,12 @@ def steward_doc(db, now, settings, data=None):
         promises.append(item)
     promises.sort(key=lambda p: p['at'])
 
+    pending_blocks = [b for b in latest(db, 'blocks', 'event_key') if b['state'] in ('intended', 'written')]
     yours = []
-    for b in latest(db, 'blocks', 'event_key'):
-        if b['state'] in ('removed', 'deleted'):
-            continue
+    # Pending writes cannot replace the last confirmed provider baseline.
+    for b in db.execute("SELECT b.* FROM blocks b WHERE b.state='applied' AND b.version="
+                        "(SELECT max(version) FROM blocks WHERE event_key=b.event_key "
+                        "AND state IN ('applied','removed','deleted'))"):
         p = json.loads(b['payload'])
         start, end = when(p.get('start')), when(p.get('end'))
         if today(start):
@@ -341,6 +343,10 @@ def steward_doc(db, now, settings, data=None):
     memories = db.execute("SELECT key FROM memories WHERE layer = 'day' ORDER BY key DESC LIMIT 1").fetchone()
     synth = db.execute("SELECT length(content) FROM memories WHERE layer = 'synthesis' ORDER BY version DESC LIMIT 1").fetchone()
     lessons = db.execute("SELECT content FROM memories WHERE layer = 'lessons' ORDER BY version DESC LIMIT 1").fetchone()
+    tick_evidence = ticks(now, db=db)
+    chain_block = chain(db, now, inbound, runs=runs)
+    if 'reason' in tick_evidence:
+        chain_block['hops'].insert(0, dict(name='ticks', lag_s=None, note=tick_evidence['reason'], warn=True))
     blocks = [
         {'kind': 'day', 'layer': 'intent', 'tz': local_zone().key, 'date': day0.strftime('%Y-%m-%d'), 'promises': promises,
          'yours': yours, 'machine': machine, 'attention': attention, 'quiet': [], 'skips': skips,
@@ -362,13 +368,14 @@ def steward_doc(db, now, settings, data=None):
          'undos': db.execute('SELECT count(*) FROM changes WHERE undo_of IS NOT NULL').fetchone()[0],
          'lessons': len([l for l in (lessons[0] if lessons and lessons[0] else '').splitlines() if l.strip().startswith(('-', '*'))]),
          'memory': clip(f"day memory {memories[0] if memories else 'none yet'} · synthesis {(synth[0] if synth and synth[0] else 0) / 1024:.1f} KB", 80)},
-        chain(db, now, inbound, runs=runs),
-        {'kind': 'ticks', 'layer': 'process', **ticks(now, db=db)},
+        chain_block,
+        *([{'kind': 'ticks', 'layer': 'process', **tick_evidence}] if 'reason' not in tick_evidence else []),
         schedule(runs, now, settings, moments(db)),
         recent_runs(db, runs, now, data_root(data)),
     ]
     kept = sum(p['state'] == 'kept' for p in promises)
-    warnings = [f"{p['label']} missed {p['at']}" for p in promises if p['state'] == 'missed']
+    warnings = ([f"unconfirmed calendar effects: {len(pending_blocks)}"] if pending_blocks else [])
+    warnings.extend(f"{p['label']} missed {p['at']}" for p in promises if p['state'] == 'missed')
     warnings.extend(hop['note'] for block in blocks if block['kind'] == 'chain'
                     for hop in block['hops'] if hop['warn'])
     for name in jobs:

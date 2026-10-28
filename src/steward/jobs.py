@@ -250,8 +250,19 @@ def run_verb(db, verb, identity, reason, at=None, now=None, actor='owner', owner
         return {'change_id': cid, 'run_id': row['run_id'], 'status': row['state']}
 
 
-def undo(db, identity, now=None, actor='owner', owner_message=None):
+def undo(db, identity, now=None, actor='owner', owner_message=None, settings=None):
+    """One change dispatcher for CLI and Telegram; each owner performs its undo."""
     now = now or now_utc()
+    if db.execute('SELECT 1 FROM drafts WHERE change_id=?', (identity,)).fetchone():
+        from . import drafts
+        return drafts.undo(db, identity, actor=actor, now=now)
+    if db.execute('SELECT 1 FROM memories WHERE change_id=?', (identity,)).fetchone():
+        from . import memory
+        return memory.undo(db, identity, actor)
+    if db.execute('SELECT 1 FROM blocks WHERE change_id=? UNION SELECT 1 FROM demands WHERE change_id=?', (identity, identity)).fetchone():
+        from . import calendar_b
+        from .settings import config
+        return calendar_b.undo(db, settings if settings is not None else config(), identity, now, actor)
     with db:
         original = db.execute('SELECT * FROM changes WHERE id=?', (identity,)).fetchone()
         require(original is not None, 'unknown change')

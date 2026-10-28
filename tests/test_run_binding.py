@@ -18,6 +18,30 @@ class RunBindingTests(unittest.TestCase):
     tick = test_jobs.JobsTests.tick
     run_now = test_jobs.JobsTests.run_now
 
+    def test_agent_packet_keeps_dispatched_spec_after_job_edit(self):
+        import os
+        import runpy
+        from unittest.mock import patch
+        name = 'papers-from-saves'
+        with patch('steward.capabilities.validate'):
+            self.add(capability=name, model='sol', recurring=False, deliver='silent')
+            rid = self.run_now()
+            self.tick()
+            with writer(self.root) as st:
+                edited = json.loads(jobs.get(st.db, 'jobs', 'test')['spec_json'])
+                edited.update(model='haiku', justification='new task', deliver='immediate')
+                jobs.job_verb(st.db, 'edit', 'test', edited, now=self.now + timedelta(seconds=1))
+        directory = Path(self.tmp.name) / 'packet'
+        with patch.dict(os.environ, STEWARD_RUN_DIR=str(directory), STEWARD_STATE=str(self.root),
+                        STEWARD_JOB='test', STEWARD_RUN_ID=rid), patch('sys.argv', ['agent-run', name]), \
+             patch('steward.runtime.harness', return_value='fixture-tty') as harness:
+            runpy.run_path(str(Path(__file__).resolve().parents[1] / 'jobs/agent-run'))['main']()
+        self.assertIn('gpt-6.1-sol', harness.call_args.args[0])
+        text = (directory / 'packet.md').read_text()
+        self.assertIn('Task: keeps a test input fresh', text)
+        self.assertIn('Delivery: silent.', text)
+        self.assertNotIn('new task', text)
+
     def test_capacity_edit_replans_an_unstarted_reservation(self):
         for capacity in ('max_minutes', 'heavy'):
             with self.subTest(capacity=capacity), writer(self.root) as st:

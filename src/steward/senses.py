@@ -1,5 +1,6 @@
 """Read-only, bounded observations. Failures never imply an empty source."""
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+import calendar as month_calendar
 import hashlib
 import json
 import os
@@ -44,7 +45,55 @@ def rows(value, key):
     return result
 
 
-def calendars(settings, now, runner, deadlines=(), tracked=None):
+AHEAD_MONTHS = 24
+
+
+def calendar_instant(value):
+    at = datetime.fromisoformat(value.get('dateTime') or value['date'])
+    return at if at.utcoffset() is not None else at.replace(tzinfo=local_zone())
+
+
+def calendar_events(calendar, listed, schedule):
+    events = []
+    for event in listed:
+        if event.get('status') == 'cancelled':
+            continue
+        events.append(dict(calendar=calendar, id=event['id'], start=event['start'], end=event['end'],
+                           all_day='date' in event['start'], transparency=event.get('transparency'),
+                           status=event.get('status'), summary=event.get('summary'),
+                           eventType=event.get('eventType', 'default'), updated=event.get('updated'),
+                           recurring_event_id=event.get('recurringEventId'), recurrence=event.get('recurrence'),
+                           event_key=event.get('extendedProperties', {}).get('private', {}).get('event_key')))
+        if calendar == schedule and events[-1]['event_key']:
+            events[-1]['description'] = event.get('description', '')
+    return events
+
+
+def calendar_list(calendar, start, end, runner):
+    raw = json.loads(runner(['gog', '--enable-commands-exact=calendar.events', '--readonly', '-j', 'cal', 'events', calendar, '--from', start.isoformat(), '--to', end.isoformat(), '--all-pages', '--max', '250']))
+    return list(rows(raw, 'events'))
+
+
+def calendar_ahead(ids, now, runner, previous):
+    """One far read per local day, including failed attempts; never hide a failure as empty."""
+    day = memory.local_day(now)
+    if previous.get('day') == day.isoformat() and previous.get('calendars') == ids:
+        return previous
+    start = datetime.combine(day + timedelta(days=3), datetime.min.time(), local_zone())
+    month = day.year * 12 + day.month - 1 + AHEAD_MONTHS
+    year, month = divmod(month, 12)
+    end = datetime.combine(date(year, month + 1, min(day.day, month_calendar.monthrange(year, month + 1)[1])),
+                           datetime.min.time(), local_zone())
+    coverage = dict(day=day.isoformat(), calendars=ids, at=now.isoformat(), **{'from': start.isoformat(), 'to': end.isoformat()})
+    try:
+        events = [event for calendar in ids
+                  for event in calendar_events(calendar, calendar_list(calendar, start, end, runner), ids[0])]
+        return dict(coverage, status='ok', events=events)
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
+        return dict(coverage, status='unknown', reason='read failed: ' + type(exc).__name__)
+
+
+def calendars(settings, now, runner, deadlines=(), tracked=None, *, ahead=False, previous=None):
     ids = [settings['schedule_calendar_id'], *settings['main_calendar_ids']]
     if not all(isinstance(x, str) and x for x in ids):
         raise ValueError('invalid calendar configuration')
@@ -55,8 +104,7 @@ def calendars(settings, now, runner, deadlines=(), tracked=None):
               datetime.combine(last, datetime.min.time(), local_zone()))
     events, missing = [], []
     for calendar in dict.fromkeys(ids):
-        raw = json.loads(runner(['gog', '--enable-commands-exact=calendar.events', '--readonly', '-j', 'cal', 'events', calendar, '--from', start.isoformat(), '--to', end.isoformat(), '--all-pages', '--max', '250']))
-        listed = list(rows(raw, 'events'))
+        listed = calendar_list(calendar, start, end, runner)
         if calendar == ids[0]:
             keys = {e.get('extendedProperties', {}).get('private', {}).get('event_key') for e in listed
                     if e.get('status') != 'cancelled'}
@@ -82,21 +130,18 @@ def calendars(settings, now, runner, deadlines=(), tracked=None):
                 if event.get('extendedProperties', {}).get('private', {}).get('event_key') != key:
                     raise ValueError('tracked calendar key changed')
                 listed.append(event)
-        for event in listed:
-            if event.get('status') == 'cancelled':
-                continue
-            events.append(dict(calendar=calendar, id=event['id'], start=event['start'], end=event['end'],
-                               all_day='date' in event['start'], transparency=event.get('transparency'),
-                               status=event.get('status'), summary=event.get('summary'),
-                               eventType=event.get('eventType', 'default'), updated=event.get('updated'),
-                               event_key=event.get('extendedProperties', {}).get('private', {}).get('event_key')))
-            if calendar == ids[0] and events[-1]['event_key']:
-                events[-1]['description'] = event.get('description', '')
+        events.extend(calendar_events(calendar, listed, ids[0]))
     events.sort(key=lambda e: (e['calendar'], e['id']))
     # The digest marks news: Google's bare `updated` bumps are not, and Steward's own blocks
     # come back as owner learning from calendar_b.reconcile, not as calendar movement.
-    news = [{k: v for k, v in e.items() if k != 'updated'} for e in events if not e['event_key']]
-    return dict(events=events, missing_event_keys=missing, schedule_calendar_id=ids[0], digest=digest(news), **{'from': start.isoformat(), 'to': end.isoformat()})
+    news_start = datetime.combine(day, datetime.min.time(), local_zone())
+    news_end = planning_end(now, local_zone(), deadlines)
+    news = [{k: v for k, v in e.items() if k != 'updated'} for e in events if not e['event_key']
+            and calendar_instant(e['start']) < news_end and calendar_instant(e['end']) > news_start]
+    result = dict(events=events, missing_event_keys=missing, schedule_calendar_id=ids[0], digest=digest(news), **{'from': start.isoformat(), 'to': end.isoformat()})
+    if ahead:
+        result['ahead'] = calendar_ahead(list(dict.fromkeys(ids)), now, runner, (previous or {}).get('ahead', {}))
+    return result
 
 
 def worklist(runner=run):
@@ -260,8 +305,28 @@ def health(now, runner):
                              digest=digest(values)), now)
 
 
-def place(runner):
-    raw = read('phone.place.v1', runner(['phone', 'where', '--json']))
+def night_runs(nights):
+    """Render consecutive equal observations, without inferring residence or filling gaps."""
+    runs = []
+    for night in sorted(nights, key=lambda n: n['date']):
+        day = date.fromisoformat(night['date'])
+        location = (night['city'], night['country'], night['ssid'])
+        if (runs and runs[-1][1] + timedelta(days=1) == day and runs[-1][2] == location
+                and (night['moved_m'] is None or night['moved_m'] <= 2000)):
+            runs[-1][1] = day
+            runs[-1][3] += 1
+        else:
+            runs.append([day, day, location, 1])
+    return '; '.join((first.strftime('%d %b %Y') if first == last else
+                      first.strftime('%d %b %Y') + '–' + last.strftime('%d %b %Y')) + ' ' +
+                     (city + (', ' + country if country else '') if city else 'unknown') +
+                     ' / ' + (ssid if ssid is not None else 'unknown') +
+                     f' ({count} night' + ('s)' if count != 1 else ')')
+                     for first, last, (city, country, ssid), count in runs)
+
+
+def place(runner, now):
+    raw = read('phone.place.v3', runner(['phone', 'where', '--json']))
 
     def timestamp(value):
         try:
@@ -270,16 +335,31 @@ def place(runner):
                 raise ValueError
             return result
         except ValueError:
-            raise ContractError('phone.place.v1: expected ISO 8601 with offset') from None
+            raise ContractError('phone.place.v3: expected ISO 8601 with offset') from None
 
     timestamp(raw['at'])
     if raw['since'] is not None:
         timestamp(raw['since'])
-    if raw['last_event'] is not None:
-        timestamp(raw['last_event']['at'])
-    today = [{key: event[key] for key in ('type', 'place', 'at')} for event in raw['today']]
-    today.sort(key=lambda event: timestamp(event['at']))
-    return dict(state=raw['state'], place=raw['place'], since=raw['since'], today=today)
+    last = raw['last']
+    if last is not None:
+        age = max(0, (now - timestamp(last['at'])).total_seconds())
+        last = dict({key: last[key] for key in ('trigger', 'city', 'country', 'ssid', 'battery', 'charging')},
+                    age_s=age)
+    if raw['last_city'] is not None:
+        timestamp(raw['last_city']['at'])
+    for night in raw['nights']:
+        try:
+            date.fromisoformat(night['date'])
+        except ValueError:
+            raise ContractError('phone.place.v3: expected night date') from None
+        if night['at'] is not None:
+            timestamp(night['at'])
+    today = [owner_time(timestamp(event['at']), '%H:%M') + ' ' + event['trigger'] + ' / ' +
+             (event['city'] if event['city'] is not None else 'unknown') + ' / ' +
+             (event['ssid'] if event['ssid'] is not None else 'unknown')
+             for event in sorted(raw['today'], key=lambda event: timestamp(event['at']))]
+    return dict(state=raw['state'], place=raw['place'], since=raw['since'], last=last, today=today,
+                last_city=raw['last_city'], nights=night_runs(raw['nights']))
 
 
 def machine(runner):
@@ -413,8 +493,10 @@ def freshness(name, sense, now):
         reason = 'calendar read succeeded'
     elif name == 'sol':
         as_of = data.get('observed_at')
-        if not as_of:
-            verdict, reason = 'unknown', 'provider observation time unknown'
+        if not as_of or not data.get('resets_at'):
+            verdict, reason = 'unknown', 'provider observation or reset time unknown'
+        elif now >= datetime.fromisoformat(data['resets_at']):
+            verdict, reason = 'stale', 'provider reset passed; new observation required'
     if sense.get('status') == 'ok':
         age = sense.get('age')
         if age is None:
@@ -444,7 +526,7 @@ def collect(root, settings, now, runner=run, rollout_root=None):
             continue
         try:
             if name == 'calendars':
-                data = calendars(settings, now, runner, calendar_deadlines, tracked)
+                data = calendars(settings, now, runner, calendar_deadlines, tracked, ahead=True, previous=old.get('data', {}))
             elif name == 'gsd':
                 data = gsd(now, runner)
             elif name == 'qmd':
@@ -452,7 +534,7 @@ def collect(root, settings, now, runner=run, rollout_root=None):
             elif name == 'health':
                 data = health(now, runner)
             elif name == 'place':
-                data = place(runner)
+                data = place(runner, now)
             elif name == 'machine':
                 data = machine(runner)
             else:
@@ -485,9 +567,9 @@ def save(db, observations, now, change_id):
                 changed = False
         payload = {k: v for k, v in observation.items() if k != 'status'}
         # Checkpoints share the observation's atomic write; unknown never consumes arrivals.
-        if name == 'qmd' and observation['status'] == 'unknown' and old_payload.get('data'):
-            payload['data'] = {k: old_payload['data'][k] for k in ('feed',)
-                               if k in old_payload['data']}
+        if name in ('qmd', 'calendars') and observation['status'] == 'unknown' and old_payload.get('data'):
+            keys = ('feed',) if name == 'qmd' else ('ahead',)
+            payload['data'] = {k: old_payload['data'][k] for k in keys if k in old_payload['data']}
         db.execute('INSERT INTO senses(name,at,status,payload,change_id,event) VALUES (?,?,?,?,?,?)',
                    (name, now.isoformat(), observation['status'], json.dumps(payload), change_id, int(bool(changed))))
         db.execute('DELETE FROM senses WHERE name=? AND id NOT IN (SELECT id FROM senses WHERE name=? ORDER BY id DESC LIMIT 96)', (name, name))

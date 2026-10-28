@@ -67,6 +67,10 @@ class PlanTests(unittest.TestCase):
         directory = self.data / 'runs' / 'test' / rid
         directory.mkdir(parents=True)
         (directory/'manifest.json').write_text(json.dumps(dict(job='test', run_id=rid, started_at=NOW.isoformat(), ended_at=(NOW+timedelta(minutes=12)).isoformat(), exit_code=0, status='succeeded', links=[{'tty_run':'fixture'}])))
+        sessions = directory / 'sessions'
+        sessions.mkdir()
+        (sessions / 'claude.jsonl').write_bytes((Path(__file__).parent / 'fixtures/transcript-claude.jsonl').read_bytes())
+        (directory / 'transcript-meta.json').write_text(json.dumps(dict(sessions=[dict(file='claude.jsonl', agent='claude')])))
         tty = self.root/'tty'
         path = tty/'runs/fixture/result.json'
         path.parent.mkdir(parents=True)
@@ -75,7 +79,7 @@ class PlanTests(unittest.TestCase):
             self.tick(at=NOW+timedelta(minutes=15))
         with writer(self.root) as store:
             learned = jobs.snapshot(store.db, now=NOW)['jobs'][0]['cost']
-            self.assertEqual(learned, dict(median_minutes=12, median_tokens=120, run_count=1, last_status='succeeded'))
+            self.assertEqual(learned, dict(median_minutes=12, median_tokens=345, run_count=1, last_status='succeeded'))
 
     def test_model_can_cancel_near_term_reservation(self):
         self.add()

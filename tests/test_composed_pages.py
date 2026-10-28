@@ -69,6 +69,45 @@ class ComposedPagesTests(unittest.TestCase):
         self.assertIn('23:00', body)
         self.assertIn('One person moves both', body)
 
+    def test_prepared_pages_reuse_one_random_identity_per_subject_day(self):
+        with self.db:
+            cid = jobs.change(self.db, 'fixture', NOW)
+            calendar_b.append(self.db, 'demands', dict(name='shared', state='active',
+                spec_json=json.dumps(dict(title='Together', justification='One preparation'))), cid)
+        with patch('steward.senses.worklist', return_value=self.raw):
+            first = self.put(items=['a'], block='shared')
+            again = self.put(items=['a'], block='shared')
+            meeting = self.put(items=['a'])
+            meeting_again = self.put(items=['a'])
+        self.assertEqual(first['slug'], again['slug'])
+        self.assertEqual(meeting['slug'], meeting_again['slug'])
+        self.assertNotEqual(first['slug'], meeting['slug'])
+        self.assertRegex(first['slug'], r'-[a-z2-7]{12}$')
+        self.assertRegex(meeting['slug'], r'-[a-z2-7]{12}$')
+        self.assertNotIn(NOW.strftime('%Y%m%d'), first['slug'])
+        # Stored before upload: a failed attempt also retries the same identity.
+        with patch('steward.senses.worklist', return_value=self.raw):
+            failed = pages.put(self.db, 'Prep', b'ready', 'plan.md', items=['b'], now=NOW,
+                               transport=lambda *a, **k: (503, b''))
+            recovered = self.put(items=['b'])
+        self.assertEqual(failed['slug'], recovered['slug'])
+        self.assertEqual(recovered['state'], 'live')
+
+    def test_existing_deterministic_prep_links_are_adopted_not_renamed(self):
+        block_slug = 'prep-shared-' + NOW.strftime('%Y%m%d')
+        item_slug = 'prep-a-' + NOW.strftime('%Y%m%d')
+        with self.db:
+            cid = jobs.change(self.db, 'fixture', NOW)
+            calendar_b.append(self.db, 'demands', dict(name='shared', state='active',
+                spec_json=json.dumps(dict(title='Together', justification='One preparation'))), cid)
+        for slug in (block_slug, item_slug):
+            self.put(slug=slug)
+        with patch('steward.senses.worklist', return_value=self.raw):
+            block = self.put(items=['a'], block='shared')
+            item = self.put(items=['a'])
+        self.assertEqual(block['slug'], block_slug)
+        self.assertEqual(item['slug'], item_slug)
+
     def test_without_items_does_not_read_gsd(self):
         with patch('steward.senses.worklist') as reader:
             result = self.put()

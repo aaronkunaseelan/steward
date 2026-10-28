@@ -1,0 +1,437 @@
+{
+  "schema": "phone.place.v3",
+  "at": "2026-10-17T12:00:00Z",
+  "state": "at",
+  "place": "gym",
+  "since": "2026-10-17T11:45:00Z",
+  "today": [
+    {
+      "at": "2026-10-17T00:05:00Z",
+      "trigger": "night",
+      "place": null,
+      "city": "Example",
+      "country": "GR",
+      "ssid": "Example WiFi",
+      "carrier": "Example Mobile",
+      "battery": 95,
+      "charging": false
+    },
+    {
+      "at": "2026-10-17T05:00:00Z",
+      "trigger": "charger:off",
+      "place": null,
+      "city": "Example",
+      "country": "GR",
+      "ssid": "Example WiFi",
+      "carrier": "Example Mobile",
+      "battery": 93,
+      "charging": false
+    },
+    {
+      "at": "2026-10-17T05:05:00Z",
+      "trigger": "wifi:join",
+      "place": null,
+      "city": "Example",
+      "country": "GR",
+      "ssid": "Example WiFi",
+      "carrier": "Example Mobile",
+      "battery": 91,
+      "charging": false
+    },
+    {
+      "at": "2026-10-17T05:30:00Z",
+      "trigger": "leave:home",
+      "place": "home",
+      "city": "Example",
+      "country": "GR",
+      "ssid": null,
+      "carrier": "Example Mobile",
+      "battery": 89,
+      "charging": false
+    },
+    {
+      "at": "2026-10-17T06:00:00Z",
+      "trigger": "time:0900",
+      "place": null,
+      "city": "Example",
+      "country": "GR",
+      "ssid": null,
+      "carrier": "Example Mobile",
+      "battery": 87,
+      "charging": false
+    },
+    {
+      "at": "2026-10-17T07:00:00Z",
+      "trigger": "charger:on",
+      "place": null,
+      "city": "Example",
+      "country": "GR",
+      "ssid": "Office WiFi",
+      "carrier": "Example Mobile",
+      "battery": 85,
+      "charging": true
+    },
+    {
+      "at": "2026-10-17T07:30:00Z",
+      "trigger": "charger:off",
+      "place": null,
+      "city": "Example",
+      "country": "GR",
+      "ssid": "Office WiFi",
+      "carrier": "Example Mobile",
+      "battery": 83,
+      "charging": false
+    },
+    {
+      "at": "2026-10-17T08:00:00Z",
+      "trigger": "wifi:join",
+      "place": null,
+      "city": "Example",
+      "country": "GR",
+      "ssid": "Office WiFi",
+      "carrier": "Example Mobile",
+      "battery": 81,
+      "charging": false
+    },
+    {
+      "at": "2026-10-17T08:15:00Z",
+      "trigger": "arrive:office",
+      "place": "office",
+      "city": "Example",
+      "country": "GR",
+      "ssid": "Office WiFi",
+      "carrier": "Example Mobile",
+      "battery": 79,
+      "charging": false
+    },
+    {
+      "at": "2026-10-17T09:00:00Z",
+      "trigger": "time:1200",
+      "place": null,
+      "city": "Example",
+      "country": "GR",
+      "ssid": "Office WiFi",
+      "carrier": "Example Mobile",
+      "battery": 77,
+      "charging": false
+    },
+    {
+      "at": "2026-10-17T10:00:00Z",
+      "trigger": "leave:office",
+      "place": "office",
+      "city": "Example",
+      "country": "GR",
+      "ssid": null,
+      "carrier": "Example Mobile",
+      "battery": 75,
+      "charging": false
+    },
+    {
+      "at": "2026-10-17T11:00:00Z",
+      "trigger": "charger:off",
+      "place": null,
+      "city": "Example",
+      "country": "GR",
+      "ssid": null,
+      "carrier": "Example Mobile",
+      "battery": 73,
+      "charging": false
+    },
+    {
+      "at": "2026-10-17T11:15:00Z",
+      "trigger": "wifi:join",
+      "place": null,
+      "city": "Example",
+      "country": "GR",
+      "ssid": "Fitness WiFi",
+      "carrier": "Example Mobile",
+      "battery": 71,
+      "charging": false
+    },
+    {
+      "at": "2026-10-17T11:45:00Z",
+      "trigger": "arrive:gym",
+      "place": "gym",
+      "city": "Example",
+      "country": "GR",
+      "ssid": "Fitness WiFi",
+      "carrier": "Example Mobile",
+      "battery": 69,
+      "charging": false
+    },
+    {
+      "at": "2026-10-17T11:50:00Z",
+      "trigger": "time:1450",
+      "place": null,
+      "city": "Example",
+      "country": "GR",
+      "ssid": "Fitness WiFi",
+      "carrier": "Example Mobile",
+      "battery": 67,
+      "charging": false
+    }
+  ],
+  "places": [
+    "home",
+    "office",
+    "gym"
+  ],
+  "last_city": {
+    "city": "Example",
+    "country": "GR",
+    "at": "2026-10-17T11:45:00Z"
+  },
+  "nights": [
+    {
+      "date": "2026-09-18",
+      "city": null,
+      "country": null,
+      "at": null,
+      "ssid": null,
+      "moved_m": null
+    },
+    {
+      "date": "2026-09-19",
+      "city": null,
+      "country": null,
+      "at": null,
+      "ssid": null,
+      "moved_m": null
+    },
+    {
+      "date": "2026-09-20",
+      "city": null,
+      "country": null,
+      "at": null,
+      "ssid": null,
+      "moved_m": null
+    },
+    {
+      "date": "2026-09-21",
+      "city": "Example",
+      "country": "GR",
+      "at": "2026-09-21T01:00:00Z",
+      "ssid": "Example WiFi",
+      "moved_m": null
+    },
+    {
+      "date": "2026-09-22",
+      "city": "Example",
+      "country": "GR",
+      "at": "2026-09-22T01:00:00Z",
+      "ssid": "Example WiFi",
+      "moved_m": 20
+    },
+    {
+      "date": "2026-09-23",
+      "city": "Example",
+      "country": "GR",
+      "at": "2026-09-23T01:00:00Z",
+      "ssid": "Example WiFi",
+      "moved_m": 20
+    },
+    {
+      "date": "2026-09-24",
+      "city": "Example",
+      "country": "GR",
+      "at": "2026-09-24T01:00:00Z",
+      "ssid": "Example WiFi",
+      "moved_m": 20
+    },
+    {
+      "date": "2026-09-25",
+      "city": "Example",
+      "country": "GR",
+      "at": "2026-09-25T01:00:00Z",
+      "ssid": "Example WiFi",
+      "moved_m": 20
+    },
+    {
+      "date": "2026-09-26",
+      "city": "Example",
+      "country": "GR",
+      "at": "2026-09-26T01:00:00Z",
+      "ssid": "Example WiFi",
+      "moved_m": 20
+    },
+    {
+      "date": "2026-09-27",
+      "city": "Example",
+      "country": "GR",
+      "at": "2026-09-27T01:00:00Z",
+      "ssid": "Example WiFi",
+      "moved_m": 20
+    },
+    {
+      "date": "2026-09-28",
+      "city": "Example",
+      "country": "GR",
+      "at": "2026-09-28T01:00:00Z",
+      "ssid": "Example WiFi",
+      "moved_m": 20
+    },
+    {
+      "date": "2026-09-29",
+      "city": "Example",
+      "country": "GR",
+      "at": "2026-09-29T01:00:00Z",
+      "ssid": "Example WiFi",
+      "moved_m": 20
+    },
+    {
+      "date": "2026-09-30",
+      "city": "Example",
+      "country": "GR",
+      "at": "2026-09-30T01:00:00Z",
+      "ssid": "Example WiFi",
+      "moved_m": 20
+    },
+    {
+      "date": "2026-10-01",
+      "city": "Example",
+      "country": "GR",
+      "at": "2026-10-01T01:00:00Z",
+      "ssid": "Example WiFi",
+      "moved_m": 20
+    },
+    {
+      "date": "2026-10-02",
+      "city": "Example",
+      "country": "GR",
+      "at": "2026-10-02T01:00:00Z",
+      "ssid": "Example WiFi",
+      "moved_m": 20
+    },
+    {
+      "date": "2026-10-03",
+      "city": "Example",
+      "country": "GR",
+      "at": "2026-10-03T01:00:00Z",
+      "ssid": "Example WiFi",
+      "moved_m": 20
+    },
+    {
+      "date": "2026-10-04",
+      "city": "Example",
+      "country": "GR",
+      "at": "2026-10-04T01:00:00Z",
+      "ssid": "Example WiFi",
+      "moved_m": 20
+    },
+    {
+      "date": "2026-10-05",
+      "city": "Example",
+      "country": "GR",
+      "at": "2026-10-05T01:00:00Z",
+      "ssid": "Example WiFi",
+      "moved_m": 20
+    },
+    {
+      "date": "2026-10-06",
+      "city": "Example",
+      "country": "GR",
+      "at": "2026-10-06T01:00:00Z",
+      "ssid": "Example WiFi",
+      "moved_m": 20
+    },
+    {
+      "date": "2026-10-07",
+      "city": "Example",
+      "country": "GR",
+      "at": "2026-10-07T01:00:00Z",
+      "ssid": "Example WiFi",
+      "moved_m": 20
+    },
+    {
+      "date": "2026-10-08",
+      "city": "Other",
+      "country": "GR",
+      "at": "2026-10-08T01:00:00Z",
+      "ssid": "Hotel WiFi",
+      "moved_m": 150000
+    },
+    {
+      "date": "2026-10-09",
+      "city": "Other",
+      "country": "GR",
+      "at": "2026-10-09T01:00:00Z",
+      "ssid": "Hotel WiFi",
+      "moved_m": 20
+    },
+    {
+      "date": "2026-10-10",
+      "city": "Other",
+      "country": "GR",
+      "at": "2026-10-10T01:00:00Z",
+      "ssid": "Hotel WiFi",
+      "moved_m": 20
+    },
+    {
+      "date": "2026-10-11",
+      "city": "Other",
+      "country": "GR",
+      "at": "2026-10-11T01:00:00Z",
+      "ssid": "Hotel WiFi",
+      "moved_m": 20
+    },
+    {
+      "date": "2026-10-12",
+      "city": "Other",
+      "country": "GR",
+      "at": "2026-10-12T01:00:00Z",
+      "ssid": "Hotel WiFi",
+      "moved_m": 20
+    },
+    {
+      "date": "2026-10-13",
+      "city": "Other",
+      "country": "GR",
+      "at": "2026-10-13T01:00:00Z",
+      "ssid": "Hotel WiFi",
+      "moved_m": 20
+    },
+    {
+      "date": "2026-10-14",
+      "city": "Other",
+      "country": "GR",
+      "at": "2026-10-14T01:00:00Z",
+      "ssid": "Hotel WiFi",
+      "moved_m": 20
+    },
+    {
+      "date": "2026-10-15",
+      "city": "Other",
+      "country": "GR",
+      "at": "2026-10-15T01:00:00Z",
+      "ssid": "Hotel WiFi",
+      "moved_m": 20
+    },
+    {
+      "date": "2026-10-16",
+      "city": "Other",
+      "country": "GR",
+      "at": "2026-10-16T01:00:00Z",
+      "ssid": "Hotel WiFi",
+      "moved_m": 20
+    },
+    {
+      "date": "2026-10-17",
+      "city": "Other",
+      "country": "GR",
+      "at": "2026-10-17T01:00:00Z",
+      "ssid": "Hotel WiFi",
+      "moved_m": 20
+    }
+  ],
+  "last": {
+    "at": "2026-10-17T11:50:00Z",
+    "trigger": "time:1450",
+    "place": null,
+    "city": "Example",
+    "country": "GR",
+    "ssid": "Fitness WiFi",
+    "carrier": "Example Mobile",
+    "battery": 67,
+    "charging": false
+  }
+}

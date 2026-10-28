@@ -111,7 +111,7 @@ class OutcomeTests(unittest.TestCase):
             title='Grants', start=start.isoformat(), end=(start + timedelta(hours=1)).isoformat(), event_key=key))))
         return closures
 
-    def closures_report(self, closures, view=True):
+    def closures_report(self, closures, view=True, cut_until=NOW, since=None):
         from steward.outcomes import weekly
         def runner(argv):
             if 'contract' in argv:
@@ -120,8 +120,8 @@ class OutcomeTests(unittest.TestCase):
                 if not view:
                     raise ValueError('external command failed')
                 self.assertEqual(argv[2:], ['--since', '2026-10-18T00:00:00+03:00', '--json'])
-                return json.dumps(dict(schema='gsd.closures.v1', at=NOW.isoformat(), since=argv[3],
-                                       cut=dict(until=NOW.isoformat(), change_set_id='x', committed_at=NOW.isoformat()),
+                return json.dumps(dict(schema='gsd.closures.v1', at=NOW.isoformat(), since=since or argv[3],
+                                       cut=dict(until=cut_until.isoformat() if cut_until else None, change_set_id='x', committed_at=NOW.isoformat()),
                                        closures=closures))
             return json.dumps(dict(schema='gsd.runs.v1', since='2026-10-19', runs=[]))
         return {r['metric']: r for r in weekly(self.db, '2026-10-18', now=NOW, runner=runner)['rows']}
@@ -136,7 +136,8 @@ class OutcomeTests(unittest.TestCase):
         closures = [dict(id='a1', title='Item a1', project=None, state='done', at='2026-10-19T14:00:00+00:00'),
                     dict(id='a2', title='Item a2', project=None, state='canceled', at='2026-10-20T07:30:00+00:00'),
                     dict(id='zz', title='Other', project=None, state='done', at='2026-10-20T08:00:00+00:00')]
-        page = pages.put(self.db, 'Prep', b'<p>x</p>', 'p.html', slug='prep-grants-20261019', now=monday - timedelta(hours=3))
+        page = pages.put(self.db, 'Prep', b'plan', 'p.md', items=['a1', 'a2'], block='grants',
+                         now=monday - timedelta(hours=3), runner=lambda argv: '{}')
         self.db.execute('UPDATE pages SET opened_at=? WHERE slug=?', ((monday - timedelta(hours=1)).isoformat(), page['slug']))
         rows = self.closures_report(closures)
         self.assertEqual((rows['blocks_used']['count'], rows['blocks_used']['total']), (1, 2))
@@ -156,6 +157,19 @@ class OutcomeTests(unittest.TestCase):
             self.assertEqual(rows[metric]['status'], 'unknown', metric)
             self.assertEqual(rows[metric]['reason'], 'gsd closures view unavailable or invalid')
         self.assertEqual(rows['pages_opened_before_block']['count'], 1)
+
+    def test_closures_without_evaluated_window_coverage_are_unknown(self):
+        monday = datetime(2026, 10, 19, 9, tzinfo=TEST_ZONE)
+        self.bundle('grants:once:0', monday, [])
+        for cut, since in ((monday - timedelta(days=1), None), (None, None),
+                            (NOW, monday.isoformat())):
+            with self.subTest(cut=cut, since=since):
+                rows = self.closures_report([], cut_until=cut, since=since)
+                for metric in ('items_closed', 'blocks_used', 'blocks_ignored'):
+                    self.assertEqual((rows[metric]['status'], rows[metric]['count']), ('unknown', None))
+                    self.assertIn('coverage', rows[metric]['reason'])
+        rows = self.closures_report([])
+        self.assertEqual((rows['items_closed']['status'], rows['items_closed']['count']), ('ok', 0))
 
     def test_interests_moved_counts_stage_changes_in_week(self):
         for version, stage, when in ((0, 'new', NOW - timedelta(days=10)), (1, 'emerging', NOW - timedelta(hours=2)),

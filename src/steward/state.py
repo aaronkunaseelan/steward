@@ -342,6 +342,11 @@ def writer(root, initialize=False, wait=0):
                 raise StateError('unsupported state schema')
             db.execute('PRAGMA journal_mode=WAL')
             db.execute('PRAGMA synchronous=FULL')
+            if db.execute("SELECT value FROM message_meta WHERE key='cost_unit'").fetchone() is None:
+                from .summary import recompute_costs
+                with db:
+                    recompute_costs(db)
+                    db.execute("INSERT INTO message_meta VALUES ('cost_unit',?)", (json.dumps('weighted_tokens'),))
             store = Store(root, db)
             from .memory import mirror
             mirror(db)

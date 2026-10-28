@@ -95,9 +95,9 @@ class BundleTests(unittest.TestCase):
         event = self.event('grants:once:0')
         self.assertEqual(event['description'], 'Item a1 (Fixture project)\nItem a2')
         self.assertEqual(self.plan()['description_refreshes'], {})
-        slug = 'prep-grants-' + event['start']['dateTime'][:10].replace('-', '')
-        page = pages.put(self.db, 'Prep', b'<p>ready</p>', 'prep.html', slug=slug, now=NOW, transport=self.transport)
-        self.assertEqual(page['slug'], slug)
+        page = pages.put(self.db, 'Prep', b'ready', 'prep.md', items=['a1', 'a2'], block='grants',
+                         now=NOW, transport=self.transport, runner=self.runner)
+        self.assertEqual(pages.prep_slug(self.db, ('block', 'grants'), NOW.date()), page['slug'])
         prepared = 'Prepared: ' + page['url'] + '\nItem a1 (Fixture project)\nItem a2'
         self.assertEqual(self.plan()['description_refreshes'], {'grants:once:0': prepared})
         self.choose(self.candidate('grants:once:0', 'keep'), 'Prepared page is live')
@@ -147,8 +147,9 @@ class BundleTests(unittest.TestCase):
         self.choose(self.candidate('grants:once:0', 'place'))
         event = self.event('grants:once:0')
         self.assertEqual(event['start']['dateTime'][11:16], '09:00')
-        slug = 'prep-grants-' + event['start']['dateTime'][:10].replace('-', '')
-        page = pages.put(self.db, 'Prep', b'<p>ready</p>', 'prep.html', slug=slug, now=NOW, transport=self.transport)
+        page = pages.put(self.db, 'Prep', b'ready', 'prep.md', items=['a1', 'a2'], block='grants',
+                         now=NOW, transport=self.transport, runner=self.runner)
+        slug = page['slug']
 
         def state(done):
             raw = dict(self.worklist, done=done)
@@ -175,7 +176,7 @@ class BundleTests(unittest.TestCase):
         self.assertIn('- used: yes', used)
         self.assertIn('Grants: Pat Synthetic email, funding triage 09:00: yes', used.split('Done today', 1)[1])
         pages.remove(self.db, slug, now=NOW, transport=self.transport)
-        self.assertIn('- prepared: no: no live page at ' + slug, briefing.render(state([]), NOW, {}))
+        self.assertIn('- prepared: no: no live prepared page', briefing.render(state([]), NOW, {}))
 
     def test_demands_without_items_never_read_gsd(self):
         b.demand(self.db, 'add', 'focus', {k: v for k, v in BUNDLE.items() if k != 'items'}, NOW, runner=self.runner)

@@ -53,7 +53,7 @@ class UpdateMigrationTests(unittest.TestCase):
                     self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 20)
                     self.assertIsNone(db.execute("SELECT name FROM sqlite_master WHERE name='subject_showings'").fetchone())
                     self.assertEqual({table: [tuple(r) for r in db.execute('SELECT * FROM ' + table)] for table in tables}, before)
-                    self.assertEqual({r['key']: json.loads(r['value']) for r in db.execute('SELECT * FROM message_meta')}, kept_meta)
+                    self.assertEqual({r['key']: json.loads(r['value']) for r in db.execute('SELECT * FROM message_meta')}, dict(kept_meta, cost_unit='weighted_tokens'))
                     self.assertEqual(db.execute('PRAGMA integrity_check').fetchone()[0], 'ok')
 
 

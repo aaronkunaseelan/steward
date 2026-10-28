@@ -72,6 +72,38 @@ class FulfilmentTests(unittest.TestCase):
             self.assertEqual(week_start(local_day(now)).isoformat(),
                              '2026-10-18' if len(expected) and expected[0]['start'][8:10] == '24' else '2026-10-25')
 
+    def test_movement_requires_an_overlapping_watch_session(self):
+        block = dict(start='2026-10-19T09:00:00+03:00',
+                     end='2026-10-19T11:00:00+03:00', event_key='movement:0')
+        spec = dict(kind='movement', minutes=120, count=4)
+        now = NOW + timedelta(hours=3)
+        for week, expected in [
+                ([], []),
+                ([session(hour=10)], [block]),
+                ([session('walking', hour=8, minutes=90)], [block]),
+                ([session(hour=10), session(hour=10)], [block]),
+                ([session(hour=8, minutes=60)], []),
+                ([session(hour=11)], []),
+                ([session(hour=7)], []),
+                ([session(hour=10, minutes=0)], []),
+                ([dict(session(hour=10), duration_s=None)], [])]:
+            with self.subTest(week=week):
+                dose = f.fulfilment(spec, week, now, [block])
+                self.assertEqual(dose['done'], expected)
+                self.assertEqual(dose['remaining'], 4 - len(expected))
+
+    def test_movement_held_watch_is_unknown_even_with_a_passed_block(self):
+        block = dict(start='2026-10-19T09:00:00+03:00',
+                     end='2026-10-19T11:00:00+03:00', event_key='movement:0')
+        dose = f.fulfilment(dict(kind='movement', minutes=120, count=4),
+                            [session(hour=10)], NOW + timedelta(hours=3),
+                            [block], unknown='watch unavailable')
+        self.assertEqual(dose['unknown'], 'watch unavailable')
+        self.assertEqual(dose['done'], [])
+        self.assertIsNone(dose['remaining'])
+        self.assertIsNone(dose['remaining_blocks'])
+        self.assertFalse(dose['complete'])
+
     def test_kinds_validate(self):
         for kind in ('movement', 'gym', 'vo2max', 'anaerobic', 'endurance'):
             self.assertEqual(b.validate(dict(fixtures.SPEC, kind=kind))['kind'], kind)
@@ -425,12 +457,14 @@ class FulfilmentReaderTests(unittest.TestCase):
         self.assertEqual(plan['movement']['description'].splitlines(),
                          [row[1] for row in learned['demands'] if row[0] == 'Movement options'])
 
-    def test_movement_count_is_calendar_not_watch(self):
+    def test_movement_count_requires_watch_evidence_in_the_block(self):
         self.program()
         self.place_movement()
         later = NOW + timedelta(hours=3)
-        self.health([session()], now=later)
-        plan = self.plan(later)
-        self.assertEqual(len(plan['fulfilment']['movement']['done']), 1)
-        self.assertEqual(plan['fulfilment']['movement']['remaining'], 3)
-        self.assertEqual(len(plan['context']['tasks']), 1)
+        for week, done in [([], 0), ([session()], 0), ([session(hour=10)], 1)]:
+            with self.subTest(week=week):
+                self.health(week, now=later)
+                plan = self.plan(later)
+                self.assertEqual(len(plan['fulfilment']['movement']['done']), done)
+                self.assertEqual(plan['fulfilment']['movement']['remaining'], 4 - done)
+                self.assertEqual(len(plan['context']['tasks']), 1)

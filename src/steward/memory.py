@@ -117,7 +117,9 @@ def journal(db, since=None, until=None, day=None, full=False):
     for r in db.execute("SELECT * FROM outbox WHERE state='sent'"):
         if inside(r['sent_at']):
             keys = [k[0] for k in db.execute('SELECT key FROM outbox_keys WHERE outbox_id=? ORDER BY key', (r['id'],))]
-            add('messages', {**{k:r[k] for k in ('topic','message_id','sent_at')}, 'told_key':keys[0] if keys else None, 'told_keys':keys, 'text':r['text'] if full else r['text'][:300]})
+            excerpt = not full and len(r['text']) > 300
+            add('messages', {**{k:r[k] for k in ('topic','message_id','sent_at')}, 'told_key':keys[0] if keys else None, 'told_keys':keys, 'text':r['text'] if full else r['text'][:300], 'excerpt':excerpt})
+            result['truncated'] |= excerpt
     from .notify import interrupt_records
     for r in interrupt_records(db):
         if inside(r['at']):
@@ -159,7 +161,7 @@ def file_days(db, now=None):
     for key in days(FIRST, local_day(now)):
         path = directory / (key + '.json')
         if not path.exists():
-            atomic_file(path, json.dumps(journal(db, day=key)).encode())
+            atomic_file(path, json.dumps(journal(db, day=key, full=True)).encode())
         with db:
             db.execute('INSERT OR IGNORE INTO journal_files VALUES (?,?)', (key, now.isoformat()))
         done.append(key)
@@ -217,7 +219,10 @@ def mirror(db):
 
 def write(db, layer, key, content, actor='owner', now=None):
     now = now or jobs.now_utc()
-    jobs.require(layer in CAPS and isinstance(content,str) and content.strip() and len(content.encode()) <= CAPS[layer], 'invalid memory or byte cap exceeded')
+    jobs.require(layer in CAPS, 'unknown memory layer ' + repr(layer) + '; layers: ' + ', '.join(CAPS))
+    jobs.require(isinstance(content,str) and content.strip(), 'empty memory content')
+    size = len(content.encode())
+    jobs.require(size <= CAPS[layer], f'{layer} memory is {size} bytes; cap is {CAPS[layer]}')
     if layer in ('lessons', 'synthesis'):
         jobs.require(key == {'lessons': 'lessons', 'synthesis': 'current'}[layer], 'invalid ' + layer + ' key')
     else:
@@ -344,15 +349,24 @@ def provocations(db, now=None, source=None):
 
 
 def experiments(db):
-    changes=[dict(r) for r in db.execute('SELECT * FROM changes ORDER BY rowid')]
-    undone={r['undo_of'] for r in changes if r['undo_of']}
-    result=[]
+    changes = [dict(r) for r in db.execute(
+        "SELECT * FROM changes WHERE summary GLOB 'experiment:*' OR id IN "
+        "(SELECT change_id FROM runs WHERE reason GLOB 'experiment:*') ORDER BY rowid")]
+    if not changes:
+        return []
+    undone = {r[0] for r in db.execute('SELECT undo_of FROM changes WHERE undo_of IS NOT NULL')}
+    closed = {identity for r in db.execute(
+        "SELECT summary FROM changes WHERE summary GLOB 'experiment closed:*' UNION ALL "
+        "SELECT reason FROM runs WHERE reason GLOB 'experiment closed:*'")
+        for identity in re.findall(r'[0-9a-f]{32}', r[0])}
+    reasons = {}
+    for identity, reason in db.execute("SELECT change_id,reason FROM runs WHERE reason GLOB 'experiment:*' ORDER BY rowid"):
+        reasons.setdefault(identity, reason)
+    result = []
     for r in changes:
-        reasons=[r['summary']]+[v[0] for v in db.execute('SELECT reason FROM runs WHERE change_id=?',(r['id'],))]
-        reason=next((s for s in reasons if s.startswith('experiment:')),None)
-        closed=any(s['summary'].startswith('experiment closed:') and r['id'] in s['summary'] for s in changes)
-        closed=closed or any(v[0].startswith('experiment closed:') and r['id'] in v[0] for v in db.execute('SELECT reason FROM runs'))
-        if reason and r['id'] not in undone and not closed:
-            end=re.search(r'\bends (\d{4}-\d{2}-\d{2})\b',reason)
-            result.append(dict(r,reason=reason,ends=end[1] if end else None))
+        if r['id'] in undone or r['id'] in closed:
+            continue
+        reason = r['summary'] if r['summary'].startswith('experiment:') else reasons[r['id']]
+        end = re.search(r'\bends (\d{4}-\d{2}-\d{2})\b', reason)
+        result.append(dict(r, reason=reason, ends=end[1] if end else None))
     return result

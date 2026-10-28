@@ -46,13 +46,15 @@ Wakes read soul and charter afresh; agent jobs read their capability afresh. Tic
 | `gsd` | `gsd worklist --json` | Freshness needs a landed cut and evidence for the job's ready-by promise. |
 | `qmd` | `qmd status --json`, `qmd feed` | Validate producer currency; advance arrival checkpoints only with a successful observation. |
 | `health` | `garmin today --json` | Use dated watch evidence and producer expiry; never trigger sync. |
-| `place` | `phone where --json` | Preserve named-place at/out/unknown; out or unknown is not home. |
+| `place` | `phone where --json` | Preserve named-place state, city evidence and compressed night runs; the model holds home in its synthesis. |
 | `machine` | systemd, disk and load reads | Dispatch must respect host capacity. |
 | `sol` | Observed Codex rollout rate-limit events | Expose measured headroom and observation time, not an invented spend allowance. |
 
 A sense carries `verdict`, `reason` and `as_of`: `fresh`, `stale` or `unknown`. Read age beyond twice its read interval is stale; producer-specific completeness and expiry checks also apply. Health and place are scheduling inputs, not wake events, and are excluded from the Page 2 intent view. An observation failure is not itself evidence that the world changed.
 
-Producer schemas are vendored in `contracts/vendor/` and validated on reads. They include `gsd.worklist.v1`, `gsd.runs.v1`, `gsd.closures.v1`, `qmd.status.v1`, `qmd.feed.v1`, `qmd.extract.v1`, `garmin.today.v1` and `phone.place.v1`.
+Producer schemas are vendored in `contracts/vendor/` and validated on reads. They include `gsd.worklist.v1`, `gsd.runs.v1`, `gsd.closures.v1`, `qmd.status.v1`, `qmd.feed.v1`, `qmd.extract.v1`, `garmin.today.v1` and `phone.place.v3`.
+
+The wake page's Calendar covers today and two full days. Ahead reaches 24 months (its exclusive coverage date is shown; beyond is unknown), with individual events through day 30 and recurring-series summaries further out. Its event lines have a 16 KiB bound and an explicit omitted-line count. Near calendars refresh per tick; the far view refreshes once per local day and never triggers a wake. Planning and Calendar B placement still use their existing window. Every capability may read `steward memory show synthesis current` for home and notable whereabouts.
 
 ### Calendar B: candidates, checker, apply
 
@@ -76,7 +78,7 @@ A job row has a written `justification`, release-bound `argv`, and `needs`: `rea
 
 Use `steward job add|edit|pause|resume|rm`, `steward run now JOB` and `steward run cancel RUN`. Calendar C reservations may be moved or cancelled with a reason, including near-term and repeated changes. Host-load/disk guards and the shared heavy lane still constrain dispatch. A failed ready-by run gets one retry, not an unbounded retry loop.
 
-`steward contract steward.job.v2` prints the runtime protocol (`steward.job.v1` remains available for old runtimes): jobs run through `batch-run` and `run-exec`, receive `STEWARD_RUN_DIR` and backlink variables, and write `records.jsonl`. Steward owns `manifest.json`, stdout/stderr tails, process-group deadlines and exit status. `steward contract steward.record.v1` prints record fields and learned-cost meanings.
+`steward contract steward.job.v2` prints the runtime protocol (`steward.job.v1` remains available for old runtimes): jobs run through `batch-run` and `run-exec`, receive `STEWARD_RUN_DIR` and backlink variables, and write `records.jsonl`. Steward owns `manifest.json`, stdout/stderr tails, process-group deadlines and exit status. `steward contract steward.record.v1` prints record fields and the weighted-token formula. Learned run costs (`cost_tokens`, job `cost.median_tokens`, and journal `tokens`) use weighted tokens from the same session reader as `summary.json`, counted once. Records supply cost only for runs without sessions; absent evidence is unknown. On the first writer open after the unit correction, finished historical costs are replaced by each archive's `summary.json` `tokens.weighted`, or unknown when unavailable. A `message_meta.cost_unit` marker makes this correction one-time; it does not change the schema.
 
 A capability is data plus prose, never an in-process plugin. Its frontmatter uses JSON-valued `name`, `reads`, `calls`, `record`, and optional `context`/`permits`; launch validation checks required tools and qmd sources. The job row owns cadence, model and delivery. `calls:` is the model shell's tool vocabulary and PATH (plus basic read tools), not a security boundary; absolute paths remain reachable. `permits` delegates authority, while destructive actions stay guarded in the owning CLI. Packets name `steward state` for interests and `steward told check KEY…` instead of preloading lists; missing tool facts become `unestablished` records, not improvised scripts. Fixed domain logic belongs in its own tool release. `jobs/` contains agent-run, backup and small existing helpers; it is not an ingestion framework.
 

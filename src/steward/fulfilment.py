@@ -1,5 +1,5 @@
 """Watch facts fulfil doses; calendar placements only reserve future sessions."""
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from math import ceil
 from fractions import Fraction
 
@@ -62,7 +62,7 @@ def validate_week(week):
 
 
 def fulfilment(spec, week, now, planned=(), unknown=None, week_start=None):
-    """Pure O(week + placements), first-match classification, no title/HR inference.
+    """Pure watch/placement accounting, first-match classification, no title/HR inference.
 
     done/planned contain the supporting facts, not just totals. remaining is unknown
     (None) on a held reading. Future weeks have no completed watch sessions yet.
@@ -73,7 +73,7 @@ def fulfilment(spec, week, now, planned=(), unknown=None, week_start=None):
     placements = [{k: p[k] for k in ('start', 'end', 'event_key')} for p in planned
                   if start <= instant(p['start']) < end]
     future = [p for p in placements if now <= instant(p['start'])]
-    movement = spec['kind'] in MOVEMENT_KINDS
+    movement = spec['kind'] in (*MOVEMENT_KINDS, 'movement')
     result = dict(done=[], planned=future, remaining=None, remaining_blocks=None,
                   complete=False, unclassified=[], unknown=unknown if movement else None)
     if spec['kind'] == 'endurance':
@@ -82,9 +82,16 @@ def fulfilment(spec, week, now, planned=(), unknown=None, week_start=None):
     if movement and unknown:
         return result
     done, unclassified = result['done'], result['unclassified']
-    if not movement:
+    if spec['kind'] == 'movement':
+        sessions = [(instant(s['start']), instant(s['start']) + timedelta(seconds=s['duration_s']))
+                    for s in week if s['duration_s'] is not None and s['duration_s'] > 0
+                    and start <= instant(s['start']) < min(now, end)]
+        done.extend(p for p in placements if instant(p['start']) < now
+                    and any(a < instant(p['end']) and instant(p['start']) < z
+                            for a, z in sessions))
+    elif not movement:
         done.extend(p for p in placements if instant(p['start']) < now)
-    for session in week if movement else ():
+    for session in week if spec['kind'] in MOVEMENT_KINDS else ():
         if not start <= instant(session['start']) < min(now, end):
             continue
         if session['type'] in ('strength_training', 'other'):  # owner 2026-10-21: "\"Other\", = strength"

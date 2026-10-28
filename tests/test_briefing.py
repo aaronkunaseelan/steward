@@ -79,7 +79,7 @@ class DayCloseTests(unittest.TestCase):
         for title in ('Done today', 'Next two days', 'Horizon', 'Long form'):
             self.assertIn('## Day close — ' + title, page)
         self.assertIn('unknown: gsd done not supplied', page)
-        self.assertIn('unknown: calendar coverage not supplied', page)
+        self.assertIn('See Ahead for future events and its observed coverage.', page)
         self.assertIn('unknown: gsd horizon not supplied', page)
         self.assertIn('handled is not proof of an answer', page)
 
@@ -148,14 +148,17 @@ class DayCloseTests(unittest.TestCase):
         self.assertIn('12:00 EEST change 0: change 0', page)
         self.assertEqual(page.count('12:00 EEST change 0: change 0'), 1)
         self.assertNotIn('unknown: gsd done not supplied', page)
-        self.assertIn('Tue 27 Oct 2026', page)
+        self.assertIn('See Ahead for future events and its observed coverage.', page)
 
     def test_horizon_keeps_calendar_events_beyond_next_two_days(self):
         from steward.briefing import render
         state = dict(moments=['day_close'], senses={'calendars': dict(status='ok', at=NOW.isoformat(),
-                     data={'events': [dict(summary='trip', start={'date': '2026-10-24'},
-                                           end={'date': '2026-10-25'})], 'to': '2026-10-26T00:00:00+03:00'})})
-        self.assertIn('trip', render(state, NOW, {}))
+                     data={'events': [], 'ahead': dict(status='ok', at=NOW.isoformat(),
+                         to='2028-10-20T00:00:00+03:00', events=[dict(id='trip', calendar='main',
+                             summary='trip', start={'date': '2026-10-24'}, end={'date': '2026-10-25'})])})})
+        page = render(state, NOW, {})
+        self.assertIn('trip', page.split('## Ahead', 1)[1].split('## Movement', 1)[0])
+        self.assertNotIn('trip', page.split('## Day close — Horizon', 1)[1])
 
 
 class FreshnessTests(unittest.TestCase):

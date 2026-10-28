@@ -4,7 +4,7 @@ from datetime import datetime, time
 import json
 import subprocess
 
-from . import jobs, memory, senses
+from . import jobs, memory, pages, senses
 from .contracts import ContractError, read
 
 
@@ -41,14 +41,14 @@ def r1(since, lo, hi, now, runner):
 
 
 def closures(since, runner):
-    """gsd's closure events at the closure's own time (gsd.closures.v1); None when the view is missing."""
+    """Keep the producer's coverage envelope alongside its closure events."""
     try:
-        return read('gsd.closures.v1', runner(['gsd', 'closures', '--since', since, '--json']))['closures']
+        return read('gsd.closures.v1', runner(['gsd', 'closures', '--since', since, '--json']))
     except (OSError, subprocess.SubprocessError, ValueError, ContractError):
         return None
 
 
-def item_blocks(db, lo, hi, now, events):
+def item_blocks(db, lo, hi, now, events, reason=None):
     """Rows for the owner's blocks with items: a block of a demand with items that started in the week and has ended."""
     specs = {}
     for r in db.execute('SELECT name, spec_json FROM demands ORDER BY version'):
@@ -67,7 +67,8 @@ def item_blocks(db, lo, hi, now, events):
             continue
         elapsed += 1
         day = memory.local_day(start)
-        page = db.execute('SELECT opened_at FROM pages WHERE slug=?', (f"prep-{r['demand']}-{day:%Y%m%d}",)).fetchone()
+        slug = pages.prep_slug(db, ('block', r['demand']), day)
+        page = db.execute('SELECT opened_at FROM pages WHERE slug=?', (slug,)).fetchone()
         opened += bool(page and page['opened_at'] and jobs.instant(page['opened_at']) < start)
         if events is None:
             continue
@@ -77,7 +78,7 @@ def item_blocks(db, lo, hi, now, events):
         if r['state'] == 'applied':
             applied += 1
             ignored += not closed
-    reason = None if events is not None else 'gsd closures view unavailable or invalid'
+    reason = reason or (None if events is not None else 'gsd closures view unavailable or invalid')
     return [
         row('blocks_used', None if reason else used, elapsed, reason=reason,
             definition=f"blocks with items ended in week with an item closed done on the block's {local_zone().key.rsplit('/', 1)[-1]} day, by gsd's closure time / blocks with items ended in week"),
@@ -128,11 +129,24 @@ def weekly(db, week=None, now=None, runner=senses.run):
                     reason=coverage, observed_count=len(finds & replies), observed_total=len(finds),
                     definition='Finds messages with a recorded owner reply by week end / sent Finds messages (digest counts once; not individual links; not proof of reading)'))
     rows.append(r1(start.isoformat(), lo, hi, now, runner))
-    events = None if coverage else closures(lo.isoformat(), runner)
-    for r in item_blocks(db, lo, hi, now, events):
+    envelope = None if coverage else closures(lo.isoformat(), runner)
+    closure_reason = 'gsd closures view unavailable or invalid' if envelope is None else None
+    events = None
+    if envelope is not None:
+        try:
+            covered = (envelope['cut']['until'] is not None
+                       and jobs.instant(envelope['since']) <= lo
+                       and min(jobs.instant(envelope['cut']['until']), jobs.instant(envelope['at'])) >= min(hi, now))
+        except (ValueError, TypeError):
+            covered = False
+        if covered:
+            events = envelope['closures']
+        else:
+            closure_reason = 'gsd closures coverage does not include evaluated window'
+    for r in item_blocks(db, lo, hi, now, events, closure_reason):
         rows.append(dict(r, status='unknown', reason=coverage, count=None, total=None) if coverage else r)
     rows.append(row('items_closed', None if events is None else sum(e['state'] == 'done' and inside(e['at']) for e in events),
-                    reason=coverage or (None if events is not None else 'gsd closures view unavailable or invalid'),
+                    reason=coverage or closure_reason,
                     definition="items closed done in week, by gsd's closure time (gsd.closures.v1)"))
     moved_interests = 0
     for r in db.execute('SELECT i.name, i.version, i.spec_json, c.at FROM interests i JOIN changes c ON c.id=i.change_id ORDER BY i.name, i.version'):

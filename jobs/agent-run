@@ -21,9 +21,10 @@ def main():
     db = sqlite3.connect((root / 'state.sqlite').as_uri() + '?mode=ro', uri=True)
     db.row_factory = sqlite3.Row
     try:
-        job = jobs.get(db, 'jobs', os.environ['STEWARD_JOB'])
-        spec = json.loads(job['spec_json'])
-        jobs.require(spec.get('capability') == name, 'job capability mismatch')
+        run = jobs.get(db, 'runs', os.environ['STEWARD_RUN_ID'])
+        jobs.require(run['job'] == os.environ['STEWARD_JOB'] and run['state'] == 'started', 'run context mismatch')
+        spec = json.loads(run['spec_json'])
+        jobs.require(spec.get('capability') == name, 'run capability mismatch')
     finally:
         db.close()
     context = {}
@@ -44,14 +45,14 @@ Authority: All Steward changes use these exact verbs:
 {command} interest set NAME [--spec FILE] (JSON stdin otherwise)
 {command} interest rm NAME
 {command} told check KEY…
-All capabilities may read steward state (interests); pull told checks as needed, not a preloaded key list.
+All capabilities may read steward state (interests) and steward memory show synthesis current (home and notable whereabouts); pull told checks as needed, not a preloaded key list.
 Code collects and renders; you judge relevance, priority and wording. Unknown is not a negative result.
 No improvised scripts; when a needed fact has no tool verb, write a record line {{"kind":"unestablished","what":…,"command_that_would_answer":…}} and carry on.
 {command} notify --topic Finds --deliver {spec['deliver']} --told-key KEY TEXT
 Write links as [label](https://…) with a short descriptive label; bare URLs are refused. Records still retain full source URLs.
-Read-only qmd and research CLI/API calls described below are allowed. No other Steward verbs beyond state and those above unless this capability has memory context: then journal, memory show|due|recall|write (day, week, month, lessons, synthesis), job edit|pause|resume|rm, run plan, interest rm, block demand edit|rm, undo and notify Today are also allowed.
+Read-only qmd and research CLI/API calls described below are allowed. No other Steward verbs beyond state, memory show synthesis current and those above unless this capability has memory context: then journal, memory show|due|recall|write (day, week, month, lessons, synthesis), job edit|pause|resume|rm, run plan, interest rm, block demand edit|rm, undo and notify Today are also allowed.
 {permissions}
-Declared tools: {json.dumps(meta['calls'])}
+Declared tools: {json.dumps(capabilities.tools(meta))}
 Only these tools/effects; --help gives syntax, not permission.
 Record fields: {json.dumps(meta['record'])}
 Write findings to {directory}/records.jsonl, one JSON object per line; retain full source URLs.
@@ -69,7 +70,7 @@ Context: {json.dumps(context)}
     path = directory / 'packet.md'
     path.write_text(packet)
     model = spec.get('model', jobs.SPEC_DEFAULTS['model'])
-    shell_args, shell_env = capabilities.shell_scope(model, directory, meta['calls'])
+    shell_args, shell_env = capabilities.shell_scope(model, directory, capabilities.tools(meta))
     identity = runtime.harness(['tty', 'run', *capabilities.AGENTS[model], '--no-accept', '-C', str(directory), str(path), *capabilities.VENDOR_ARGS.get(model, []), *shell_args], env=shell_env,
                                timeout=None, links_path=directory / 'links.json')
     print(json.dumps({'tty_run': identity}))

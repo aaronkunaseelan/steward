@@ -20,7 +20,7 @@ class PlaceVerdictTests(unittest.TestCase):
             self.save_healthy(st.db, now)
             messages.poll(st.db, now, {}, fetcher=lambda offset: [], telegram={'chat_id': -1})
             value = dict(fixture(), state='unknown', place=None, since=None,
-                         last_event=None, today=[])
+                         last=None, today=[])
             def runner(argv):
                 if argv == ['phone', 'where', '--json']:
                     return json.dumps(value)

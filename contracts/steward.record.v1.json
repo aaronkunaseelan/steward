@@ -8,7 +8,7 @@
   "type": "object",
   "properties": {
     "schema": {"const": "steward.record.v1", "description": "Optional on records; when present it must be this."},
-    "weighted_tokens": {"type": "number", "minimum": 0, "description": "Model tokens this record's work cost, in one unit for every job: input + output + 1.25 x cache_write + 0.1 x cache_read. Steward sums them over the run as its learned token cost. Integer or float."},
+    "weighted_tokens": {"type": "number", "minimum": 0, "description": "Weighted tokens this record's work cost: input + output + 1.25 x cache_write + 0.1 x cache_read. Integer or float. Steward sums these only when the run has no sessions; otherwise the session-derived weighted total is its learned cost, never added to these reports."},
     "model_calls": {"type": "integer", "minimum": 0, "description": "Model calls behind weighted_tokens."},
     "provider": {"enum": ["anthropic", "openai", "other"], "description": "Whose quota weighted_tokens spent (Claude subscription vs Sol pool)."},
     "terminated": {"type": "boolean", "description": "true when written during the TERM grace (the run hit max_minutes)."},

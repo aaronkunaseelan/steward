@@ -28,6 +28,14 @@ class MessagesTests(unittest.TestCase):
         guard.start()
         self.addCleanup(guard.stop)
 
+    def test_telegram_undo_routes_memory_changes(self):
+        from steward import memory
+        with writer(self.root) as st:
+            change = memory.write(st.db, 'synthesis', 'current', 'Fixture synthesis', now=NOW)
+            self.poll(st.db, [self.update(1, 'undo ' + change['change_id'])])
+            self.assertEqual(memory.show(st.db, 'synthesis', 'current'), [])
+        self.assertNotIn('Undo refused', self.sent[-1][1])
+
     def send(self, topic, text, **kw):
         self.sent.append((topic, text, kw))
         return len(self.sent)

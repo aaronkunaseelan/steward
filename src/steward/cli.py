@@ -299,16 +299,7 @@ def main(argv=None):
                     elif args.command == 'run':
                         report = jobs.run_verb(db, args.action, args.name, args.reason, getattr(args, 'at', None), actor=actor, owner_message=args.owner_message)
                     elif args.command == 'undo':
-                        from . import calendar_b
-                        if db.execute('SELECT 1 FROM drafts WHERE change_id=?', (args.change_id,)).fetchone():
-                            from . import drafts
-                            report = drafts.undo(db, args.change_id, actor=actor)
-                        elif db.execute('SELECT 1 FROM memories WHERE change_id=?', (args.change_id,)).fetchone():
-                            report = memory.undo(db, args.change_id, actor)
-                        elif db.execute('SELECT 1 FROM blocks WHERE change_id=? UNION SELECT 1 FROM demands WHERE change_id=?', (args.change_id, args.change_id)).fetchone():
-                            report = calendar_b.undo(db, settings, args.change_id, actor=actor)
-                        else:
-                            report = jobs.undo(db, args.change_id, actor=actor, owner_message=args.owner_message)
+                        report = jobs.undo(db, args.change_id, actor=actor, owner_message=args.owner_message, settings=settings)
                     elif args.command == 'inbox':
                         from .messages import done
                         report = done(db, args.ids, jobs.now_utc(), actor)

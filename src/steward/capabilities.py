@@ -135,9 +135,14 @@ def require_draft_permit(db):
     jobs.require('draft' in meta.get('permits', []), 'capability lacks draft permit')
 
 
+def tools(meta):
+    """One vocabulary for admission, packet and shell: common verbs, calls and CLI reads."""
+    return list(dict.fromkeys(['steward', *meta['calls'], *[r[4:] for r in meta['reads'] if r.startswith('cli:')]]))
+
+
 def validate(name, qmd_status=None):
     meta, _ = load(name)
-    for cli in meta['calls'] + [r[4:] for r in meta['reads'] if r.startswith('cli:')]:
+    for cli in tools(meta):
         jobs.require(shutil.which(cli), 'missing CLI: ' + cli)
     sources = [r[4:] for r in meta['reads'] if r.startswith('qmd:')]
     if sources:

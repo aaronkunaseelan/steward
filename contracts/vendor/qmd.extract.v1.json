@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "qmd.extract.v1",
   "title": "qmd extract --json",
-  "description": "Pure bytes-to-text extraction: no archive, queue, state or index. Unknown fields are null.",
+  "description": "Extract bytes from a path, stdin (-) or HTTP(S) URL: no archive, queue, state or index. URL input uses the shared link fetcher. Unknown fields are null. Article metadata and fetch outcomes are optional v1 additions; producers emit them, older v1 payloads may omit them.",
   "x-owner": "qmd",
   "x-consumers": [
     "steward"
@@ -69,6 +69,42 @@
             "null"
           ],
           "minimum": 1
+        }
+      }
+    },
+    "title": {
+      "type": ["string", "null"],
+      "description": "Article title from web HTML, or null when unknown."
+    },
+    "author": {
+      "type": ["string", "null"],
+      "description": "Article author from web HTML, or null when unknown."
+    },
+    "published": {
+      "type": ["string", "null"],
+      "description": "Publication date as supplied by the extractor, or null when unknown."
+    },
+    "fetched": {
+      "type": ["object", "null"],
+      "description": "Shared fetch outcome; null for local input. Attempts include tunnel startup time and survive queued retries.",
+      "required": ["via", "status", "final_url", "attempts"],
+      "properties": {
+        "via": {"enum": ["direct", "mullvad"]},
+        "status": {"type": ["integer", "null"], "description": "Last HTTP status; null before a response."},
+        "final_url": {"type": "string", "description": "Address after redirects."},
+        "attempts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["via", "relay", "status", "error", "elapsed_s"],
+            "properties": {
+              "via": {"enum": ["direct", "mullvad"]},
+              "relay": {"type": ["string", "null"]},
+              "status": {"type": ["integer", "null"]},
+              "error": {"type": ["string", "null"]},
+              "elapsed_s": {"type": "number", "minimum": 0}
+            }
+          }
         }
       }
     },

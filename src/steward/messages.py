@@ -172,18 +172,11 @@ def poll(db, now, settings, sender=telegram_sender, fetcher=updates, telegram=No
                     candidates = [r[0] for r in db.execute('SELECT id FROM changes WHERE id LIKE ?', (prefix + '%',))]
                 jobs.require(len(candidates) == 1, 'undo target unknown or ambiguous; use a change id')
                 original = candidates[0]
-                from . import calendar_b
                 is_draft = db.execute('SELECT 1 FROM drafts WHERE change_id=?', (original,)).fetchone()
-                if is_draft:
-                    from . import drafts
-                    restored = drafts.undo(db, original, actor='owner', now=now)
-                elif db.execute('SELECT 1 FROM blocks WHERE change_id=? UNION SELECT 1 FROM demands WHERE change_id=?', (original, original)).fetchone():
-                    restored = calendar_b.undo(db, settings, original, now, 'owner')
-                else:
-                    restored = jobs.undo(db, original, now, 'owner')
+                restored = jobs.undo(db, original, now, 'owner', settings=settings)
                 subjects = [r[0] for r in db.execute('SELECT name FROM jobs WHERE change_id=? UNION SELECT job FROM runs WHERE change_id=?', (restored['change_id'], restored['change_id']))]
                 answer = ('Deleted Gmail draft' if is_draft else
-                          'Restored ' + (', '.join(subjects) or 'calendar change') + ' · undo ' + restored['change_id'][:8])
+                          'Restored ' + (', '.join(subjects) or 'change') + ' · undo ' + restored['change_id'][:8])
             except StateError as exc:
                 answer = 'Undo refused: ' + str(exc)
             except (ValueError, OSError, KeyError, TypeError):
