@@ -1,24 +1,77 @@
-#!/home/ubuntu/.local/share/steward/venv/bin/python3
-# Steward job: tell the owner in Talk when a La Poste parcel gets a new scan.
-# usage: parcel-watch CODE [SEEN_THROUGH_ISO]
+#!/usr/bin/python3.12
+# Tell the owner in Talk when a parcel gets a new 17TRACK scan.
 # The told key is the newest event (code + date), so each scan is told once.
 # Events at or before SEEN_THROUGH_ISO were already seen by the owner.
 import argparse
-import json, os, subprocess, sys
+import json
+import os
+import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from steward.timing import owner_time
 from steward.settings import local_zone, zone
-from curl_cffi import requests
 
-STEWARD = os.environ.get("STEWARD_BIN", "/home/ubuntu/.local/bin/steward")
+STEWARD = os.environ.get('STEWARD_BIN', '/home/ubuntu/.local/bin/steward')
+API = 'https://api.17track.net/track/v2.4/'
+
+
+class Track17Error(RuntimeError):
+    def __init__(self, code, message):
+        super().__init__(f'17TRACK {code}: {message}')
+        self.code = code
+
+
+def api(action, parcel, token):
+    request = Request(API + action, data=json.dumps([parcel]).encode(),
+                      headers={'Content-Type': 'application/json', '17token': token})
+    try:
+        with urlopen(request, timeout=60) as response:
+            if not 200 <= response.status < 300:
+                raise RuntimeError(f'17TRACK {action}: HTTP {response.status}')
+            try:
+                body = json.load(response)
+            except json.JSONDecodeError:
+                raise RuntimeError(f'17TRACK {action}: invalid JSON response') from None
+    except HTTPError as error:
+        raise RuntimeError(f'17TRACK {action}: HTTP {error.code}') from None
+    if body['code'] != 0:
+        errors = body.get('data', {}).get('errors', [])
+        message = '; '.join(f"{e['code']}: {e['message']}" for e in errors)
+        raise Track17Error(body['code'], message or body.get('message', 'request failed'))
+    data = body['data']
+    if data['rejected']:
+        error = data['rejected'][0]['error']
+        raise Track17Error(error['code'], error['message'])
+    accepted = data['accepted']
+    if len(accepted) != 1 or accepted[0]['number'] != parcel['number']:
+        raise RuntimeError(f'17TRACK {action}: no unique result for {parcel["number"]}')
+    return accepted[0]
+
+
+def tracking(parcel, token):
+    try:
+        return api('gettrackinfo', parcel, token)['track_info']
+    except Track17Error as error:
+        if error.code != -18019902:  # Not registered: register once, never delete/re-register.
+            raise
+    try:
+        api('register', parcel, token)
+    except Track17Error as error:
+        if error.code != -18019901:  # A concurrent registration is also success.
+            raise
+    return api('gettrackinfo', parcel, token)['track_info']
+
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('code')
     parser.add_argument('seen_through', nargs='?')
+    parser.add_argument('--carrier', type=int, help='17TRACK carrier key; omit for auto-detection')
     parser.add_argument('--source-timezone', required=True)
     parser.add_argument('--source-label', required=True)
     parser.add_argument('--route', required=True)
@@ -26,53 +79,65 @@ def main():
     parser.add_argument('--partner-url')
     parser.add_argument('--partner-link-label', default='tracking')
     args = parser.parse_args()
+    token = os.environ.get('TRACK17_TOKEN')
+    if not token or not token.strip():
+        raise RuntimeError('missing TRACK17_TOKEN')
     source_zone = zone(args.source_timezone)
     code = args.code
     seen_through = datetime.fromisoformat(args.seen_through) if args.seen_through else None
-    try:
-        s = requests.get(f"https://www.laposte.fr/ssu/sun/back/suivi-unifie/{code}?lang=en",
-                         impersonate="chrome", headers={"Accept": "application/json"}, timeout=60).json()[0]["shipment"]
-    except Exception as e:
-        print(f"parcel read failed: {type(e).__name__}", file=sys.stderr)
-        sys.exit(1)
+    if seen_through and seen_through.utcoffset() is None:
+        seen_through = seen_through.replace(tzinfo=source_zone)
+    parcel = {'number': code}
+    if args.carrier is not None:
+        parcel['carrier'] = args.carrier
+    info = tracking(parcel, token)
+    if not isinstance(info, dict):
+        raise RuntimeError('17TRACK: missing track_info')
+    # 17TRACK owns the newest event across the origin and destination carriers.
+    event = info['latest_event']
+    latest = None
+    if event:
+        source = datetime.fromisoformat(event['time_iso'])
+        if source.utcoffset() is None:
+            source = source.replace(tzinfo=source_zone)
+        latest = {'code': event.get('sub_status') or event.get('stage') or event['description'],
+                  'date': source.isoformat(), 'label': event['description']}
+    final = info['latest_status']['status'] == 'Delivered'
+    key = f"parcel:{code}:{latest['code']}:{latest['date']}" if latest else f'parcel:{code}:none'
+    record = {'schema': 'steward.record.v1', 'code': code, 'final': final, 'latest': latest, 'key': key}
 
-    events = sorted(s.get("event", []), key=lambda e: e["date"])
-    latest = events[-1] if events else None
-    final = bool(s.get("isFinal"))
-    key = f"parcel:{code}:{latest['code']}:{latest['date']}" if latest else f"parcel:{code}:none"
-    record = {"schema": "steward.record.v1", "code": code, "final": final, "latest": latest, "key": key}
-
-    checked = subprocess.run([STEWARD, "told", "check", key], capture_output=True, text=True)
+    checked = subprocess.run([STEWARD, 'told', 'check', key], capture_output=True, text=True)
     print(checked.stdout, checked.stderr)
     if checked.returncode != 0:
         sys.exit(1)
     told = json.loads(checked.stdout)[key]
-    if latest and seen_through and datetime.fromisoformat(latest["date"]) <= seen_through:
+    if latest and seen_through and source <= seen_through:
         told = True
-    record["told_before"] = told
+    record['told_before'] = told
 
     if latest and not told:
-        source = datetime.fromisoformat(latest['date'])
-        if source.utcoffset() is None:
-            source = source.replace(tzinfo=source_zone)
         when = source.astimezone(source_zone).strftime('%Y-%m-%d %H:%M')
         text = f"Parcel {code} ({args.route}): {latest['label']} ({when} {args.source_label} ({owner_time(source, '%H:%M')} {local_zone().key.rsplit('/', 1)[-1]}))."
         if final:
             text += " Tracking shows it as final; I'll stop watching."
-        elif s.get("contextData", {}).get("partner") and args.partner_label and args.partner_url:
+        elif args.partner_label and args.partner_url:
             text += ' ' + args.partner_label.format(code=code) + ': [' + args.partner_link_label + '](' + args.partner_url + ')'
-        sent = subprocess.run([STEWARD, "notify", "--topic", "Talk",
-                               "--deliver", "immediate", "--told-key", key, text],
+        sent = subprocess.run([STEWARD, 'notify', '--topic', 'Talk',
+                               '--deliver', 'immediate', '--told-key', key, text],
                               capture_output=True, text=True, env=dict(os.environ, STEWARD_ACTOR='model'))
         print(sent.stdout, sent.stderr)
-        record["notified"] = sent.returncode == 0
+        record['notified'] = sent.returncode == 0
 
-    with open(os.path.join(os.environ.get("STEWARD_RUN_DIR", "."), "records.jsonl"), "a") as f:
-        f.write(json.dumps(record) + "\n")
+    with open(os.path.join(os.environ.get('STEWARD_RUN_DIR', '.'), 'records.jsonl'), 'a') as f:
+        f.write(json.dumps(record) + '\n')
 
 
 try:
     main()
 except Exception as error:
-    print('parcel-watch: ' + type(error).__name__, file=sys.stderr)
+    message = f'{type(error).__name__}: {error}'
+    token = os.environ.get('TRACK17_TOKEN')
+    if token:
+        message = message.replace(token, '[redacted]')
+    print('parcel-watch: ' + message, file=sys.stderr)
     sys.exit(1)

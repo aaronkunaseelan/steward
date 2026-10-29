@@ -1,7 +1,7 @@
 # Configuration
 
-Python 3.12 and IANA tzdata are required. Runtime is stdlib-only; parcel jobs
-also need `jobs/requirements.txt`. Commands require their producer CLIs on PATH:
+Python 3.12 and IANA tzdata are required. Runtime, including parcel jobs, is
+stdlib-only. Commands require their producer CLIs on PATH:
 gog, gsd, qmd, garmin, phone, tty, batch-run, rclone (as used).
 Settings: `$XDG_CONFIG_HOME/steward/config.toml` (default `~/.config/steward`);
 CLI `--config FILE` overrides it. Unknown keys or invalid types fail validation.
@@ -67,7 +67,29 @@ Job context: `STEWARD_RUN_DIR` (output dir), `STEWARD_STATE` (state),
 `STEWARD_ACTOR` (default owner), `STEWARD_DELIVER` (default digest).
 `STEWARD_BIN` selects the parcel helper CLI (default `/home/ubuntu/.local/bin/steward`).
 Parcel job argv supplies `--source-timezone`, `--source-label`, `--route`;
-optional `--partner-label`, `--partner-url`, `--partner-link-label` format delivery info.
-The parcel job interpreter is `/home/ubuntu/.local/share/steward/venv/bin/python3`;
-adapt its shebang and default CLI path when installing on another host.
+optional `--partner-label`, `--partner-url`, `--partner-link-label` add a carrier link
+on non-final scans (no provider-specific handoff flag). An optional positional
+`SEEN_THROUGH_ISO` suppresses scans already seen. Times use the API's offset, or the
+explicit source timezone if absent; messages show source and owner-local time.
+The parcel job interpreter is `/usr/bin/python3.12`; adapt its shebang and default
+CLI path when installing on another host. No dedicated venv or curl dependency.
+
+`parcel-watch` reads [17TRACK v2.4](https://api.17track.net/en/doc) via POST
+`gettrackinfo`. It requires `TRACK17_TOKEN` in its environment: put the key only in
+this job's own mode-0600 `env_file`, never the tick/wake units or shared credentials.
+Missing token, HTTP status and API error code/message fail visibly without headers
+or the token. `--carrier KEY` selects a 17TRACK carrier (ELTA 7071, ELTA Courier
+100179, La Poste/Colissimo 6051); omit it for detection. The job uses the API's
+`latest_event` (sub-status/stage as event code, description and offset timestamp)
+and treats `Delivered` as final. It retains the told key and records.jsonl shape;
+a new final scan says it will stop watching, as before (it does not mutate the job).
+
+At the watched-parcel cadence of roughly 2 h 20 min, each normal run makes one
+`gettrackinfo` call. Only error -18019902 (not registered) triggers `register` then
+another `gettrackinfo`: three calls that first run, one thereafter. Registration
+error -18019901 (already registered) is success. No local registration cache, delete,
+retrack or carrier-change calls; no extra translation service. Registration consumes
+the number's quota once while auto-tracked; deleting and re-registering charges again.
+The owner creates the account/key; the supervisor makes the first real call.
+
 Backup job `--remote` overrides `backup_remote`; `--no-upload` stays local.
