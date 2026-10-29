@@ -9,6 +9,34 @@ NOW = datetime(2026, 10, 20, 9, tzinfo=timezone.utc)
 class PageTests(unittest.TestCase):
     setUp = use_settings
 
+    def test_run_reflections_reach_compute_and_wake_index(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from steward import briefing, records
+        from steward.contracts import issues
+        with tempfile.TemporaryDirectory() as root:
+            manifest = Path(root) / 'manifest.json'
+            path = manifest.with_name('records.jsonl')
+            words = [dict(agent='a', text='Dates changed.', step='steady-test'),
+                     dict(agent='r1', text='A missed commitment.')]
+            record = dict(schema='steward.record.v1', reflections=words)
+            self.assertEqual(issues(records.SCHEMA, record), [])
+            path.write_text(json.dumps(record) + '\n')
+            state = dict(runs=[dict(run_id='test', job='gsd-steady', state='succeeded',
+                                   planned_for=NOW.isoformat(), manifest=str(manifest))])
+            receipt = {}
+            page = briefing.render(state, NOW, receipt)
+            self.assertIn('Dates changed.', page)
+            self.assertIn('A missed commitment.', page)
+            info = briefing.section_info(page, receipt)
+            self.assertIn('Compute:', briefing.wake_index(page, info, {}, 'test', []))
+            # Legacy records without words remain valid and show no reflection.
+            path.write_text(json.dumps(dict(schema='steward.record.v1')) + '\n')
+            self.assertEqual(records.reflections(str(manifest)), [])
+            path.write_text(json.dumps(dict(reflections='bad')) + '\n')
+            self.assertIn('unknown: run record violates', briefing.render(state, NOW, {}))
+
     def test_known_absence_is_not_failed_reading(self):
         from steward.briefing import render
         from steward.state import writer

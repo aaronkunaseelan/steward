@@ -6,7 +6,7 @@ from pathlib import Path
 import re
 
 from .state import StateError
-from . import memory
+from . import memory, records
 
 
 def sections(text, spans=None):
@@ -299,7 +299,8 @@ def render(state, now, receipt):
     runs = state.get('runs', state.get('last_runs', []))
     today = [r for r in runs if start <= instant(r.get('started_at') or r['planned_for']) < start + timedelta(days=1)]
     section('Compute', dict(plan=state.get('calendar_c', []), jobs=state.get('jobs', []),
-                            today=[{k: r.get(k) for k in ('run_id', 'job', 'state', 'planned_for', 'started_at', 'ended_at', 'reason')} for r in today],
+                            today=[dict({k: r.get(k) for k in ('run_id', 'job', 'state', 'planned_for', 'started_at', 'ended_at', 'reason')},
+                                        reflections=records.reflections(r.get('manifest'))) for r in today],
                             failures=[{k: r.get(k) for k in ('run_id', 'job', 'ended_at', 'reason')} for r in runs if r['state'] == 'failed'],
                             sol=data('sol')), ('sol',))
     section('Finds waiting', state.get('finds_waiting', []))

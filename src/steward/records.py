@@ -7,6 +7,26 @@ from .contracts import issues, load
 SCHEMA = load('steward.record.v1')
 
 
+def reflections(manifest):
+    """Read job-authored words through the record contract, not job internals."""
+    from pathlib import Path
+    if not manifest:
+        return []
+    path = Path(manifest).with_name('records.jsonl')
+    if not path.exists():
+        return []
+    result = []
+    try:
+        for line in path.read_text().splitlines():
+            record = json.loads(line)
+            if issues(SCHEMA, record):
+                return 'unknown: run record violates steward.record.v1'
+            result.extend(record.get('reflections', []))
+    except (OSError, ValueError, UnicodeError):
+        return 'unknown: run records unreadable'
+    return result
+
+
 def inspect(directory):
     tokens, errors = [], []
     path = directory / 'records.jsonl'

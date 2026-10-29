@@ -12,6 +12,7 @@
     "model_calls": {"type": "integer", "minimum": 0, "description": "Model calls behind weighted_tokens."},
     "provider": {"enum": ["anthropic", "openai", "other"], "description": "Whose quota weighted_tokens spent (Claude subscription vs Sol pool)."},
     "terminated": {"type": "boolean", "description": "true when written during the TERM grace (the run hit max_minutes)."},
+    "reflections": {"type": "array", "description": "Optional free-form reflections from a job’s agents, carried as run facts for the wake briefing.", "items": {"type": "object", "required": ["agent", "text"], "properties": {"agent": {"type": "string"}, "text": {"type": "string"}, "step": {"type": "string"}}}},
     "links": {"type": "array", "items": {"type": "object"}, "description": "Backlinks: {tty_run}, {session} or {url} objects, full URLs and native ids only."}
   }
 }
