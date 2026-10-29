@@ -1,4 +1,5 @@
 """Deterministic tick and isolated execution; external effects are injectable."""
+from .errors import safe_reason
 from datetime import datetime, timedelta
 import fcntl
 import json
@@ -492,7 +493,7 @@ def execute(root, run_id, data=None, clock=now_utc):
                                 if ref.get('tty_run'):
                                     subprocess.run(['tty', 'stop', ref['tty_run']], capture_output=True, timeout=30)
                     except (OSError, ValueError, subprocess.SubprocessError) as exc:
-                        collection_error = 'unknown: tty stop ' + type(exc).__name__
+                        collection_error = 'unknown: tty stop ' + safe_reason(exc)
             except OSError:
                 pass
             for stream, name in ((out, 'stdout.txt'), (err, 'stderr.txt')):
@@ -672,7 +673,7 @@ def archive_attempt(archiver, *args, **kwargs):
         meta = archiver(*args, **kwargs)
         return 'complete' if meta['complete'] else meta.get('reason', 'unknown: transcript collection incomplete')
     except (OSError, ValueError, KeyError, TypeError) as exc:
-        return 'unknown: transcript collection ' + type(exc).__name__
+        return 'unknown: transcript collection ' + safe_reason(exc)
 
 
 def learned_cost(manifest, directory=None):

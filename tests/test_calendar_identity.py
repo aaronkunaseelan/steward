@@ -130,7 +130,7 @@ class CalendarIdentityTests(unittest.TestCase):
                     with self.assertRaises(senses.ReadNotFound):
                         senses.run(['gog', '--readonly', 'calendar', 'event', 'schedule', 'event-id'])
                 else:
-                    with self.assertRaises(ValueError) as error:
+                    with self.assertRaises(subprocess.CalledProcessError) as error:
                         senses.run(['gog', '--readonly', 'calendar', 'event', 'schedule', 'event-id'])
                     self.assertNotIsInstance(error.exception, senses.ReadNotFound)
         with patch('steward.senses.subprocess.run', side_effect=FileNotFoundError('gog')):

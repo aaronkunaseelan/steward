@@ -1,4 +1,5 @@
 """Small, Worker-mediated evidence pages; no bucket credentials on the host."""
+from .errors import safe_reason
 import base64
 from datetime import timedelta
 import hashlib
@@ -249,7 +250,7 @@ def prep_header(db, items, block, now, runner):
     try:
         raw = senses.worklist(runner)
     except (ValueError, OSError, subprocess.SubprocessError) as exc:
-        reason = str(exc) if isinstance(exc, senses.ContractError) else 'read failed: ' + type(exc).__name__
+        reason = str(exc) if isinstance(exc, senses.ContractError) else 'read failed: ' + safe_reason(exc)
         return '\n'.join(lines + ['gsd: unknown (' + reason + ')', 'gsd as of unknown']) + '\n\n'
     projects = {p['id']: p['name'] for p in raw['projects']}
     open_items = {i['id']: i for i in raw['items']}

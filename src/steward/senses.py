@@ -1,4 +1,5 @@
 """Read-only, bounded observations. Failures never imply an empty source."""
+from .errors import safe_reason
 from datetime import date, datetime, timedelta, timezone
 import calendar as month_calendar
 import hashlib
@@ -30,7 +31,7 @@ def run(argv):
     if result.returncode:
         if argv[0] == 'gog' and result.returncode == 5:
             raise ReadNotFound('provider identity missing')
-        raise ValueError('external command failed')
+        raise subprocess.CalledProcessError(result.returncode, argv)
     return result.stdout
 
 
@@ -90,7 +91,7 @@ def calendar_ahead(ids, now, runner, previous):
                   for event in calendar_events(calendar, calendar_list(calendar, start, end, runner), ids[0])]
         return dict(coverage, status='ok', events=events)
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
-        return dict(coverage, status='unknown', reason='read failed: ' + type(exc).__name__)
+        return dict(coverage, status='unknown', reason='read failed: ' + safe_reason(exc))
 
 
 def calendars(settings, now, runner, deadlines=(), tracked=None, *, ahead=False, previous=None):
@@ -547,7 +548,7 @@ def collect(root, settings, now, runner=run, rollout_root=None):
             observations[name] = dict(status='unknown', reason=str(exc))
         except (OSError, ValueError, KeyError, TypeError, StopIteration, subprocess.SubprocessError) as exc:
             # Exception messages may contain command output, argv or owner data.
-            reason = 'missing configuration or response field' if isinstance(exc, KeyError) else 'read failed: ' + type(exc).__name__
+            reason = 'missing configuration or response field' if isinstance(exc, KeyError) else 'read failed: ' + safe_reason(exc)
             observations[name] = dict(status='unknown', reason=reason)
     return observations
 

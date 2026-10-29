@@ -52,6 +52,40 @@ class JobsTests(unittest.TestCase):
         return runtime.tick(self.root, self.data, clock=lambda: at,
                             **{'sender': lambda *a, **k: 1, 'update_fetcher': lambda offset: [], 'telegram': {'chat_id': 1, 'owner_user_id': 2, 'topics': {'Talk': 6}}, 'launcher': self.launched.append, 'wake_starter': lambda: None, 'load_reader': lambda: (0.1, 20 * 1024**3), 'lock_reader': lambda: False, **extra})
 
+    def test_job_list_is_read_only_and_returns_current_stored_specs(self):
+        self.add('active')
+        self.add('paused')
+        self.add('removed')
+        with writer(self.root) as store:
+            jobs.job_verb(store.db, 'pause', 'paused', now=NOW)
+            jobs.job_verb(store.db, 'edit', 'active', spec(justification='changed'), now=NOW)
+            jobs.job_verb(store.db, 'rm', 'removed', now=NOW)
+            stored = {r['name']: json.loads(r['spec_json']) for r in jobs.current(store.db, 'jobs')}
+        before = (self.root / 'state.sqlite').read_bytes()
+        for flags in ([], ['--json']):
+            output = io.StringIO()
+            with patch.dict('os.environ', STEWARD_ACTOR=''), redirect_stdout(output):
+                self.assertEqual(main(['job', 'list', '--state', str(self.root), *flags]), 0)
+            report = json.loads(output.getvalue())
+            self.assertEqual(report['schema'], 'steward.jobs.v1')
+            self.assertEqual(report['jobs'], [dict(id=name, state=state, spec=stored[name])
+                                            for name, state in [('active', 'active'), ('paused', 'paused')]])
+        self.assertEqual((self.root / 'state.sqlite').read_bytes(), before)
+
+    def test_job_spec_missing_path_is_named_and_help_explains_stdin(self):
+        source = '{"not": "a path"}'
+        self.add()
+        output = io.StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(main(['job', 'edit', 'test', '--state', str(self.root), '--spec', source]), 2)
+        self.assertIn(source, json.loads(output.getvalue())['error'])
+        self.assertIn('file not found', output.getvalue())
+        output = io.StringIO()
+        with redirect_stdout(output), self.assertRaises(SystemExit):
+            main(['job', 'edit', '--help'])
+        self.assertIn('JSON file path', output.getvalue())
+        self.assertIn('stdin', output.getvalue())
+
     def test_due_reservation_rechecks_gap_after_manual_success(self):
         self.add(min_gap='4h', needs={'max_staleness': '1d'}, recurring=False)
         manual = self.run_now()

@@ -1,4 +1,5 @@
 """Steward-owned, lossless session copies. No database migrations or producer stores."""
+from .errors import safe_reason
 from datetime import datetime, timedelta
 import fcntl
 import json
@@ -129,7 +130,7 @@ def _archive(directory, header, refs, now=None, home=None):
                     resolved.append(session)
             except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
                 missing += 1
-                header = dict(header, reason='session collection unknown: ' + type(exc).__name__)
+                header = dict(header, reason='session collection unknown: ' + safe_reason(exc))
         if missing:
             # Keep partial copies, but never publish missing sessions as an empty success.
             header = dict(header, complete=False)

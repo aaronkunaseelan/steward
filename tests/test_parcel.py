@@ -128,9 +128,24 @@ class ParcelTests(unittest.TestCase):
                          date='2026-10-28T12:00:00+02:00', label='Shipment in transit'))
         self.assertEqual(repeated['latest'], record['latest'])
         text = self.calls[1][-1]
-        self.assertIn('12:00 Greek time (12:00 EET Athens)', text)
+        self.assertIn('12:00 Greek time).', text)
+        self.assertEqual(text.count('12:00'), 1)
         self.assertIn(f'Synthetic carrier {CODE}: [tracking](https://carrier.example.test/track)', text)
         self.assertIn(f'Parcel {CODE} (Synthetic route):', text)
+
+    def test_different_source_zone_keeps_owner_conversion(self):
+        self.argv[self.argv.index('--source-timezone') + 1] = 'Europe/Paris'
+        self.argv[self.argv.index('--source-label') + 1] = 'French time'
+        self.queue_history()
+        self.invoke()
+        self.assertIn('11:00 French time (12:00 EET Athens)', self.calls[1][-1])
+
+    def test_non_success_response_is_checked_before_parsing(self):
+        response = io.BytesIO(b'<html>ephemeral-test-token</html>')
+        response.status = 503
+        response.headers = {'Content-Type': 'text/html; charset=utf-8'}
+        with patch.object(self, 'open_http', return_value=response):
+            self.assert_failure('HTTP 503 text/html')
 
     def test_delivered_scan_says_stop_and_records_final(self):
         self.queue_history(history(status='Delivered'))
@@ -148,8 +163,8 @@ class ParcelTests(unittest.TestCase):
     def test_http_503_names_status_and_exits_one(self):
         for job in ('parcel-watch', 'elta-track'):
             with self.subTest(job=job):
-                self.responses = [HTTPError(BASE, 503, 'unavailable', {}, io.BytesIO(b'<html>secret</html>'))]
-                self.assert_failure('HTTP 503', job)
+                self.responses = [HTTPError(BASE, 503, 'ephemeral-test-token', {'Content-Type': 'text/html'}, io.BytesIO(b'<html>ephemeral-test-token</html>'))]
+                self.assert_failure('HTTP 503 text/html', job)
 
     def test_success_false_names_stage_and_exits_one(self):
         for job in ('parcel-watch', 'elta-track'):
@@ -216,7 +231,7 @@ class ParcelTests(unittest.TestCase):
                            '<tr><td>23/10/2026 12:00</td><td>Older scan</td><td>ATHENS</td></tr></table>'))
         self.invoke()
         self.assertEqual(self.records()[0]['latest']['date'], '2026-10-24T12:00:00+03:00')
-        self.assertIn('12:00 Greek time (12:00 EEST Athens)', self.calls[1][-1])
+        self.assertIn('12:00 Greek time).', self.calls[1][-1])
 
     def test_reader_outputs_token_free_json_without_steward_calls(self):
         self.queue_history()

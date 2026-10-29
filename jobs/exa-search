@@ -11,6 +11,8 @@ import json
 import os
 from pathlib import Path
 import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
+from steward.errors import safe_reason
 import urllib.request
 
 
@@ -44,5 +46,5 @@ def main():
 try:
     main()
 except Exception as error:
-    print('exa-search: ' + type(error).__name__, file=sys.stderr)
+    print('exa-search: ' + safe_reason(error), file=sys.stderr)
     sys.exit(1)

@@ -69,17 +69,17 @@ class SettingsTests(unittest.TestCase):
 
     def test_exception_reason_is_bounded_and_private(self):
         errors = [
-            (ValueError('invalid input\nprivate file contents'), 'ValueError: invalid input'),
-            (ValueError('x' * 400), 'ValueError: ' + 'x' * 200),
-            (ValueError('token=private-token'), 'ValueError: token="[REDACTED]"'),
+            (ValueError('invalid input\nprivate file contents'), 'ValueError'),
+            (ValueError('x' * 400), 'ValueError'),
+            (ValueError('token=private-token'), 'ValueError'),
             (FileNotFoundError(2, 'No such file or directory', 'private-path'),
-             'FileNotFoundError: No such file or directory'),
+             'FileNotFoundError: ENOENT'),
             (UnicodeDecodeError('utf-8', b'private-file-contents', 0, 1, 'bad byte'),
-             'UnicodeDecodeError: invalid text encoding'),
-            (KeyError('private-key'), 'KeyError: missing required key'),
+             'UnicodeDecodeError'),
+            (KeyError('private-key'), 'KeyError'),
             (subprocess.CalledProcessError(1, ['provider', 'private-env'],
                                            output='private output', stderr='private stderr'),
-             'CalledProcessError: external command failed'),
+             'CalledProcessError: exit 1'),
         ]
         with tempfile.TemporaryDirectory() as tmp:
             for exc, expected in errors:

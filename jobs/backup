@@ -11,6 +11,8 @@ import sqlite3
 import subprocess
 import tarfile
 import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
+from steward.errors import safe_reason
 import tempfile
 
 
@@ -72,5 +74,5 @@ if __name__ == '__main__':
         main()
     except Exception as error:
         # Public last stderr line: never exception text (may contain owner data).
-        print('backup: ' + type(error).__name__, file=sys.stderr)
+        print('backup: ' + safe_reason(error), file=sys.stderr)
         sys.exit(1)

@@ -1,4 +1,5 @@
 """Steward's intent/1 view for mech-d Page 2. No writes or producer calls."""
+from .errors import safe_reason
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
@@ -70,7 +71,7 @@ def ticks(now, runner=None, db=None):
                         '--since', '@' + str((now - timedelta(hours=24)).timestamp()), '--until', '@' + str(now.timestamp()),
                         '-o', 'json', '--no-pager'], capture_output=True, text=True, timeout=1, check=True).stdout.splitlines()
     except (OSError, subprocess.SubprocessError) as exc:
-        return dict(reason='tick journal unreadable: ' + type(exc).__name__)
+        return dict(reason='tick journal unreadable: ' + safe_reason(exc))
     for line in lines:
         if not line.startswith('{'):
             continue

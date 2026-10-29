@@ -46,6 +46,19 @@ class SensesTests(unittest.TestCase):
                 self.assertNotIn('data', result[name])
                 self.assertNotIn('secret', result[name]['reason'])
 
+    def test_calendar_empty_and_non_json_outputs_have_safe_distinct_reasons(self):
+        reasons = []
+        for output, expected in [('', 'empty output'),
+                                 ('<html>planted-secret</html>', 'non-JSON output (27 bytes)')]:
+            result = self.collect(lambda argv: output,
+                                  {'schedule_calendar_id': 'b', 'main_calendar_ids': []})
+            reason = result['calendars']['reason']
+            self.assertEqual(result['calendars']['status'], 'unknown')
+            self.assertIn(expected, reason)
+            self.assertNotIn('planted-secret', reason)
+            reasons.append(reason)
+        self.assertNotEqual(*reasons)
+
     def test_nonfinite_qmd_expiry_is_unknown(self):
         raw = fixture('qmd.status.v1')
         source = next(iter(raw['sources'].values()))
@@ -448,8 +461,11 @@ class SensesTests(unittest.TestCase):
         with patch('steward.senses.subprocess.run') as command:
             command.return_value = subprocess.CompletedProcess(['fixture'], 1, '', 'private')
             for argv, timeout in [(['fixture'], 60), (['qmd', 'status', '--json'], 30)]:
-                with self.subTest(argv=argv), self.assertRaisesRegex(ValueError, '^external command failed$'):
+                with self.subTest(argv=argv), self.assertRaises(subprocess.CalledProcessError) as error:
                     senses.run(argv)
+                self.assertEqual(error.exception.returncode, 1)
+                self.assertIsNone(error.exception.stderr)
+                self.assertIsNone(error.exception.output)
                 self.assertEqual(command.call_args.kwargs['timeout'], timeout)
             command.side_effect = subprocess.TimeoutExpired('private', 60, stderr='private')
             with self.assertRaises(subprocess.TimeoutExpired):

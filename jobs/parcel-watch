@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
+from steward.errors import safe_reason
 from steward.elta import EltaError, lookup
 from steward.timing import owner_time
 from steward.settings import local_zone, zone
@@ -56,7 +57,9 @@ def main():
 
     if latest and not told:
         when = source.astimezone(source_zone).strftime('%Y-%m-%d %H:%M')
-        text = f"Parcel {code} ({args.route}): {latest['label']} ({when} {args.source_label} ({owner_time(source, '%H:%M')} {local_zone().key.rsplit('/', 1)[-1]}))."
+        conversion = (f" ({owner_time(source, '%H:%M')} {local_zone().key.rsplit('/', 1)[-1]})"
+                      if source_zone != local_zone() else '')
+        text = f"Parcel {code} ({args.route}): {latest['label']} ({when} {args.source_label}{conversion})."
         if final:
             text += " Tracking shows it as final; I'll stop watching."
         elif args.partner_label and args.partner_url:
@@ -74,6 +77,6 @@ def main():
 try:
     main()
 except Exception as error:
-    message = str(error) if isinstance(error, EltaError) else f'{type(error).__name__}: parcel job failed'
+    message = str(error) if isinstance(error, EltaError) else f'{safe_reason(error)}: parcel job failed'
     print('parcel-watch: ' + message, file=sys.stderr)
     sys.exit(1)

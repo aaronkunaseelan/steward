@@ -51,6 +51,13 @@ def current(db, table):
     return [view_row(db, table, r) for r in db.execute(f'SELECT t.* FROM {table} t WHERE version=(SELECT max(version) FROM {table} WHERE {key}=t.{key}) ORDER BY t.rowid')]
 
 
+def list_jobs(db):
+    """Current stored specs, without effective-run defaults or removed history."""
+    return dict(schema='steward.jobs.v1', jobs=[
+        dict(id=row['name'], state=row['state'], spec=json.loads(row['spec_json']))
+        for row in sorted(current(db, 'jobs'), key=lambda row: row['name']) if row['state'] != 'removed'])
+
+
 def get(db, table, identity):
     key = 'name' if table in ('jobs', 'interests', 'moments') else 'skip_id' if table == 'tick_skips' else 'run_id'
     row = db.execute(f'SELECT * FROM {table} WHERE {key}=? ORDER BY version DESC LIMIT 1', (identity,)).fetchone()

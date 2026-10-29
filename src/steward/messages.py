@@ -1,4 +1,5 @@
 """Owner messages, moments and delivery, independent of model availability."""
+from .errors import safe_reason
 from .settings import local_zone
 from .memory import local_day
 import json
@@ -116,10 +117,10 @@ def poll(db, now, settings, sender=telegram_sender, fetcher=updates, telegram=No
         row = db.execute("SELECT value FROM message_meta WHERE key='offset'").fetchone()
         incoming = fetcher(int(row[0]) if row else 0)
     except Exception as exc:
-        # Provider text may contain the token: retain only the exception class.
+        # Provider text may contain the token: retain only safe structural facts.
         data = poll_status(db, now)
         health = dict(last_poll_ok_at=data['last_poll_ok_at'],
-                      last_error=dict(code=type(exc).__name__, at=now.isoformat()))
+                      last_error=dict(code=safe_reason(exc), at=now.isoformat()))
         incoming = None
     else:
         health = dict(last_poll_ok_at=now.isoformat(), last_error=None)

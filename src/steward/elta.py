@@ -12,6 +12,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from zoneinfo import ZoneInfo
+from .errors import safe_reason
 
 BASE = 'https://itemsearch.elta.gr/en-GB'
 SOURCE_ZONE = ZoneInfo('Europe/Athens')
@@ -86,10 +87,11 @@ def lookup(code, timeout=12, proxy=None):
         try:
             with opener.open(req, timeout=timeout) as response:
                 if not 200 <= response.status < 300:
-                    raise EltaError(f'ELTA {stage}: HTTP {response.status}')
+                    raise EltaError(f'ELTA {stage}: ' + safe_reason(
+                        urllib.error.HTTPError(req.full_url, response.status, '', response.headers, None)))
                 return response.read().decode('utf-8-sig')
         except urllib.error.HTTPError as error:
-            raise EltaError(f'ELTA {stage}: HTTP {error.code}') from None
+            raise EltaError(f'ELTA {stage}: ' + safe_reason(error)) from None
         except TimeoutError:
             raise EltaError(f'ELTA {stage}: request timed out') from None
         except urllib.error.URLError as error:
@@ -105,8 +107,8 @@ def lookup(code, timeout=12, proxy=None):
         stage = path.rsplit('/', 1)[-1]
         try:
             result = json.loads(body)
-        except ValueError:
-            raise EltaError(f'ELTA {stage}: invalid JSON response') from None
+        except ValueError as error:
+            raise EltaError(f'ELTA {stage}: invalid JSON response; ' + safe_reason(error)) from None
         if not isinstance(result, dict) or result.get('Success') is not True:
             raise EltaError(f'ELTA {stage}: Success false or missing')
         return result
@@ -151,7 +153,7 @@ def main():
         result = {'schema': 'parcel-tracking.v1', 'tracking_number': code, 'lookup_ok': False,
                   'fetched_at': dt.datetime.now(dt.timezone.utc).isoformat(),
                   'error_type': type(error).__name__,
-                  'error': str(error) if isinstance(error, EltaError) else 'ELTA: unexpected lookup failure; no parcel-status inference'}
+                  'error': str(error) if isinstance(error, EltaError) else safe_reason(error)}
     result['elapsed_seconds'] = round(time.monotonic() - started, 3)
     rendered = json.dumps(result, indent=2, ensure_ascii=False) + '\n'
     if args.out:

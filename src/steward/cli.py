@@ -96,15 +96,18 @@ def main(argv=None):
                     q.add_argument('change_id')
         if name in ('job', 'run'):
             sub = p.add_subparsers(dest='action', required=True)
-            for action in (('add', 'edit', 'pause', 'resume', 'rm') if name == 'job' else ('now', 'plan', 'cancel')):
+            for action in (('list', 'add', 'edit', 'pause', 'resume', 'rm') if name == 'job' else ('now', 'plan', 'cancel')):
                 q = sub.add_parser(action)
                 # Accept the state/config flags before or after the nested verb.
                 q.add_argument('--owner-message', type=int, help='inbox update id requesting this job or run change')
                 q.add_argument('--state', type=Path, default=argparse.SUPPRESS)
                 q.add_argument('--config', type=Path, default=argparse.SUPPRESS)
-                q.add_argument('name')
+                if action == 'list':
+                    q.add_argument('--json', action='store_true', help='print the read-only steward.jobs.v1 view')
+                else:
+                    q.add_argument('name')
                 if name == 'job' and action in ('add', 'edit'):
-                    q.add_argument('--spec', type=Path)
+                    q.add_argument('--spec', type=Path, help='JSON file path; omit to read JSON from stdin')
                 if name == 'run':
                     q.add_argument('--reason', required=action != 'now', default='explicit run now')
                     if action == 'plan':
@@ -211,14 +214,16 @@ def main(argv=None):
                 report = runtime.execute(args.state, args.run_id, args.data)
             elif args.command == 'inbox' and not (args.outstanding and args.action is None and not args.ids) and not (not args.outstanding and args.action == 'done' and args.ids):
                 raise StateError('use inbox --outstanding or inbox done ID…')
-            elif (args.command == 'inbox' and args.outstanding) or args.command in ('state', 'plan', 'told', 'journal') or (args.command == 'memory' and args.action != 'write') or (args.command == 'block' and args.block_action == 'plan'):
+            elif (args.command == 'job' and args.action == 'list') or (args.command == 'inbox' and args.outstanding) or args.command in ('state', 'plan', 'told', 'journal') or (args.command == 'memory' and args.action != 'write') or (args.command == 'block' and args.block_action == 'plan'):
                 # A read-only connection: state does not migrate or repair files.
                 path = args.state / 'state.sqlite'
                 db = sqlite3.connect(f'{path.as_uri()}?mode=ro', uri=True)
                 db.row_factory = sqlite3.Row
                 try:
                     from .planner import choices
-                    if args.command == 'inbox':
+                    if args.command == 'job':
+                        report = jobs.list_jobs(db)
+                    elif args.command == 'inbox':
                         from .messages import outstanding
                         report = outstanding(db)
                     elif args.command == 'journal':
@@ -294,7 +299,10 @@ def main(argv=None):
                     elif args.command == 'job':
                         spec = None
                         if args.action in ('add', 'edit'):
-                            spec = json.loads(args.spec.read_text()) if args.spec else json.load(sys.stdin)
+                            try:
+                                spec = json.loads(args.spec.read_text()) if args.spec else json.load(sys.stdin)
+                            except FileNotFoundError:
+                                raise StateError(f'--spec JSON file not found: {args.spec}') from None
                         report = jobs.job_verb(db, args.action, args.name, spec, actor=actor, owner_message=args.owner_message)
                     elif args.command == 'run':
                         report = jobs.run_verb(db, args.action, args.name, args.reason, getattr(args, 'at', None), actor=actor, owner_message=args.owner_message)
@@ -314,20 +322,8 @@ def main(argv=None):
         print(json.dumps({'status': 'rejected', 'error': str(exc)}), file=sys.stderr if args.command in ('intent', 'transcript', 'tick') else sys.stdout)
         return 2
     except (OSError, ValueError, TypeError, KeyError, OverflowError, sqlite3.Error, subprocess.SubprocessError) as exc:
-        from .transcripts import redact
-        # Subprocess strings include argv; OS/codec/key errors can include private inputs.
-        if isinstance(exc, subprocess.SubprocessError):
-            reason = 'external command failed'
-        elif isinstance(exc, OSError):
-            reason = exc.strerror or 'OS operation failed'
-        elif isinstance(exc, UnicodeError):
-            reason = 'invalid text encoding'
-        elif isinstance(exc, KeyError):
-            reason = 'missing required key'
-        else:
-            reason = str(exc)
-        reason = redact(reason).splitlines()[0] if reason else 'operation failed'
-        print(json.dumps({'status': 'rejected', 'error': f'{type(exc).__name__}: {reason[:200]}'}), file=sys.stderr if args.command in ('intent', 'transcript', 'tick') else sys.stdout)
+        from .errors import safe_reason
+        print(json.dumps({'status': 'rejected', 'error': safe_reason(exc)}), file=sys.stderr if args.command in ('intent', 'transcript', 'tick') else sys.stdout)
         return 2
     print(json.dumps(report, sort_keys=True))
     return 0
