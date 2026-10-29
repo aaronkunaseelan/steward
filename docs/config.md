@@ -69,27 +69,33 @@ Job context: `STEWARD_RUN_DIR` (output dir), `STEWARD_STATE` (state),
 Parcel job argv supplies `--source-timezone`, `--source-label`, `--route`;
 optional `--partner-label`, `--partner-url`, `--partner-link-label` add a carrier link
 on non-final scans (no provider-specific handoff flag). An optional positional
-`SEEN_THROUGH_ISO` suppresses scans already seen. Times use the API's offset, or the
-explicit source timezone if absent; messages show source and owner-local time.
+`SEEN_THROUGH_ISO` suppresses scans already seen. ELTA's offsetless timestamps are interpreted as Europe/Athens by the reader;
+messages show source and owner-local time. Use `--source-timezone Europe/Athens`
+and `--source-label "Greek time"` for ELTA.
 The parcel job interpreter is `/usr/bin/python3.12`; adapt its shebang and default
 CLI path when installing on another host. No dedicated venv or curl dependency.
 
-`parcel-watch` reads [17TRACK v2.4](https://api.17track.net/en/doc) via POST
-`gettrackinfo`. It requires `TRACK17_TOKEN` in its environment: put the key only in
-this job's own mode-0600 `env_file`, never the tick/wake units or shared credentials.
-Missing token, HTTP status and API error code/message fail visibly without headers
-or the token. `--carrier KEY` selects a 17TRACK carrier (ELTA 7071, ELTA Courier
-100179, La Poste/Colissimo 6051); omit it for detection. The job uses the API's
-`latest_event` (sub-status/stage as event code, description and offset timestamp)
-and treats `Delivered` as final. It retains the told key and records.jsonl shape;
-a new final scan says it will stop watching, as before (it does not mutate the job).
+`parcel-watch` reads [ELTA's public lookup](https://itemsearch.elta.gr/) using the
+same stdlib reader as `jobs/elta-track CODE`. Scope: international postal items
+known to ELTA, not every carrier. No account, key or job credential file is needed.
+Each run creates a fresh cookie session: GET `/en-GB/Query/Direct/CODE`, POST empty
+`/en-GB/Security/GetToken`, then POST form `codes[]=CODE` to
+`/en-GB/query/DirectList` with that session's token mapping as headers. Tokens and
+cookies stay in memory; only token-free JSON is returned. HTTP status, unsuccessful
+responses, identity mismatch and changed table markup fail with named reasons and
+exit 1, never a parcel-status claim. The standalone reader also accepts `--timeout`
+(seconds per request, default 12), `--proxy` (explicit, no fallback), and `--out`.
 
-At the watched-parcel cadence of roughly 2 h 20 min, each normal run makes one
-`gettrackinfo` call. Only error -18019902 (not registered) triggers `register` then
-another `gettrackinfo`: three calls that first run, one thereafter. Registration
-error -18019901 (already registered) is success. No local registration cache, delete,
-retrack or carrier-change calls; no extra translation service. Registration consumes
-the number's quota once while auto-tracked; deleting and re-registering charges again.
-The owner creates the account/key; the supervisor makes the first real call.
+The newest ELTA row supplies the label and date. ELTA supplies no event id, so the
+event code is its whitespace-normalized verbatim status text, stable across reads.
+The told key stays `parcel:<code>:<event-code>:<date>` and the record fields stay
+unchanged. Only the newest status equal to `Delivered` (case-insensitive) is final;
+`Received by customer abroad` is not delivery. A new final scan says it will stop
+watching; the script does not mutate the job. No scan means no notification.
+
+At the watched-parcel cadence of roughly 2 h 20 min, each successful run makes
+three sequential requests. No polling loop, cache, registration or retries. The
+source parser lives only in `src/steward/elta.py`, shipped in the immutable release;
+Probe's former reader is just a caller of the installed `jobs/elta-track`.
 
 Backup job `--remote` overrides `backup_remote`; `--no-upload` stays local.

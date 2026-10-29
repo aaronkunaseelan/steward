@@ -1,0 +1,10 @@
+#!/usr/bin/env python3
+"""Read ELTA's public tracking history; no Steward state or credentials required."""
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
+from steward.elta import main
+
+if __name__ == '__main__':
+    sys.exit(main())

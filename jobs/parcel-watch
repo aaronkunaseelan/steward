@@ -1,5 +1,5 @@
 #!/usr/bin/python3.12
-# Tell the owner in Talk when a parcel gets a new 17TRACK scan.
+# Tell the owner in Talk when a parcel gets a new ELTA scan.
 # The told key is the newest event (code + date), so each scan is told once.
 # Events at or before SEEN_THROUGH_ISO were already seen by the owner.
 import argparse
@@ -9,69 +9,19 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
-from urllib.error import HTTPError
-from urllib.request import Request, urlopen
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
+from steward.elta import EltaError, lookup
 from steward.timing import owner_time
 from steward.settings import local_zone, zone
 
 STEWARD = os.environ.get('STEWARD_BIN', '/home/ubuntu/.local/bin/steward')
-API = 'https://api.17track.net/track/v2.4/'
-
-
-class Track17Error(RuntimeError):
-    def __init__(self, code, message):
-        super().__init__(f'17TRACK {code}: {message}')
-        self.code = code
-
-
-def api(action, parcel, token):
-    request = Request(API + action, data=json.dumps([parcel]).encode(),
-                      headers={'Content-Type': 'application/json', '17token': token})
-    try:
-        with urlopen(request, timeout=60) as response:
-            if not 200 <= response.status < 300:
-                raise RuntimeError(f'17TRACK {action}: HTTP {response.status}')
-            try:
-                body = json.load(response)
-            except json.JSONDecodeError:
-                raise RuntimeError(f'17TRACK {action}: invalid JSON response') from None
-    except HTTPError as error:
-        raise RuntimeError(f'17TRACK {action}: HTTP {error.code}') from None
-    if body['code'] != 0:
-        errors = body.get('data', {}).get('errors', [])
-        message = '; '.join(f"{e['code']}: {e['message']}" for e in errors)
-        raise Track17Error(body['code'], message or body.get('message', 'request failed'))
-    data = body['data']
-    if data['rejected']:
-        error = data['rejected'][0]['error']
-        raise Track17Error(error['code'], error['message'])
-    accepted = data['accepted']
-    if len(accepted) != 1 or accepted[0]['number'] != parcel['number']:
-        raise RuntimeError(f'17TRACK {action}: no unique result for {parcel["number"]}')
-    return accepted[0]
-
-
-def tracking(parcel, token):
-    try:
-        return api('gettrackinfo', parcel, token)['track_info']
-    except Track17Error as error:
-        if error.code != -18019902:  # Not registered: register once, never delete/re-register.
-            raise
-    try:
-        api('register', parcel, token)
-    except Track17Error as error:
-        if error.code != -18019901:  # A concurrent registration is also success.
-            raise
-    return api('gettrackinfo', parcel, token)['track_info']
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('code')
     parser.add_argument('seen_through', nargs='?')
-    parser.add_argument('--carrier', type=int, help='17TRACK carrier key; omit for auto-detection')
     parser.add_argument('--source-timezone', required=True)
     parser.add_argument('--source-label', required=True)
     parser.add_argument('--route', required=True)
@@ -79,30 +29,19 @@ def main():
     parser.add_argument('--partner-url')
     parser.add_argument('--partner-link-label', default='tracking')
     args = parser.parse_args()
-    token = os.environ.get('TRACK17_TOKEN')
-    if not token or not token.strip():
-        raise RuntimeError('missing TRACK17_TOKEN')
     source_zone = zone(args.source_timezone)
-    code = args.code
+    code = args.code.strip().upper()
     seen_through = datetime.fromisoformat(args.seen_through) if args.seen_through else None
     if seen_through and seen_through.utcoffset() is None:
         seen_through = seen_through.replace(tzinfo=source_zone)
-    parcel = {'number': code}
-    if args.carrier is not None:
-        parcel['carrier'] = args.carrier
-    info = tracking(parcel, token)
-    if not isinstance(info, dict):
-        raise RuntimeError('17TRACK: missing track_info')
-    # 17TRACK owns the newest event across the origin and destination carriers.
+    info = lookup(code)
     event = info['latest_event']
     latest = None
     if event:
-        source = datetime.fromisoformat(event['time_iso'])
-        if source.utcoffset() is None:
-            source = source.replace(tzinfo=source_zone)
-        latest = {'code': event.get('sub_status') or event.get('stage') or event['description'],
-                  'date': source.isoformat(), 'label': event['description']}
-    final = info['latest_status']['status'] == 'Delivered'
+        source = datetime.fromisoformat(event['time'])
+        # ELTA has no event ids: its normalized verbatim status is the stable event code.
+        latest = {'code': event['status'], 'date': source.isoformat(), 'label': event['status']}
+    final = info['final']
     key = f"parcel:{code}:{latest['code']}:{latest['date']}" if latest else f'parcel:{code}:none'
     record = {'schema': 'steward.record.v1', 'code': code, 'final': final, 'latest': latest, 'key': key}
 
@@ -135,9 +74,6 @@ def main():
 try:
     main()
 except Exception as error:
-    message = f'{type(error).__name__}: {error}'
-    token = os.environ.get('TRACK17_TOKEN')
-    if token:
-        message = message.replace(token, '[redacted]')
+    message = str(error) if isinstance(error, EltaError) else f'{type(error).__name__}: parcel job failed'
     print('parcel-watch: ' + message, file=sys.stderr)
     sys.exit(1)

@@ -182,7 +182,7 @@ cd edge && npm ci && npm test
 
 Release outline: run tests, review the exact commit and configuration changes, back up state before schema changes, wait for active ticks/wakes to finish, archive the commit, atomically switch `current`, reload changed units and verify the observables above. Job entrypoints must resolve inside immutable tool releases; system interpreters or scratch scripts are not job entrypoints. Keep the live mind in its own git history.
 
-`jobs/backup` snapshots SQLite, memory and mind history, records object hashes and sizes, and optionally uploads through rclone; `--no-upload` keeps the snapshot local. `jobs/parcel-watch` uses the stdlib 17TRACK API client; its token comes only from `TRACK17_TOKEN` in the job's own `env_file`. Source-timezone, route, optional carrier key and partner labels are job arguments, not runtime policy. See [configuration](docs/config.md) for registration and credential details.
+`jobs/backup` snapshots SQLite, memory and mind history, records object hashes and sizes, and optionally uploads through rclone; `--no-upload` keeps the snapshot local. `jobs/parcel-watch` reads ELTA's public lookup through the shipped stdlib `jobs/elta-track` reader; no account or key is needed. Source-timezone, route and partner labels are job arguments, not runtime policy. See [configuration](docs/config.md) for the three-request protocol, timezone and event-key details.
 
 ## Licence
 
