@@ -5,6 +5,7 @@ import unittest
 from urllib.error import HTTPError, URLError
 
 from steward.errors import safe_reason
+from steward.state import StateError
 
 
 class FailureReasonTests(unittest.TestCase):
@@ -28,3 +29,11 @@ class FailureReasonTests(unittest.TestCase):
                 self.assertIn(expected, reason)
                 self.assertNotIn(secret, reason)
                 self.assertLessEqual(len(reason), 200)
+
+    def test_state_error_keeps_its_code_message(self):
+        self.assertEqual(safe_reason(StateError('harness execution failed: exit 1: usage or rate limit (429)')),
+                         'StateError: harness execution failed: exit 1: usage or rate limit (429)')
+        self.assertEqual(safe_reason(StateError('missing CLI: qmd')), 'StateError: missing CLI: qmd')
+        long = safe_reason(StateError('x' * 500))
+        self.assertEqual(len(long), 200)
+        self.assertTrue(long.startswith('StateError: xxx'))

@@ -25,9 +25,9 @@ interrupt_cap = 3                      # nonnegative daily audible message cap
 `telegram.toml` in the same config dir: `chat_id = -1`, `owner_user_id = 2`,
 and `[topics]` mapping Today, Changes, Finds, Alerts, Talk to integer thread ids.
 `telegram.env`: `STEWARD_TELEGRAM_BOT_TOKEN` (bot secret).
-`pages.env`: `STEWARD_PAGES_TOKEN` (API secret), `SESSION_SECRET` (edge cookie key).
-Edge deploy reads `~/.config/mech-d/credentials.json` key `PAGE_PASSWORD`;
-`edge/wrangler.toml` declares Worker name, R2 binding/bucket and deployment options.
+`pages.env`: `STEWARD_PAGES_TOKEN` (API secret, the only edge Worker secret). People open pages through
+Cloudflare Access on `steward.stations.work` (owner email, one-time PIN); the edge checks Access's token itself.
+`edge/wrangler.toml` declares Worker name, R2 binding/bucket and deployment options. It is deployment config and not exported; `edge/wrangler.example.toml` shows its shape.
 Do not commit credential files; use mode 0600. Examples omit secret values.
 
 Tick/wake units start through `python -m steward.service`. At each start its

@@ -19,7 +19,7 @@ class ExtraRunTests(unittest.TestCase):
     tick = test_jobs.JobsTests.tick
 
     def reserve(self, at=None):
-        at = at or NOW + timedelta(hours=13, minutes=20)
+        at = at or NOW + timedelta(hours=13)  # the default start for ready_by 05:00 with a 5-min bound
         with writer(self.root) as st:
             result = jobs.run_verb(st.db, 'plan', 'test', 'normal reservation',
                                    at.isoformat(), now=NOW)
@@ -104,7 +104,7 @@ class ExtraRunTests(unittest.TestCase):
 
     def test_extra_success_does_not_serve_ready_by(self):
         self.add(needs={'ready_by': ['17:00']}, max_minutes=5)
-        reservation = self.reserve(NOW + timedelta(hours=1, minutes=20))
+        reservation = self.reserve(NOW + timedelta(hours=1))  # this job's default start for 17:00
         extra = self.extra()
         self.tick()
         self.finish(extra['run_id'], NOW)
@@ -140,12 +140,16 @@ class ExtraRunTests(unittest.TestCase):
         reservation = self.reserve()
         extra = self.extra()
         result = self.tick(lock_reader=lambda: True)
-        self.assertIn(extra['run_id'], result['refused'])
+        self.assertIn(extra['run_id'], result['deferred'])
         self.assertEqual(self.launched, [])
         with writer(self.root) as st:
             self.assertEqual(jobs.get(st.db, 'runs', reservation['run_id']), reservation)
         self.add('other', heavy=True)
         with writer(self.root) as st:
+            # A held run still holds the lane at its own instant.
+            with self.assertRaisesRegex(StateError, 'heavy runs overlap'):
+                jobs.run_verb(st.db, 'now', 'other', 'occupy lane', now=NOW)
+            jobs.run_verb(st.db, 'cancel', extra['run_id'], 'fixture cleanup: held run releases the lane', now=NOW)
             other = jobs.run_verb(st.db, 'now', 'other', 'occupy lane', now=NOW)
         self.assertIn(other['run_id'], self.tick()['started'])
         with self.assertRaisesRegex(StateError, 'heavy runs overlap'):
@@ -169,11 +173,15 @@ class ExtraRunTests(unittest.TestCase):
     def test_extra_keeps_load_disk_and_single_started_job_guards(self):
         self.add()
         reservation = self.reserve()
+        held = []
         for load, free in ((3.6, 20 * 1024**3), (0.1, 7 * 1024**3)):
             extra = self.extra()
-            self.assertIn(extra['run_id'], self.tick(load_reader=lambda: (load, free))['refused'])
-        first = self.extra()
-        self.assertIn(first['run_id'], self.tick()['started'])
+            held.append(extra['run_id'])
+            self.assertIn(extra['run_id'], self.tick(load_reader=lambda: (load, free))['deferred'])
+        # The guards clear: the oldest held extra starts and the other is refused for good.
+        result = self.tick()
+        self.assertEqual(result['started'], [held[0]])
+        self.assertEqual(result['refused'], [held[1]])
         second = self.extra()
         result = self.tick()
         self.assertIn(second['run_id'], result['refused'])

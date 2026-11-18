@@ -6,6 +6,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import shutil
 import socket
 import sqlite3
@@ -15,8 +16,8 @@ import tempfile
 
 from .settings import local_zone
 from .memory import local_day
-from .jobs import (UTC, append, change, current, duration, get, instant,
-                   now_utc, plan, snapshot, COMPUTE_GRID_MINUTES, execution_profile, is_extra)
+from .jobs import (UTC, append, change, current, deferral, duration, get, instant, PASSING,
+                   now_utc, plan, snapshot, COMPUTE_GRID_MINUTES, execution_profile, is_extra, running_model)
 from . import senses, mind, records, archive, timing, capabilities, planner
 from .state import StateError, atomic_file, local_path, writer
 
@@ -98,10 +99,12 @@ def placement(job, runs, now):
                 if any(r['state'] == 'failed' and r.get('retry_of')
                        and fresh <= instant(r['planned_for']) <= deadline for r in history):
                     continue  # X-24: exhaustion must not become a fresh default for the same target.
-                # Start early enough for one rerun, within the 6-h freshness window, so a
-                # skipped or failed slot is retried at the next tick while the deadline can be met.
+                # Start early enough for one held tick, within the 6-h freshness window: ticks are
+                # COMPUTE_GRID_MINUTES apart and fire a minute late, so the span (the window's own
+                # 15m included) keeps a start deferred once at the next tick able to finish in time.
                 fresh, latest = timing.deadline_window(deadline, expected)
-                start = max(grid(timing.deadline_window(deadline, 2 * expected)[1], False), grid(fresh, True))
+                span = max(2 * expected, expected + timedelta(minutes=COMPUTE_GRID_MINUTES + 1))
+                start = max(grid(timing.deadline_window(deadline, span)[1], False), grid(fresh, True))
                 if start < now and grid(now, True) <= latest:
                     start = grid(now, True)
                 # min_gap may push a start later, but only while the deadline can still be met.
@@ -130,6 +133,22 @@ def placement(job, runs, now):
                 if at < end and start < at + expected:
                     at = grid(end, True)
     return at, reason
+
+
+def wait_until(job, row):
+    """The instant past which a run the guards are holding can no longer serve its need.
+
+    Only a run placed inside a ready_by window has one: that deadline, after which the
+    planner is already targeting the next. A cadence job, a retry or an owner request has
+    no window to miss, so it stays due until a tick can start it (F-164).
+    """
+    needs = json.loads(job['spec_json'])['needs']
+    at = instant(row['planned_for'])
+    day = local_day(at)
+    deadlines = [deadline for deadline in (timing.clock_on(day + timedelta(days=offset), clock)
+                                           for offset in range(4) for clock in needs.get('ready_by', [])) if deadline]
+    served = [deadline for deadline in deadlines if timing.deadline_window(deadline)[0] <= at <= deadline]
+    return min(served) if served else datetime.max.replace(tzinfo=UTC)
 
 
 def heavy_locked():
@@ -236,7 +255,7 @@ def log_revisions(db, policy, now):
 
 def tick(root, data=None, clock=now_utc, load_reader=host_load, lock_reader=heavy_locked,
          launcher=launch, unit_reader=unit_alive, wake_starter=start_wake,
-         settings=None, sense_runner=senses.run, rollout_root=None,
+         settings=None, sense_runner=senses.run,
          sender=None, update_fetcher=None, telegram=None, pages_transport=None):
     settings = config() if settings is None else validate_settings(settings)
     local_zone()  # Required before tick effects; the loader owns the zone object.
@@ -244,7 +263,7 @@ def tick(root, data=None, clock=now_utc, load_reader=host_load, lock_reader=heav
     data = data_root(data)
     # 2 cores, batch jobs at CPUWeight 10: 3.0 marks a host that is busy, not one at its usual load.
     load_max = settings.get('load_max', 3.0)
-    result = dict(at=now.isoformat(), started=[], refused=[], folded=[], mind=None)
+    result = dict(at=now.isoformat(), started=[], deferred=[], refused=[], folded=[], mind=None)
     event_wake = False
     from .tick_skips import status
     # Senses and the mind commit stay outside the writer lock, as before skips existed.
@@ -261,7 +280,7 @@ def tick(root, data=None, clock=now_utc, load_reader=host_load, lock_reader=heav
         if isinstance(qmd_cache[0], Exception):
             raise qmd_cache[0]
         return qmd_cache[0]
-    observations = senses.collect(root, settings, now, cached_runner, rollout_root)
+    observations = senses.collect(root, settings, now, cached_runner)
     result['mind'] = mind.history(settings, commit=True)
     with writer(root) as store:
         db = store.db
@@ -271,7 +290,7 @@ def tick(root, data=None, clock=now_utc, load_reader=host_load, lock_reader=heav
             if job['state'] == 'active':
                 try:
                     validate_spec(json.loads(job['spec_json']), job['name'],
-                                  qmd_status=lambda: cached_runner(['qmd', 'status', '--json']))
+                                  qmd_status=lambda: cached_runner(['qmd', 'status', '--json']), stored=True)
                 except (StateError, ValueError, TypeError, KeyError) as exc:
                     invalid_specs[job['name']] = str(exc).splitlines()[0]
         result['invalid_specs'] = invalid_specs
@@ -363,6 +382,9 @@ def tick(root, data=None, clock=now_utc, load_reader=host_load, lock_reader=heav
             job = get(db, 'jobs', row['job'])
             reason = invalid_specs.get(row['job'])
             spec = {} if reason else json.loads(job['spec_json'])
+            if reason is None:
+                # The run records the model it runs on: a stored retired name never reaches the harness.
+                spec['model'] = running_model(spec.get('model'))
             if reason is None and not is_extra(row):
                 origin = db.execute('SELECT c.verb,c.actor FROM runs r JOIN changes c ON c.id=r.change_id '
                                     'WHERE r.run_id=? ORDER BY r.version LIMIT 1', (row['run_id'],)).fetchone()
@@ -373,10 +395,10 @@ def tick(root, data=None, clock=now_utc, load_reader=host_load, lock_reader=heav
                         reason = 'min_gap until ' + floor.isoformat()
             try:
                 load, free = load_reader()
-                if not math.isfinite(load) or not math.isfinite(free) or load > load_max or free < 8 * 1024**3:
-                    reason = 'host-load guard'
+                waiting = None if math.isfinite(load) and math.isfinite(free) and load <= load_max and free >= 8 * 1024**3 else 'host-load guard'
             except OSError:
-                reason = 'host-load guard unknown'
+                waiting = 'host-load guard unknown'
+            reason = reason or waiting
             if job['state'] != 'active':
                 reason = 'job is not active'
             elif any(r['job'] == row['job'] and r['state'] == 'started' for r in current(db, 'runs')):
@@ -384,6 +406,13 @@ def tick(root, data=None, clock=now_utc, load_reader=host_load, lock_reader=heav
             elif reason is None and spec['heavy'] and (any(r['state'] == 'started' and json.loads(r['spec_json'])['heavy'] for r in current(db, 'runs')) or lock_reader()):
                 reason = 'heavy lane busy or unknown'
             with db:
+                if reason in PASSING and now < wait_until(job, row):
+                    # A passing guard holds the run, it does not end it: keep it due, re-checked
+                    # every tick, and record the wait on the run (F-164).
+                    row.update(reason=deferral(row['reason'], reason))
+                    append(db, 'runs', row, cid)
+                    result['deferred'].append(row['run_id'])
+                    continue
                 if reason:
                     row.update(state='refused', reason=reason, ended_at=now.isoformat())
                     append(db, 'runs', row, cid)
@@ -419,8 +448,7 @@ def tick(root, data=None, clock=now_utc, load_reader=host_load, lock_reader=heav
             messages.notify(db, 'Changes', '\n'.join(result['calendar_learned']),
                             'calendar-learning:' + cid, sender, now, 'tick', settings=settings, change_id=cid)
         # Dispatcher effects are not told: placements and launches show in Today,
-        # a skip is the guards working, and repeated failures reach Alerts.
-        messages.alerts(db, now, sender, settings)
+        # a skip is the guards working; intent and telemetry carry the rest.
         messages.flush(db, sender, now, settings)
         previous = db.execute("SELECT started_at FROM wakes WHERE status!='refused' ORDER BY id DESC LIMIT 1").fetchone()
         last_model = db.execute('SELECT change_cursor FROM wakes WHERE harness_run_id IS NOT NULL ORDER BY id DESC LIMIT 1').fetchone()
@@ -475,7 +503,7 @@ def execute(root, run_id, data=None, clock=now_utc):
             return {'status': 'already_executed', 'run_id': run_id}
         spec = json.loads(row['spec_json'])
         start = clock()
-        env = dict(os.environ, STEWARD_RUN_DIR=str(directory), STEWARD_ACTOR='model', STEWARD_DELIVER=spec['deliver'], STEWARD_STATE=str(root), STEWARD_JOB=row['job'], STEWARD_RUN_ID=run_id)
+        env = dict(os.environ, CLAUDE_CODE_PROMPT_CACHE_TTL='5m', QMD_NOT_ORIGIN='steward,gsd', STEWARD_RUN_DIR=str(directory), STEWARD_ACTOR='model', STEWARD_DELIVER=spec['deliver'], STEWARD_STATE=str(root), STEWARD_JOB=row['job'], STEWARD_RUN_ID=run_id)
         code, collection_error = 127, None
         with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
             try:
@@ -520,20 +548,62 @@ def execute(root, run_id, data=None, clock=now_utc):
         return {'run_id': run_id, 'status': manifest['status'], 'exit_code': code, 'archive': archived}
 
 
+# Whole words, case-folded; '_' separates words, so rate_limit_error and authentication_error count while
+# '2401.5' is not a 429 and 'authors' is not auth.
+def _words(*patterns):
+    return tuple(re.compile(r'(?<![a-z0-9])(?:' + p + r')(?![a-z0-9])', re.IGNORECASE) for p in patterns)
+
+
+RATE_LIMITED = _words('429', r'rate[_ ]limit(?:ed)?(?:_error)?', 'usage limit', r'overloaded(?:_error)?')
+# A reset time is only ever rebuilt from these shapes, never copied from the model's text.
+RESET_TIME = re.compile(r'resets?\s*(?:at|in)?\s*:?\s*'
+                        r'(?P<clock>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:\d{2})?'
+                        r'|\d{1,2}:\d{2}(?::\d{2})?\s?(?:am|pm)?'
+                        r'|\d{1,2}\s?(?:am|pm))'
+                        r'(?:\s?(?P<zone>\([A-Za-z/_]{1,32}\)))?', re.IGNORECASE)
+AUTH_FAILED = _words('401', r'unauthori[sz]ed', r'authentication(?:_error)?', 'auth')
+TIMED_OUT = _words('timed out', 'timeout')
+
+
+def harness_failure(run_id):
+    """One code-authored phrase naming why tty's run failed; never a copy of its text."""
+    try:
+        shown = subprocess.run(['tty', 'show', run_id], capture_output=True, text=True, timeout=30)
+        detail = json.loads(shown.stdout)
+        fields = [str(detail.get(key) or '') for key in ('status', 'reason', 'final_text')]
+    except (OSError, ValueError, subprocess.SubprocessError, AttributeError):
+        return 'cause unknown (tty show failed)'
+    text = ' '.join(fields)
+    # The provider's own words carry a limit; auth and timeout are the record's claim, not the model's.
+    if any(pattern.search(text) for pattern in RATE_LIMITED):
+        reset = RESET_TIME.search(text)
+        if reset is None:
+            return 'usage or rate limit (429)'
+        clock = ' '.join(reset.group('clock').split())
+        zone = reset.group('zone')
+        return 'usage or rate limit (429), resets ' + clock + (' ' + zone if zone else '')
+    record = ' '.join(fields[:2])
+    if any(pattern.search(record) for pattern in AUTH_FAILED):
+        return 'authentication failed'
+    if any(pattern.search(record) for pattern in TIMED_OUT):
+        return 'timed out'
+    return 'cause unknown'
+
+
 def harness(argv, env=None, timeout=38 * 60, links_path=None):
     # Publish the identity before waiting: TERM can then stop/archive a job's tty.
     if links_path is not None:
         argv = list(argv)
         argv.insert(argv.index('--') if '--' in argv else len(argv), '--bg')
         result = subprocess.run(argv, capture_output=True, text=True, check=True,
-                                env=dict(os.environ, STEWARD_ACTOR='model', **(env or {})))
+                                env={**os.environ, 'STEWARD_ACTOR': 'model', 'CLAUDE_CODE_PROMPT_CACHE_TTL': '5m', 'QMD_NOT_ORIGIN': 'steward,gsd', **(env or {})})
         run_id = json.loads(result.stdout)['run']
         atomic_file(links_path, json.dumps({'tty_run': run_id}).encode())
         terminal = subprocess.run(['tty', 'wait', run_id], capture_output=True, text=True, timeout=timeout)
         output, code = terminal.stdout, terminal.returncode
     else:
         # tty's recorded worker has a separate session from the foreground waiter.
-        process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, env=dict(os.environ, STEWARD_ACTOR='model', **(env or {})))
+        process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, env={**os.environ, 'STEWARD_ACTOR': 'model', 'CLAUDE_CODE_PROMPT_CACHE_TTL': '5m', 'QMD_NOT_ORIGIN': 'steward,gsd', **(env or {})})
         try:
             output, _ = process.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -560,10 +630,15 @@ def harness(argv, env=None, timeout=38 * 60, links_path=None):
         raise StateError('wake harness did not return a run id') from None
     if not ((code == 0 and result.get('status', 'ok') == 'ok') or
             (code == 3 and '--no-accept' in argv and result.get('status') == 'unproven' and result.get('exit') == 3)):
-        error = StateError('harness execution failed: exit ' + str(code))
+        error = StateError('harness execution failed: exit ' + str(code) + ': ' + harness_failure(run_id))
         error.run_id = run_id
         raise error
     return run_id
+
+
+def claude_launch(runner, argv, env):
+    """Run one Claude launch with its isolation env; a fixture runner takes only the argv."""
+    return runner(argv, env=env) if runner is harness else runner(argv)
 
 
 def wake(root, clock=now_utc, runner=harness, settings=None, prompt=None, sender=None,
@@ -600,6 +675,7 @@ def wake(root, clock=now_utc, runner=harness, settings=None, prompt=None, sender
             state['moments'] = timing.undelivered(db, now)
             state['calendar_b'] = calendar_b.briefing(db, now)
             state['finds_waiting'] = messages.queued(db)
+            state['finds_tonight'] = messages.finds_since(db, messages.evening_cutoff(now))
             from . import pages
             state['live_pages'] = pages.live(db, now)
             state['your_list_page'] = pages.your_list(db)
@@ -646,7 +722,8 @@ def wake(root, clock=now_utc, runner=harness, settings=None, prompt=None, sender
             calls = 1
             status = 'completed'
             try:
-                run_id = runner(['tty', 'run', *capabilities.AGENTS['opus'], '--no-accept', '-C', str(directory), str(directory / 'index.md'), *capabilities.VENDOR_ARGS['opus'], '--exclude-dynamic-system-prompt-sections', '--append-system-prompt', stable])
+                argv = ['tty', 'run', *capabilities.AGENTS['opus'], '--no-accept', '-C', str(directory), str(directory / 'index.md'), *capabilities.VENDOR_ARGS['opus'], '--exclude-dynamic-system-prompt-sections', '--append-system-prompt', stable]
+                run_id = claude_launch(runner, argv, capabilities.CLAUDE_ENV)
             except (OSError, StateError, subprocess.SubprocessError) as exc:
                 run_id = getattr(exc, 'run_id', None)
                 status = 'failed'
@@ -660,7 +737,6 @@ def wake(root, clock=now_utc, runner=harness, settings=None, prompt=None, sender
                 # A pending orientation is already told (told_check), so a retry never enqueues a second.
                 messages.notify(db, 'Today', messages.fallback(db, now), sender=sender,
                                 now=now, actor='tick', settings=settings, moment='orientation')
-            messages.alerts(db, now, sender, settings)
             messages.flush(db, sender, now, settings)
             row = dict(db.execute('SELECT * FROM wakes WHERE id=?', (wake_id,)).fetchone())
         archived = archive_attempt(archive.wake, data_root(), row, now=now)

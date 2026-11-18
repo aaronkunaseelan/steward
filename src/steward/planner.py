@@ -19,12 +19,22 @@ def cost(runs, name):
 
 
 def observed_minutes(runs, name):
+    """A job whose runs get slower (say after a model change) must move its start earlier within
+    3 runs; one that gets faster keeps the older, longer slot."""
+    def wall_clock(rows):
+        values = [(instant(r['ended_at']) - instant(r['started_at'])).total_seconds() / 60
+                  for r in rows if r['started_at'] and r['ended_at']]
+        return statistics.median(values) if values else None
+
+    done = [r for r in runs if r['job'] == name and r['state'] in ('succeeded', 'failed')]
     learned = cost(runs, name)['median_minutes']
-    if learned is not None:
-        return learned
-    values = [(instant(r['ended_at']) - instant(r['started_at'])).total_seconds() / 60
-              for r in runs if r['job'] == name and r['started_at'] and r['ended_at'] and r['state'] in ('succeeded', 'failed')]
-    return statistics.median(values) if values else None
+    whole = learned if learned is not None else wall_clock(done)
+    recent_runs = sorted(done, key=lambda r: instant(r.get('started_at') or r.get('planned_for')),
+                         reverse=True)[:3]
+    costs = [r.get('cost_minutes') for r in recent_runs if r.get('cost_minutes') is not None]
+    recent = statistics.median(costs) if costs else wall_clock(recent_runs)
+    measured = [v for v in (whole, recent) if v is not None]
+    return max(measured) if measured else None
 
 
 def expected(runs, name, spec):

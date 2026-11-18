@@ -76,6 +76,23 @@ class MessagesTests(unittest.TestCase):
             self.assertEqual(health['last_poll_ok_at'], NOW.isoformat())
             self.assertEqual(health['last_error'], dict(code='ValueError', at=(NOW + timedelta(minutes=20)).isoformat()))
 
+    def test_failure_inside_poll_window_keeps_sense_ok_until_stale(self):
+        with writer(self.root) as st:
+            self.poll(st.db, [])
+            later = NOW + timedelta(minutes=20)
+
+            def fail(offset):
+                raise OSError('SECRET_TOKEN')
+
+            self.assertFalse(messages.poll(st.db, later, {}, fetcher=fail, telegram=BINDING))
+            health = messages.poll_status(st.db, later)
+            self.assertEqual((health['status'], health['reason']), ('ok', None))
+            self.assertEqual(health['last_error']['code'], 'OSError')
+            stale = messages.poll_status(st.db, NOW + timedelta(minutes=61))
+            self.assertEqual(stale['status'], 'unknown')
+            self.assertIn('over 60 min', stale['reason'])
+            self.assertIn('OSError', stale['reason'])
+
     def test_untrusted_updates_advance_offset_and_talk_is_unhandled(self):
         with writer(self.root) as st:
             self.assertTrue(self.poll(st.db, [self.update(1,'bad',chat=9),self.update(2,'bad',owner=9),self.update(3,'pause watch')]))
@@ -281,7 +298,7 @@ class MessagesTests(unittest.TestCase):
                 st.db.execute("INSERT INTO wakes(started_at,status,checkpoint) VALUES (?,'completed','{}')", (NOW.isoformat(),))
         started=[]
         runtime.tick(self.root,Path(self.tmp.name)/'data',clock=lambda:NOW,settings={},
-                     sense_runner=lambda argv: (_ for _ in ()).throw(OSError()), rollout_root=self.root/'none',
+                     sense_runner=lambda argv: (_ for _ in ()).throw(OSError()),
                      sender=self.send, update_fetcher=lambda offset:[self.update(1,'do it',thread=2)],telegram=BINDING,
                      wake_starter=lambda:started.append(True))
         self.assertEqual(started,[True])
@@ -438,33 +455,72 @@ class MessagesTests(unittest.TestCase):
             flush(st.db,self.send,datetime(2026, 10, 17, 18, 30, tzinfo=athens),{})
             self.assertEqual(len(self.sent),1)
 
-    def test_timer_violation_is_a_silent_deduplicated_code_alert(self):
+    def test_finds_since_lists_sent_finds(self):
+        from fixture_mind import TEST_ZONE
+        now = datetime(2026, 11, 8, 7, tzinfo=TEST_ZONE)
         with writer(self.root) as st:
-            cid = jobs.change(st.db, 'tick', NOW, 'tick')
-            for observation, count in [(dict(status='unknown', reason='unreadable'), 0),
-                                       (dict(status='ok', data={'violation': None}), 0),
-                                       (dict(status='ok', data={'violation': 'gsd-step.timer enabled'}), 1)]:
-                senses.save(st.db, {'machine': observation}, NOW, cid)
-                st.db.commit()
-                for _ in range(2):
-                    messages.alerts(st.db, NOW, self.send, {})
-                self.assertEqual(len(self.sent), count)
-            self.assertEqual(self.sent[0][0], 'Alerts')
-            self.assertIn('gsd-step.timer enabled', self.sent[0][1])
-            self.assertTrue(self.sent[0][2]['disable_notification'])
+            notify(st.db, 'Finds', 'x' * 200, 'long:1', self.send, now - timedelta(hours=5), deliver='immediate')
+            notify(st.db, 'Finds', 'Security · 1 for you\nsecond line', 'night:1', self.send,
+                   now - timedelta(hours=3), deliver='immediate')
+            notify(st.db, 'Finds', 'Daytime find', 'day:1', self.send, now - timedelta(hours=14), deliver='immediate')
+            notify(st.db, 'Finds', 'Queued find', 'queued:1', self.send, now - timedelta(hours=2), deliver='digest')
+            found = messages.finds_since(st.db, messages.evening_cutoff(now))
+        self.assertEqual([item['first_line'] for item in found], ['x' * 119 + '…', 'Security · 1 for you'])
+        self.assertEqual([item['sent_at'] for item in found],
+                         [(now - timedelta(hours=5)).isoformat(), (now - timedelta(hours=3)).isoformat()])
 
-    def test_alerts_dedupe_and_unknown_duration(self):
+    def test_wake_state_carries_finds_tonight(self):
+        from fixture_mind import TEST_ZONE
+        from steward import memory
+        now = datetime(2026, 11, 8, 7, tzinfo=TEST_ZONE)
         with writer(self.root) as st:
+            notify(st.db, 'Finds', 'Security · 1 for you', 'night:1', self.send,
+                   now - timedelta(hours=3), deliver='immediate')
+            notify(st.db, 'Finds', 'Queued find', 'queued:1', self.send, now - timedelta(hours=2), deliver='digest')
+        seen = {}
+        real = memory.briefing
+
+        def capture(db, at, state, receipt=None):
+            seen.update(state)
+            return real(db, at, state, receipt=receipt)
+
+        with patch('steward.memory.briefing', side_effect=capture):
+            runtime.wake(self.root, clock=lambda: now, settings={'wake_model': False},
+                         prompt='test', sender=self.send)
+        self.assertEqual([item['first_line'] for item in seen['finds_tonight']], ['Security · 1 for you'])
+        self.assertEqual(seen['finds_waiting'], 1)
+
+    def tick(self, at=NOW, **extra):
+        return runtime.tick(self.root, Path(self.tmp.name) / 'data', clock=lambda: at,
+                            **{'sender': self.send, 'update_fetcher': lambda offset: [], 'telegram': BINDING,
+                               'launcher': lambda argv: None, 'wake_starter': lambda: None,
+                               'load_reader': lambda: (0.1, 20 * 1024**3), 'lock_reader': lambda: False,
+                               'sense_runner': lambda argv: (_ for _ in ()).throw(OSError('unreadable')), **extra})
+
+    def test_failures_send_no_alerts_message(self):
+        # Code writes no Alerts: a failing job and a long unknown sense stay visible in intent and
+        # telemetry, which the supervisor reads, without a message of their own.
+        with writer(self.root) as st:
+            self.add(st.db)
+            cid = jobs.change(st.db, 'tick', NOW, 'tick')
             with st.db:
-                cid=jobs.change(st.db,'tick',NOW,'tick')
-                senses.save(st.db,{'calendars':{'status':'unknown','reason':'unreadable'}},NOW,cid)
-            messages.alerts(st.db,NOW+timedelta(hours=1),self.send,{})
-            self.assertEqual(self.sent,[])
-            for _ in range(2):
-                messages.alerts(st.db,NOW+timedelta(hours=3),self.send,{})
-            self.assertEqual(len(self.sent),1)
-            messages.alerts(st.db,NOW+timedelta(days=1),self.send,{})
-            self.assertEqual(len(self.sent),2)
+                for i in range(3):
+                    jobs.append(st.db, 'runs', dict(run_id='failed-' + str(i), version=0, job='watch',
+                        state='failed', planned_for=NOW.isoformat(), started_at=NOW.isoformat(),
+                        ended_at=NOW.isoformat(), reason='fixture failure', spec_json='{}'), cid)
+                senses.save(st.db, {'calendars': {'status': 'unknown', 'reason': 'unreadable'}},
+                            NOW - timedelta(hours=3), cid)
+        self.tick()
+        self.tick(at=NOW + timedelta(minutes=20))
+        self.assertEqual([m for m in self.sent if m[0] == 'Alerts'], [])
+        self.assertEqual([m for m in self.sent if 'authentication' in m[1]], [])
+
+    def test_no_message_names_tty_or_codex_auth(self):
+        source = Path(__file__).resolve().parents[1] / 'src/steward'
+        for path in sorted(source.glob('*.py')):
+            text = path.read_text()
+            for phrase in ('tty/Codex authentication', 'Check tty/Codex'):
+                self.assertNotIn(phrase, text, str(path))
 
     def test_only_requested_compute_changes_are_reported(self):
         with writer(self.root) as st:
@@ -561,21 +617,6 @@ class MessagesTests(unittest.TestCase):
             with self.assertRaisesRegex(StateError, 'unknown owner message'):
                 jobs.job_verb(st.db, 'pause', 'watch', actor='model', owner_message=999)
             self.assertEqual(jobs.get(st.db, 'jobs', 'watch')['state'], 'active')
-
-    def test_failed_wakes_and_provider_limit_alert(self):
-        with writer(self.root) as st:
-            with st.db:
-                cid=jobs.change(st.db,'tick',NOW,'tick')
-                senses.save(st.db,{'sol':{'status':'ok','data':{'rate_limit_reached_type':'weekly'}}},NOW,cid)
-                for minute in (0,1):
-                    st.db.execute("INSERT INTO wakes(started_at,status,checkpoint) VALUES (?,'failed','{}')",((NOW+timedelta(minutes=minute)).isoformat(),))
-            messages.alerts(st.db,NOW,self.send,{})
-            messages.alerts(st.db,NOW,self.send,{})
-            self.assertEqual(len(self.sent),2)
-            self.assertTrue(all(m[0]=='Alerts' for m in self.sent))
-            self.assertEqual({m[1].split(' problem since')[0] for m in self.sent},
-                             {'Sol: limit', 'harness: wake'})
-            self.assertTrue(all(m[2]['disable_notification'] for m in self.sent))
 
     def test_failed_sender_retries_committed_intent(self):
         def fail(*a,**k):

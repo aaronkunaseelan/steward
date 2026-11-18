@@ -4,7 +4,7 @@ import worker from '../worker.mjs';
 
 test('BR2 upload read-back distinguishes missing objects from the login response', async () => {
   const objects = new Map();
-  const env = {PAGE_PASSWORD: 'fixture', SESSION_SECRET: 'fixture',
+  const env = {CANONICAL_HOST: 'fixture',
     STEWARD_PAGES_TOKEN: 'fixture', PAGES: {
       async put(key, body, options) { objects.set(key, {body: await body.arrayBuffer(), ...options}); },
       async get(key) { return objects.get(key); },

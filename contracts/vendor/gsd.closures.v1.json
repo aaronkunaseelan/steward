@@ -13,7 +13,8 @@
     "at",
     "since",
     "cut",
-    "closures"
+    "closures",
+    "done_counts"
   ],
   "properties": {
     "schema": {
@@ -95,6 +96,28 @@
             "description": "The closure's own time."
           }
         }
+      }
+    },
+    "done_counts": {
+      "type": "object",
+      "description": "The window's closures counted by the owner's day (gsd's own day boundary, the same one every owner-facing view uses): each day maps to the number of distinct items closed done and canceled that day. An item closed twice counts once. A consumer copies these numbers; it never recounts the events.",
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "done",
+          "canceled"
+        ],
+        "properties": {
+          "done": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "canceled": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
       }
     }
   }

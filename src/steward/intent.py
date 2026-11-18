@@ -8,13 +8,13 @@ import subprocess
 
 from .calendar_b import live_demands
 from .settings import local_zone
-from .jobs import now_utc, current, run_severity
+from .jobs import now_utc, current, deferred, deferring, is_extra, run_severity
 from .notify import interrupt_data, notification_status
 from .messages import poll_status
 from .runtime import wake_times, data_root, manifest_path, finished_manifest, failure_reason
 from .senses import snapshot
 from .state import StateError
-from .timing import moments, moment_obligation, job_obligation, model_called, clock_on, owner_time
+from .timing import moments, moment_obligation, job_obligation, model_called, clock_on, owner_time, deadline_window
 
 
 
@@ -60,6 +60,9 @@ def chain(db, now, inbound=None, runs=None):
 
 # Retired, unenforced intent/1 field; removed in intent/2.
 RETIRED_JOB_CAP = 8
+# A cold 24 h read takes ~0.4 s and more under I/O pressure; 1 s turned intent red 8x in 7 d (watch intent:steward:red, 9-16 Nov).
+# mech-d's sampler gives `steward intent` 60 s.
+JOURNAL_TIMEOUT = 10
 
 
 def ticks(now, runner=None, db=None):
@@ -69,7 +72,7 @@ def ticks(now, runner=None, db=None):
     try:
         lines = (runner or subprocess.run)(['journalctl', '--user', '-u', 'steward-tick.service',
                         '--since', '@' + str((now - timedelta(hours=24)).timestamp()), '--until', '@' + str(now.timestamp()),
-                        '-o', 'json', '--no-pager'], capture_output=True, text=True, timeout=1, check=True).stdout.splitlines()
+                        '-o', 'json', '--no-pager'], capture_output=True, text=True, timeout=JOURNAL_TIMEOUT, check=True).stdout.splitlines()
     except (OSError, subprocess.SubprocessError) as exc:
         return dict(reason='tick journal unreadable: ' + safe_reason(exc))
     for line in lines:
@@ -230,6 +233,20 @@ def steward_doc(db, now, settings, data=None):
             previous = state
         return since
 
+    def held(name, target):
+        """The run that should have served a deadline, when a guard refused or deferred it (F-164)."""
+        for r in runs:
+            at_planned = when(r['planned_for'])
+            if r['job'] != name or is_extra(r) or at_planned is None:
+                continue
+            if not deadline_window(target)[0] <= at_planned <= target:
+                continue
+            if r['state'] == 'refused' and r['reason']:
+                return 'refused: ' + r['reason']
+            if deferred(r):
+                return 'deferred: ' + deferring(r['reason'])
+        return None
+
     promises = []
     for name, spec in jobs.items():
         since = activated(name)
@@ -251,6 +268,17 @@ def steward_doc(db, now, settings, data=None):
             item['why'] = 'Completed model wake did not deliver this moment to Today.'
         promises.append(item)
     promises.sort(key=lambda p: p['at'])
+    held_at = {}
+    for p in promises:
+        found = held(p['label'], at(p['at'])) if p['label'] in jobs and p['state'] in ('missed', 'due') else None
+        if found:
+            held_at[p['label'], p['at']] = found
+            p['why'] = clip(f"{p['why']} ({found})")
+
+    def missed(p):
+        """A missed promise names the guard behind the run that should have served it."""
+        found = held_at.get((p['label'], p['at']))
+        return f"{p['label']} missed {p['at']}" + (f" ({found})" if found else '')
 
     pending_blocks = [b for b in latest(db, 'blocks', 'event_key') if b['state'] in ('intended', 'written')]
     yours = []
@@ -301,9 +329,6 @@ def steward_doc(db, now, settings, data=None):
     wakes = sum(model_called(r) and today(when(r['started_at'])) for r in db.execute('SELECT * FROM wakes'))
     by = dict(db.execute('SELECT actor, count(*) FROM changes WHERE at >= ? GROUP BY actor', (day0.astimezone(timezone.utc).isoformat(),)))
     buzzes = sum(a['buzz'] for a in attention)
-    sol_sense = snapshot(db, now)['sol']
-    sol = sol_sense.get('data', {}) if sol_sense['status'] == 'ok' else {}
-    fraction = sol.get('window_elapsed_fraction')
     demands = [(r['name'], json.loads(r['spec_json'])) for r in live_demands(db, now)]
     from .calendar_b import fulfilments, movement_ranking
     doses = fulfilments(db, now)
@@ -353,14 +378,11 @@ def steward_doc(db, now, settings, data=None):
          'yours': yours, 'machine': machine, 'attention': attention, 'quiet': [], 'skips': skips,
          'buzz_cap': settings.get('interrupt_cap', 3)},
         {'kind': 'funnel', 'layer': 'intent', 'title': 'Your attention', 'sub': 'today · filtered down', 'note': 'Bar length is the square root of the count, so small numbers stay visible.',
-         'steps': [['signals seen', signals, 'Calendar, gsd, qmd, machine and Sol reads today'],
+         'steps': [['signals seen', signals, 'Calendar, gsd, qmd, machine reads today'],
                    ['wakes', wakes, 'Times the gate judged something new enough to think about'],
                    ['decisions', by.get('model', 0), f"Changes Steward made (you made {by.get('owner', 0)})"],
                    ['told you', len(sent), 'Messages sent today'],
                    ['interrupted', buzzes, 'Explicit interrupts sent with sound within the daily cap']]},
-        {'kind': 'meters', 'layer': 'intent', 'title': 'Machine time', 'items': [
-            {'label': 'Sol weekly pool', 'used': sol.get('used_percent'), 'pace': round(fraction * 100, 1) if fraction is not None else None,
-             'resets': sol.get('resets_at')}]},
         {'kind': 'chips', 'layer': 'intent', 'title': 'Recurring jobs', 'cap': RETIRED_JOB_CAP,
          'items': [[clip(n), clip(s.get('justification'))] for n, s in jobs.items() if s.get('recurring', True)]},
         {'kind': 'learned', 'layer': 'intent', 'title': 'Your time, and what it learned',
@@ -376,7 +398,7 @@ def steward_doc(db, now, settings, data=None):
     ]
     kept = sum(p['state'] == 'kept' for p in promises)
     warnings = ([f"unconfirmed calendar effects: {len(pending_blocks)}"] if pending_blocks else [])
-    warnings.extend(f"{p['label']} missed {p['at']}" for p in promises if p['state'] == 'missed')
+    warnings.extend(missed(p) for p in promises if p['state'] == 'missed')
     warnings.extend(hop['note'] for block in blocks if block['kind'] == 'chain'
                     for hop in block['hops'] if hop['warn'])
     for name in jobs:

@@ -2,7 +2,6 @@
 from fixture_mind import use_settings
 import importlib.machinery
 import importlib.util
-import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -17,35 +16,24 @@ loader.exec_module(deploy)
 class DeploySecrets(unittest.TestCase):
     setUp = use_settings
 
-    def test_shared_password_and_stable_private_session(self):
+    def test_only_the_pages_token_is_uploaded(self):
+        # People sign in through Cloudflare Access (cloudflare D1/P3): no page password or session key goes up.
         with tempfile.TemporaryDirectory() as tmp, patch.object(Path, 'home', return_value=Path(tmp)):
-            config = Path(tmp) / '.config'
-            (config / 'steward').mkdir(parents=True)
-            (config / 'mech-d').mkdir()
-            pages = config / 'steward/pages.env'
-            pages.write_text('STEWARD_PAGES_TOKEN=synthetic-token\n')
-            credentials = config / 'mech-d/credentials.json'
-            credentials.write_text(json.dumps({'PAGE_PASSWORD':'synthetic-password'}))
-            first = deploy.page_secrets()
-            self.assertEqual(first['PAGE_PASSWORD'], 'synthetic-password')
-            self.assertEqual(first['STEWARD_PAGES_TOKEN'], 'synthetic-token')
-            self.assertGreaterEqual(len(first['SESSION_SECRET']), 32)
-            self.assertEqual(pages.stat().st_mode & 0o777, 0o600)
-            credentials.write_text(json.dumps({'PAGE_PASSWORD':'changed-password'}))
-            second = deploy.page_secrets()
-            self.assertEqual(second['SESSION_SECRET'], first['SESSION_SECRET'])
-            self.assertEqual(second['PAGE_PASSWORD'], 'changed-password')
-            self.assertEqual(pages.read_text().count('SESSION_SECRET='), 1)
-
-    def test_missing_password_does_not_generate(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.object(Path, 'home', return_value=Path(tmp)):
-            config = Path(tmp) / '.config'
-            (config / 'steward').mkdir(parents=True)
-            (config / 'mech-d').mkdir()
-            pages = config / 'steward/pages.env'
-            original = 'STEWARD_PAGES_TOKEN=synthetic-token\n'
+            pages = Path(tmp) / '.config/steward/pages.env'
+            pages.parent.mkdir(parents=True)
+            original = 'STEWARD_PAGES_TOKEN=synthetic-token\nSESSION_SECRET=left-over\n'
             pages.write_text(original)
-            (config / 'mech-d/credentials.json').write_text('{}')
-            with self.assertRaisesRegex(SystemExit, '^Page password unavailable$'):
-                deploy.page_secrets()
+            self.assertEqual(deploy.page_secrets(), {'STEWARD_PAGES_TOKEN': 'synthetic-token'})
             self.assertEqual(pages.read_text(), original)
+
+    def test_missing_token_stops_the_deploy(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(Path, 'home', return_value=Path(tmp)):
+            pages = Path(tmp) / '.config/steward/pages.env'
+            pages.parent.mkdir(parents=True)
+            pages.write_text('OTHER=1\n')
+            with self.assertRaisesRegex(SystemExit, '^Pages token unavailable$'):
+                deploy.page_secrets()
+
+
+if __name__ == '__main__':
+    unittest.main()

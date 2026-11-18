@@ -24,7 +24,7 @@ class RunBindingTests(unittest.TestCase):
         from unittest.mock import patch
         name = 'papers-from-saves'
         with patch('steward.capabilities.validate'):
-            self.add(capability=name, model='sol', recurring=False, deliver='silent')
+            self.add(capability=name, model='haiku', recurring=False, deliver='silent')
             rid = self.run_now()
             self.tick()
             with writer(self.root) as st:
@@ -32,11 +32,18 @@ class RunBindingTests(unittest.TestCase):
                 edited.update(model='haiku', justification='new task', deliver='immediate')
                 jobs.job_verb(st.db, 'edit', 'test', edited, now=self.now + timedelta(seconds=1))
         directory = Path(self.tmp.name) / 'packet'
-        with patch.dict(os.environ, STEWARD_RUN_DIR=str(directory), STEWARD_STATE=str(self.root),
+        bindir = Path(self.tmp.name) / 'bin'
+        bindir.mkdir()
+        # A declared tool the runner only has to find in the shell's bin: never run here.
+        for executable in ('qmd',):
+            (bindir / executable).write_text('#!/bin/sh\nexit 1\n')
+            (bindir / executable).chmod(0o755)
+        with patch.dict(os.environ, PATH=str(bindir) + ':' + os.environ['PATH'],
+                        STEWARD_RUN_DIR=str(directory), STEWARD_STATE=str(self.root),
                         STEWARD_JOB='test', STEWARD_RUN_ID=rid), patch('sys.argv', ['agent-run', name]), \
              patch('steward.runtime.harness', return_value='fixture-tty') as harness:
             runpy.run_path(str(Path(__file__).resolve().parents[1] / 'jobs/agent-run'))['main']()
-        self.assertIn('gpt-6.1-sol', harness.call_args.args[0])
+        self.assertIn('claude-haiku-5-5', harness.call_args.args[0])
         text = (directory / 'packet.md').read_text()
         self.assertIn('Task: keeps a test input fresh', text)
         self.assertIn('Delivery: silent.', text)

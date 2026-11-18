@@ -9,19 +9,29 @@ import subprocess
 from . import contracts, jobs, mind, pages
 from .state import StateError
 
-# Async work runs on Sol by default, or on Haiku where a capability's work is mechanical
-# (owner decision 2026-10-16). The Steward wake uses the same Opus configuration;
-# opus runs a capability like the wake, at medium (owner direction 2026-10-18, consolidate).
+# Async work runs on Haiku by default, or on Go for checkable implementation work;
+# Opus runs a capability like the wake, at medium (owner direction 2026-10-18, consolidate).
+# A job's model arrives resolved by jobs.running_model; these tables hold only live models.
 AGENTS = {
-    'sol': ['-a', 'codex', '-m', 'gpt-6.1-sol'],
     'haiku': ['-a', 'claude', '-m', 'claude-haiku-5-5'],
+    'go': ['-a', 'pi', '-m', 'opencode-go-min/deepseek-v4.1-flash'],
     'opus': ['-a', 'claude', '-m', 'claude-opus-5-5'],
 }
-# Sol and Haiku at high effort (owner decision 2026-10-16); the host's Codex default is medium.
+# A Claude launch sees the run and its packet, not the host's Claude configuration: no settings
+# sources, no MCP servers, no slash commands, and six tools, as gsd's own launches do (owner ruling
+# X-66 item 5, F-87, 3 Nov 2026). Web reads are here because capabilities read papers and pages.
+CLAUDE_TOOLS = 'Bash,Read,Write,Edit,WebSearch,WebFetch'
+CLAUDE_ISOLATION = ['--setting-sources', '', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
+                    '--disable-slash-commands', '--tools', CLAUDE_TOOLS]
+# Auto-memory is a channel outside the packet, so no Claude launch loads or writes it.
+CLAUDE_ENV = {'CLAUDE_CODE_DISABLE_AUTO_MEMORY': '1'}
+# Haiku at high effort (owner decision 2026-10-16); Go brings its own harness flags:
+# pi -p asks no tool approval, but its project settings (the run's shell scope, written by
+# shell_scope) load only after project trust, so the run trusts its own directory once.
 VENDOR_ARGS = {
-    'sol': ['--', '-c', 'model_reasoning_effort=high'],
-    'haiku': ['--', '--permission-mode', 'bypassPermissions', '--effort', 'high'],
-    'opus': ['--', '--permission-mode', 'bypassPermissions', '--effort', 'medium'],
+    'haiku': ['--', '--permission-mode', 'bypassPermissions', '--effort', 'high', *CLAUDE_ISOLATION],
+    'go': ['--', '--approve'],
+    'opus': ['--', '--permission-mode', 'bypassPermissions', '--effort', 'medium', *CLAUDE_ISOLATION],
 }
 
 
@@ -85,15 +95,22 @@ def shell_bin(directory, calls):
 def shell_scope(model, directory, calls):
     """Restrict the vendor's tool shell, leaving tty and vendor startup PATH intact."""
     bindir = shell_bin(directory, calls)
-    if model == 'sol':
-        return ['-c', 'shell_environment_policy.inherit=all',
-                '-c', 'shell_environment_policy.set.PATH=' + json.dumps(str(bindir)),
-                '-c', 'allow_login_shell=false'], {}
+    prefix = 'export PATH=' + shlex.quote(str(bindir))
     # Claude sources this file in Bash tools after its shell snapshot, before eval.
     # Unlike settings.env/PATH, it does not change the harness's subprocess lookup.
     path = directory / 'shell-env.sh'
-    path.write_text('export PATH=' + shlex.quote(str(bindir)) + '\n')
-    return [], {'CLAUDE_ENV_FILE': str(path)}
+    path.write_text(prefix + '\n')
+    if model == 'go':
+        # pi ignores CLAUDE_ENV_FILE; its bash tool prepends shellCommandPrefix to every
+        # command, from the project settings in its cwd, which load after project trust
+        # (--approve in VENDOR_ARGS). pi's own startup PATH stays intact, as for Claude.
+        settings = directory / '.pi' / 'settings.json'
+        settings.parent.mkdir(parents=True, exist_ok=True)
+        settings.write_text(json.dumps({'shellCommandPrefix': prefix}, sort_keys=True) + '\n')
+    env = {'CLAUDE_ENV_FILE': str(path)}
+    if model != 'go':
+        env.update(CLAUDE_ENV)
+    return [], env
 
 
 def load(name):

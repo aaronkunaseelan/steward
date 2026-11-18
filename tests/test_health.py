@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from steward import contracts, intent, jobs, messages, runtime, senses
+from steward import contracts, intent, jobs, runtime, senses
 from steward.state import writer
 
 NOW = datetime(2026, 10, 16, 12, tzinfo=timezone.utc)
@@ -36,7 +36,7 @@ class HealthTests(unittest.TestCase):
             if error:
                 raise error
             return output if output is not None else response(argv, value if value is not None else fixture())
-        return senses.collect(self.root, {}, now, runner, Path(self.tmp.name) / 'rollouts')['health']
+        return senses.collect(self.root, {}, now, runner)['health']
 
     def save(self, observation, now=NOW):
         with writer(self.root) as store:
@@ -235,7 +235,7 @@ class HealthTests(unittest.TestCase):
             raise FileNotFoundError
         for seconds, expected in [(1799, False), (1800, True)]:
             observations = senses.collect(self.root, {}, NOW + timedelta(seconds=seconds),
-                                          unavailable, Path(self.tmp.name) / 'rollouts')
+                                          unavailable)
             self.assertEqual('health' in observations, expected)
 
     def test_health_changes_never_wake_or_reach_page_two(self):
@@ -252,41 +252,3 @@ class HealthTests(unittest.TestCase):
             self.assertEqual(runtime.gate(store.db), 'nothing new')
             self.assertEqual(intent.chain(store.db, NOW), before)
 
-    def test_signed_out_alert_once_per_transition_even_after_history_pruned(self):
-        sent = []
-        def sender(topic, text, **options):
-            sent.append((topic, text, options))
-            return len(sent)
-        def observe(auth, now):
-            value = fixture()
-            value['auth'] = auth
-            observation = dict(status='ok', data=senses.health(now, lambda argv: response(argv, value)))
-            self.save(observation, now)
-            with writer(self.root) as store:
-                messages.alerts(store.db, now, sender, {})
-        observe('signed_out', NOW)
-        for i in range(100):
-            observe('signed_out', NOW + timedelta(minutes=i + 1))
-        self.save(dict(status='unknown', reason='unavailable'))
-        with writer(self.root) as store:
-            messages.alerts(store.db, NOW + timedelta(hours=2), sender, {})
-        observe('signed_out', NOW + timedelta(hours=3))
-        self.assertEqual(len(sent), 1)
-        observe('ok', NOW + timedelta(hours=4))
-        observe('signed_out', NOW + timedelta(hours=5))
-        self.assertEqual(len(sent), 2)
-        self.assertTrue(all(topic == 'Alerts' and options['disable_notification']
-                            for topic, _, options in sent))
-        self.assertEqual(sent[0][1],
-                         'Garmin needs you to sign in again: run `~/tools/garmin/bin/garmin-login` on OCI')
-        with writer(self.root) as store:
-            self.assertEqual(store.db.execute("SELECT count(*) FROM told WHERE key LIKE 'alert:garmin:%'").fetchone()[0], 2)
-            self.assertEqual(runtime.gate(store.db), 'nothing new')
-
-    def test_rate_limited_has_no_alert(self):
-        value = fixture()
-        value['auth'] = 'rate_limited'
-        self.save(self.collect(value))
-        with writer(self.root) as store:
-            messages.alerts(store.db, NOW, lambda *a, **k: self.fail('unexpected alert'), {})
-            self.assertEqual(store.db.execute('SELECT count(*) FROM outbox').fetchone()[0], 0)

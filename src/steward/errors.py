@@ -4,6 +4,8 @@ import json
 import subprocess
 from urllib.error import HTTPError, URLError
 
+from .state import StateError
+
 
 def safe_reason(error):
     kind = type(error).__name__[:64]
@@ -24,6 +26,9 @@ def safe_reason(error):
                   f'non-JSON output ({len(error.doc.encode("utf-8"))} bytes)')
     elif isinstance(error, URLError):
         detail = safe_reason(error.reason) if isinstance(error.reason, Exception) else 'network request failed'
+    elif isinstance(error, StateError):
+        # Every StateError message is written by Steward's own code, not by an input.
+        detail = str(error)
     elif isinstance(error, TimeoutError):
         detail = 'timed out'
     elif isinstance(error, OSError) and error.errno is not None:

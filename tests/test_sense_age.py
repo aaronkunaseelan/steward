@@ -15,7 +15,6 @@ class SenseAgeTests(unittest.TestCase):
 
     def test_calendar_and_every_tick_senses_have_one_read_age_limit(self):
         for name, minutes, expected in (('calendars', 30, 'fresh'), ('calendars', 31, 'stale'),
-                                         ('machine', 40, 'fresh'), ('machine', 41, 'stale'),
                                          ('place', 20, 'fresh'), ('place', 21, 'stale')):
             with self.subTest(name=name, minutes=minutes):
                 reading = dict(status='ok', at=(NOW - timedelta(minutes=minutes)).isoformat(),
@@ -41,17 +40,6 @@ class SenseAgeTests(unittest.TestCase):
                 self.assertIn('## Calendar [stale]', page)
                 self.assertEqual(senses.snapshot(st.db, end + timedelta(minutes=30))['calendars']['verdict'], 'stale')
                 self.assertEqual(senses.snapshot(st.db, end + timedelta(minutes=31))['calendars']['verdict'], 'stale')
-
-    def test_sol_evidence_holds_until_provider_reset_and_rescans_keep_its_observation_time(self):
-        # Codex observes usage only when it is used: an idle hour is not staleness, a passed reset is.
-        for minutes, reset_minutes, expected in ((2880, -60, 'stale'), (1, -1, 'stale'), (120, 60, 'fresh'), (1, 60, 'fresh')):
-            with self.subTest(minutes=minutes, reset_minutes=reset_minutes):
-                sense = dict(status='ok', at=NOW.isoformat(), age=0, data=dict(
-                    observed_at=(NOW - timedelta(minutes=minutes)).isoformat(),
-                    resets_at=(NOW + timedelta(minutes=reset_minutes)).isoformat()))
-                result = senses.freshness('sol', sense, NOW)
-                self.assertEqual(result['verdict'], expected)
-                self.assertEqual(result['as_of'], sense['data']['observed_at'])
 
     def test_read_age_never_overrides_failed_reads_or_producer_expiry(self):
         failed = dict(status='unknown', at=NOW.isoformat(), reason='read failed')

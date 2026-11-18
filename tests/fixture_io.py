@@ -4,15 +4,44 @@ from functools import wraps
 import inspect
 import os
 from pathlib import Path
+import shlex
 import shutil
 from types import SimpleNamespace
 import subprocess
 import sys
+import tempfile
 
 SOURCE = Path(__file__).resolve().parents[1]
 CONTRACT = ContextVar('installed_contract', default=None)
 RUN = subprocess.run
 HOME = Path.home()
+
+
+# Kept for the process, so the stubs outlive every test and go when it ends.
+FIXTURE_HOME = tempfile.TemporaryDirectory()
+
+
+def fixture_bin():
+    """A temp PATH holding the CLIs this host has but a container does not.
+
+    `steward` runs this checkout (`python -m steward`), never an installed release, so a test
+    cannot pass on whatever is deployed. A stub only stands in for a CLI no test runs.
+    """
+    bindir = Path(FIXTURE_HOME.name)
+    steward = bindir / 'steward'
+    steward.write_text('#!/bin/sh\nexport PYTHONPATH=' + shlex.quote(str(SOURCE / 'src')) +
+                       '\nexec ' + shlex.quote(sys.executable) + ' -m steward "$@"\n')
+    steward.chmod(0o755)
+    for name in ('jq',):
+        if shutil.which(name) is not None:
+            continue
+        stub = bindir / name
+        stub.write_text('#!/bin/sh\necho "fixture ' + name + ': not implemented" >&2\nexit 1\n')
+        stub.chmod(0o755)
+    os.environ['PATH'] = str(bindir) + ':' + os.environ['PATH']
+
+
+fixture_bin()
 
 
 def temporary(path):
@@ -104,8 +133,7 @@ def seal(case):
     for module, run in ((intent, journal), (archive, native)):
         case.enterContext(patch.object(module, 'subprocess', SimpleNamespace(**(vars(subprocess) | {'run': run}))))
     for function, replacements in (
-        (runtime.tick, {'sense_runner': unavailable, 'rollout_root': SOURCE / 'tests/no-rollouts'}),
-        (senses.collect, {'rollout_root': SOURCE / 'tests/no-rollouts'}),
+        (runtime.tick, {'sense_runner': unavailable}),
     ):
         parameters = list(inspect.signature(function).parameters)
         names = parameters[-len(function.__defaults__):]
@@ -113,6 +141,19 @@ def seal(case):
         case.enterContext(patch.object(function, '__defaults__', defaults))
     case.enterContext(patch('os.getloadavg', return_value=(0.1, 0.1, 0.1)))
     case.enterContext(patch('shutil.disk_usage', return_value=SimpleNamespace(free=20 * 1024**3)))
+    # A release identity is the checkout's HEAD. A container given only the working tree of a
+    # git worktree cannot read its gitdir, so that one read falls back to a fixture name; every
+    # test that asserts the identity patches it itself.
+    from steward import mind
+    git = mind.git
+    def release_git(root, *args):
+        try:
+            return git(root, *args)
+        except subprocess.CalledProcessError:
+            if args == ('rev-parse', 'HEAD') and Path(root).resolve() == SOURCE:
+                return 'release-fixture'
+            raise
+    case.enterContext(patch.object(mind, 'git', release_git))
     read_text = Path.read_text
     def host_text(path, *args, **kwargs):
         if path == Path('/proc/meminfo'):

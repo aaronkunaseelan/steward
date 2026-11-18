@@ -36,7 +36,9 @@ class HarnessTests(unittest.TestCase):
         process = Mock(returncode=1)
         process.communicate.return_value = (json.dumps(dict(
             run='fixture-failed', status='failed', exit=1, reason='synthetic agent failure')), '')
-        with patch.object(runtime.subprocess, 'Popen', return_value=process):
+        shown = subprocess.CompletedProcess([], 0, json.dumps(dict(status='failed', reason='synthetic agent failure')), '')
+        with patch.object(runtime.subprocess, 'Popen', return_value=process), \
+                patch.object(runtime.subprocess, 'run', return_value=shown):
             with self.assertRaises((StateError, subprocess.CalledProcessError),
                                    msg='failed foreground tty result was returned as success'):
                 runtime.harness(['tty', 'run', '--no-accept'])
@@ -47,7 +49,9 @@ class HarnessTests(unittest.TestCase):
             with self.subTest(code=code, status=status, flags=flags):
                 process = Mock(returncode=code)
                 process.communicate.return_value = (json.dumps(dict(run='fixture', status=status, exit=code)), '')
-                with patch.object(runtime.subprocess, 'Popen', return_value=process):
+                shown = subprocess.CompletedProcess([], 0, json.dumps(dict(status=status, exit=code)), '')
+                with patch.object(runtime.subprocess, 'Popen', return_value=process), \
+                        patch.object(runtime.subprocess, 'run', return_value=shown):
                     with self.assertRaises(StateError) as raised:
                         runtime.harness(['tty', 'run', *flags])
                     self.assertEqual(raised.exception.run_id, 'fixture')

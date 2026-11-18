@@ -34,11 +34,12 @@ def section_info(text, receipt):
 
 
 # These are the inputs the existing moments explicitly ask the model to read.
+FINDS = 'Finds'  # Sent tonight, plus the pending digest count the owner has not seen yet.
 MOMENT_SECTIONS = {
     'orientation': {'Schedule', 'Limits', 'Calendar', 'Movement', 'Blocks', 'Your list',
-                    'Waiting on others', 'Deadlines', 'Compute', 'Finds waiting', 'Inbox'},
+                    'Waiting on others', 'Deadlines', 'Compute', FINDS, 'Inbox'},
     'day_close': {'Schedule', 'Limits', 'Calendar', 'Ahead', 'Blocks', 'Deadlines', 'Compute',
-                  'Finds waiting', 'Inbox'},
+                  FINDS, 'Inbox'},
 }
 
 
@@ -138,7 +139,8 @@ def day_close(db, now):
 
 
 def blocks(b, gsd, live_pages, now, end):
-    """Blocks through the next two days, with their items, prep page and evidence of use."""
+    """Blocks in the next three days in full, with items, prep page and evidence of use; later
+    live blocks by key, time and state, so a block missing from this list is removed or ended."""
     specs = {r['name']: json.loads(r['spec_json']) for r in b.get('demands', [])}
     from . import pages
     done = gsd.get('done')  # today's closures, each at gsd's own closure time
@@ -148,9 +150,10 @@ def blocks(b, gsd, live_pages, now, end):
     for r in sorted(b.get('blocks', []), key=lambda r: json.loads(r['payload'])['start']):
         p = json.loads(r['payload'])
         start = datetime.fromisoformat(p['start'])
-        if start >= end:
-            continue
         row = dict(key=r['event_key'], title=p['title'], start=p['start'], end=p['end'], state=r['state'])
+        if start >= end:
+            rows.append(dict(row, beyond='after the 3-day window: no items or use shown'))
+            continue
         items = specs.get(r['demand'], {}).get('items')
         if items:
             page = pages.prepared_page(live_pages, ('block', r['demand']), memory.local_day(start))
@@ -223,6 +226,15 @@ def ahead_lines(calendar, now):
             break
         result.append(line)
     return result if entries else result + ['none in the observed window']
+
+
+def compute_row(run):
+    """One of today's runs for Compute: an empty reflections list is left out, an unknown one is kept (F-39)."""
+    row = {k: run.get(k) for k in ('run_id', 'job', 'state', 'planned_for', 'started_at', 'ended_at', 'reason')}
+    words = records.reflections(run.get('manifest'))
+    if words:
+        row['reflections'] = words
+    return row
 
 
 def render(state, now, receipt):
@@ -299,21 +311,24 @@ def render(state, now, receipt):
     runs = state.get('runs', state.get('last_runs', []))
     today = [r for r in runs if start <= instant(r.get('started_at') or r['planned_for']) < start + timedelta(days=1)]
     section('Compute', dict(plan=state.get('calendar_c', []), jobs=state.get('jobs', []),
-                            today=[dict({k: r.get(k) for k in ('run_id', 'job', 'state', 'planned_for', 'started_at', 'ended_at', 'reason')},
-                                        reflections=records.reflections(r.get('manifest'))) for r in today],
-                            failures=[{k: r.get(k) for k in ('run_id', 'job', 'ended_at', 'reason')} for r in runs if r['state'] == 'failed'],
-                            sol=data('sol')), ('sol',))
-    section('Finds waiting', state.get('finds_waiting', []))
+                            today=[compute_row(r) for r in today],
+                            failures=[{k: r.get(k) for k in ('run_id', 'job', 'ended_at', 'reason')} for r in runs if r['state'] == 'failed']))
+    section(FINDS, dict(sent_tonight=state.get('finds_tonight', []), waiting=state.get('finds_waiting', 0)))
     if 'day_close' in state.get('moments', []):
         evidence = state.get('day_close', {})
         section('Day close — Done today', dict(
             gsd_done=[f"{owner_time(instant(row['at']), '%H:%M')} done: {' '.join(row['title'].split())[:100]}"
                       for row in data('gsd')['done']] if data('gsd').get('done') is not None else 'unknown: gsd done not supplied',
+            gsd_done_count=(data('gsd')['done_count'] if data('gsd').get('done_count') is not None else
+                            'unknown: ' + data('gsd')['done_count_reason'] if 'done_count' in data('gsd') else
+                            'unknown: gsd done count not supplied'),
             canceled_today=[f"{owner_time(instant(row['at']), '%H:%M')} canceled: {' '.join(row['title'].split())[:100]}"
                             for row in data('gsd')['canceled_today']]
                            if data('gsd').get('canceled_today') is not None else 'unknown: cancellation history not supplied',
             completion_coverage=f"gsd.worklist.v1 closure events from its 48-hour history, filtered to today in {local_zone().key.rsplit('/', 1)[-1]}; "
-                                'a completion event is not proof the item is still closed.',
+                                'a completion event is not proof the item is still closed. '
+                                "gsd_done_count is gsd's own count for the day (gsd.closures.v1 done_counts): say that number; "
+                                "if you name fewer items, say 'N of M'.",
             blocks=[f"{r['title']} {datetime.fromisoformat(r['start']).astimezone(local_zone()):%H:%M}: {r['used']}"
                     for r in block_rows if 'items' in r
                     and memory.local_day(datetime.fromisoformat(r['start'])) == memory.local_day(now)]
@@ -332,7 +347,7 @@ def render(state, now, receipt):
                        'gsd covers dated worklist items, not unrecorded or undated obligations. '
                        'Nearer deadlines are in Deadlines above.'), ('calendars', 'gsd'))
         section('Day close — Long form', dict(
-            sources='See Finds waiting, Inbox live pages, and Done today deliveries above.',
+            sources=f'See {FINDS}, Inbox live pages, and Done today deliveries above.',
             action='Link the day’s Finds and capability pages; never paste long content. '
                    'Put day-close detail on a page with steward page put and link it from Today.'))
     health = data('health')
@@ -345,8 +360,8 @@ def render(state, now, receipt):
     verify = dict(qmd.get('verify') or {})
     if verify.get('at') is not None:
         verify['at'] = datetime.fromtimestamp(verify['at'], local_zone()).isoformat()
-    section('Machine and qmd', dict(machine=data('machine'), qmd=dict(alive=qmd.get('alive'),
-                                   verify=verify, sources=sources, new_items=qmd.get('new_items'))), ('machine', 'qmd'))
+    section('qmd', dict(alive=qmd.get('alive'), verify=verify, sources=sources,
+                        new_items=qmd.get('new_items')), ('qmd',))
     output.append('\nRaw state remains behind `steward state`.')
     text = '\n'.join(output) + '\n'
     boundaries = list(starts.values()) + [len(text)]

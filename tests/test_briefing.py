@@ -34,8 +34,15 @@ class PageTests(unittest.TestCase):
             # Legacy records without words remain valid and show no reflection.
             path.write_text(json.dumps(dict(schema='steward.record.v1')) + '\n')
             self.assertEqual(records.reflections(str(manifest)), [])
+            self.assertNotIn('reflections', briefing.compute_row(state['runs'][0]))
             path.write_text(json.dumps(dict(reflections='bad')) + '\n')
             self.assertIn('unknown: run record violates', briefing.render(state, NOW, {}))
+
+    def test_compute_omits_empty_reflections(self):
+        from steward import briefing
+        row = briefing.compute_row(dict(run_id='r', job='j', state='succeeded', planned_for=NOW.isoformat()))
+        self.assertNotIn('reflections', row)
+        self.assertEqual(row['run_id'], 'r')
 
     def test_known_absence_is_not_failed_reading(self):
         from steward.briefing import render
@@ -82,7 +89,7 @@ class PageTests(unittest.TestCase):
                 receipt = {}
                 page = memory.briefing(store.db, NOW, {'inbox': ['important']}, receipt=receipt)
                 headings = ['Now', 'Inbox', 'Calendar', 'Movement', 'Blocks', 'Your list', 'Waiting on others', 'Deadlines',
-                            'Compute', 'Finds waiting', 'Health', 'Place', 'Machine and qmd']
+                            'Compute', 'Finds', 'Health', 'Place', 'qmd']
                 positions = [page.index('## ' + h + ' [') for h in headings]
                 self.assertEqual(positions, sorted(positions))
                 self.assertIn('important', page)
@@ -107,9 +114,43 @@ class DayCloseTests(unittest.TestCase):
         for title in ('Done today', 'Next two days', 'Horizon', 'Long form'):
             self.assertIn('## Day close — ' + title, page)
         self.assertIn('unknown: gsd done not supplied', page)
+        self.assertIn('unknown: gsd done count not supplied', page)
+        self.assertIn("gsd_done_count is gsd's own count for the day", page)
         self.assertIn('See Ahead for future events and its observed coverage.', page)
         self.assertIn('unknown: gsd horizon not supplied', page)
         self.assertIn('handled is not proof of an answer', page)
+
+    def test_day_close_carries_gsds_own_done_count_or_says_unknown(self):
+        from steward import memory
+        from steward.state import writer
+        from pathlib import Path
+        import tempfile
+        cases = [
+            (dict(day='2026-10-20', done=3, canceled=1), ('gsd done count:', 'day: 2026-10-20', 'done: 3', 'canceled: 1')),
+            (dict(day='2026-10-20', done=18, canceled=0), ('done: 18',)),
+        ]
+        for done_count, expected in cases:
+            with self.subTest(done=done_count['done']):
+                with tempfile.TemporaryDirectory() as root, writer(Path(root), initialize=True) as store:
+                    page = memory.briefing(store.db, NOW, dict(
+                        moments=['day_close'],
+                        senses={'gsd': dict(status='ok', at=NOW.isoformat(),
+                                            data={'done': [], 'horizon_deadlines': [], 'done_count': done_count})}))
+                section = page.split('## Day close — Done today', 1)[1].split('## Day close — Next two days', 1)[0]
+                for word in expected:
+                    self.assertIn(word, section)
+                self.assertNotIn('unknown: gsd done count', section)
+        for data, reason in [
+                ({'done': [], 'done_count': None, 'done_count_reason': 'gsd closures cut does not cover the day'},
+                 'unknown: gsd closures cut does not cover the day'),
+                ({'done': []}, 'unknown: gsd done count not supplied')]:
+            with self.subTest(reason=reason):
+                from steward.briefing import render
+                state = dict(moments=['day_close'],
+                             senses={'gsd': dict(status='ok', at=NOW.isoformat(), data=data)})
+                page = render(state, NOW, {})
+                section = page.split('## Day close — Done today', 1)[1].split('## Day close — Next two days', 1)[0]
+                self.assertIn(reason, section)
 
     def test_outcome_projection_is_one_line_and_does_not_expose_message_bodies(self):
         from steward.briefing import day_close
@@ -279,6 +320,19 @@ class FreshnessTests(unittest.TestCase):
         self.assertIn('06:30', verdict['reason'])
         promise.update(state='missed', completed_at=None)
         self.assertEqual(senses.freshness('gsd', sense, NOW)['verdict'], 'stale')
+
+    def test_briefing_finds_section_shows_sent_and_waiting(self):
+        from steward import briefing
+        state = {'finds_tonight': [dict(sent_at='2026-11-08T04:00:09+02:00', first_line='Security · 1 for you')],
+                 'finds_waiting': 2}
+        page = briefing.render(state, NOW, {})
+        finds = briefing.sections(page)['Finds']
+        self.assertIn('Security · 1 for you', finds)
+        self.assertIn('04:00', finds)
+        self.assertIn('waiting: 2', finds)
+        self.assertNotIn('Finds waiting', page)
+        self.assertEqual({briefing.FINDS} & briefing.MOMENT_SECTIONS['orientation'], {briefing.FINDS})
+        self.assertEqual({briefing.FINDS} & briefing.MOMENT_SECTIONS['day_close'], {briefing.FINDS})
 
     def test_producer_verdicts(self):
         health = self.sense(dict(auth='ok', watch_uploaded_at=NOW.isoformat(),

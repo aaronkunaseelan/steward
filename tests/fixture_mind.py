@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 import shutil
+import tempfile
 import tomllib
 from steward.settings import zone
 
@@ -17,6 +18,14 @@ def use_settings(case):
     from steward.settings import _active
     token = _active.set(tomllib.loads(TEST_CONFIG))
     case.addCleanup(_active.reset, token)
+
+
+def config_only(case):
+    """A temp config dir with the fixture settings, so a CLI read never takes the host's settings."""
+    directory = Path(case.enterContext(tempfile.TemporaryDirectory())) / 'steward'
+    directory.mkdir(parents=True)
+    (directory / 'config.toml').write_text(TEST_CONFIG)
+    case.enterContext(patch.dict(os.environ, XDG_CONFIG_HOME=str(directory.parent)))
 
 
 def command(executable='/bin/true'):

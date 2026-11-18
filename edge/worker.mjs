@@ -1,3 +1,4 @@
+import {accessIdentity} from './access.mjs';
 const slugOK = s => s.length <= 80 && /^[a-z0-9]+(-[a-z0-9]+)*$/.test(s);
 const cap = 10 * 1024 * 1024;
 const device = ua => /ipad/i.test(ua) ? 'ipad' : /iphone/i.test(ua) ? 'iphone' : /android/i.test(ua) ? 'android' : /macintosh|mac os/i.test(ua) ? 'mac' : 'other';
@@ -9,36 +10,6 @@ async function authorized(request, token) {
   const aa = new Uint8Array(a), bb = new Uint8Array(b);
   for (let i = 0; i < aa.length; i++) diff |= aa[i] ^ bb[i];
   return !!token && diff === 0;
-}
-const encoder = new TextEncoder();
-const sessionAge = 2592000;
-const sessionKey = secret => crypto.subtle.importKey('raw', encoder.encode(secret), {name:'HMAC', hash:'SHA-256'}, false, ['sign', 'verify']);
-async function passwordMatches(input, expected) {
-  const hash = s => crypto.subtle.digest('SHA-256', encoder.encode(s));
-  const [a, b] = await Promise.all([hash(input), hash(expected)]);
-  // Fixed-size digest comparison, independent of password length and matching prefix.
-  let diff = 0;
-  const aa = new Uint8Array(a), bb = new Uint8Array(b);
-  for (let i = 0; i < aa.length; i++) diff |= aa[i] ^ bb[i];
-  return diff === 0;
-}
-async function signedSession(secret) {
-  const payload = `${Math.floor(Date.now()/1000) + sessionAge}.${crypto.randomUUID()}`;
-  const signature = await crypto.subtle.sign('HMAC', await sessionKey(secret), encoder.encode(payload));
-  return payload + '.' + Array.from(new Uint8Array(signature), b => b.toString(16).padStart(2, '0')).join('');
-}
-async function authenticated(request, secret) {
-  const value = request.headers.get('cookie')?.match(/(?:^|;\s*)steward_session=([^;]+)/)?.[1] || '';
-  const parts = value.split('.');
-  if (parts.length !== 3 || !/^\d+$/.test(parts[0]) || Number(parts[0]) <= Date.now()/1000 || Number(parts[0]) > Date.now()/1000 + sessionAge || !/^[\da-f-]{36}$/.test(parts[1]) || !/^[\da-f]{64}$/.test(parts[2])) return false;
-  return crypto.subtle.verify('HMAC', await sessionKey(secret), Uint8Array.from(parts[2].match(/../g), x => parseInt(x, 16)), encoder.encode(`${parts[0]}.${parts[1]}`));
-}
-function loginPage(slug, bad = false, head = false) {
-  // slug is validated before interpolation.
-  return new Response(head ? null : `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Steward · sign in</title><h1>Steward</h1><form method="post" action="/login"><input type="hidden" name="slug" value="${slug}"><label>Password <input name="password" type="password" autocomplete="current-password" required autofocus></label><button>Open page</button>${bad ? '<p role="alert">That password did not match.</p>' : ''}</form></html>`, {
-    status: bad ? 401 : 200,
-    headers: {'Content-Type':'text/html; charset=utf-8', 'Cache-Control':'private, no-store', 'X-Robots-Tag':'noindex', 'Referrer-Policy':'same-origin', 'X-Frame-Options':'DENY', 'X-Content-Type-Options':'nosniff', 'Content-Security-Policy':"default-src 'none'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"}
-  });
 }
 export default {
   async fetch(request, env, ctx) {
@@ -86,21 +57,15 @@ export default {
       }
       return reply(null, 405);
     }
-    if (!env.PAGE_PASSWORD || !env.SESSION_SECRET) return reply('Not configured', 503);
-    if (path === '/login' && request.method === 'POST') {
-      if (request.headers.get('origin') !== url.origin) return reply(null, 403);
-      let form;
-      try { form = await request.formData(); } catch { return reply(null, 400); }
-      const slug = form.get('slug'), password = form.get('password');
-      if (typeof slug !== 'string' || !slugOK(slug)) return reply(null, 400);
-      if (typeof password !== 'string' || password.length > 256 || !await passwordMatches(password, env.PAGE_PASSWORD)) return loginPage(slug, true);
-      return new Response(null, {status:303, headers:{Location:'/' + slug, 'Cache-Control':'no-store', 'Set-Cookie':`steward_session=${await signedSession(env.SESSION_SECRET)}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${sessionAge}`}});
-    }
+    // People: only the canonical host, behind Cloudflare Access, whose signed token is checked here as well.
+    // Old workers.dev page links move over; /_api/ above answers on any host with its bearer.
+    if (!env.CANONICAL_HOST) return reply('Not configured', 503);
+    if (url.hostname !== env.CANONICAL_HOST) return Response.redirect(`https://${env.CANONICAL_HOST}${path}${url.search}`, 301);
     const slug = path.slice(1);
     if (!slugOK(slug) || path.startsWith('/_')) return reply(null, 404);
     if (!['HEAD', 'GET'].includes(request.method)) return reply(null, 405);
     const object = await bucket[request.method === 'HEAD' ? 'head' : 'get'](slug);
-    if (object?.customMetadata?.public !== '1' && !await authenticated(request, env.SESSION_SECRET)) return loginPage(slug, false, request.method === 'HEAD');
+    if (object?.customMetadata?.public !== '1' && !await accessIdentity(request, env)) return new Response(request.method === 'HEAD' ? null : 'Cloudflare Access required', {status: 403, headers: {'Cache-Control': 'private, no-store'}});
     if (!object) return reply(null, 404);
     const type = object.httpMetadata?.contentType || 'application/octet-stream';
     const headers = {'Content-Type': type, 'Cache-Control': 'private, no-store', 'X-Robots-Tag': 'noindex', 'Referrer-Policy': 'no-referrer'};

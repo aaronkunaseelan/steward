@@ -19,7 +19,7 @@ This is an integration of an existing personal stack, not a standalone hosted as
 
 `systemd/steward.timer` starts `steward-tick.service` every 20 minutes. `steward tick` is deterministic and makes no model call: it polls owner messages, refreshes due senses, folds run manifests, reserves and dispatches work, flushes messages and maintains archives.
 
-`steward-wake.service` runs `steward wake`. Scheduled slots and events request wakes; a gate checks for owner instructions, due moments, failures or relevant changes. A passing, enabled wake starts **one model harness invocation**, not a resident agent loop. That invocation can contain model/tool turns; it is not a promise of one provider API request. The wake service has a 40-minute bound. The current wake harness is Opus at medium effort; async agent jobs select Sol, Haiku or Opus through their job spec.
+`steward-wake.service` runs `steward wake`. Scheduled slots and events request wakes; a gate checks for owner instructions, due moments, failures or relevant changes. A passing, enabled wake starts **one model harness invocation**, not a resident agent loop. That invocation can contain model/tool turns; it is not a promise of one provider API request. The wake service has a 40-minute bound. The current wake harness is Opus at medium effort; async agent jobs select Haiku (the default), Go or Opus through their job spec.
 
 The wake reads `prompts/wake.md`, its trigger, the full Now section, an index of rendered sections, and the live mind. Index lines report line counts and changes since the last model wake (unknown reads never say unchanged), and name sections required by due moments. Pull detail with `steward briefing "SECTION" ["SECTION" …] [--wake ID]`; `steward briefing --list` lists the latest wake's sections. The full `briefing.md` remains in each wake archive; section digests and exact text boundaries are recorded with that wake. It is instructed to act through `steward` verbs. Writer locks cover individual operations, not the whole model session. `steward tick skip --from ISO --to ISO --reason TEXT` records an undoable window that suppresses wakes, not deterministic sensing, planning or dispatch.
 
@@ -47,8 +47,6 @@ Wakes read soul and charter afresh; agent jobs read their capability afresh. Tic
 | `qmd` | `qmd status --json`, `qmd feed` | Validate producer currency; advance arrival checkpoints only with a successful observation. |
 | `health` | `garmin today --json` | Use dated watch evidence and producer expiry; never trigger sync. |
 | `place` | `phone where --json` | Preserve named-place state, city evidence and compressed night runs; the model holds home in its synthesis. |
-| `machine` | systemd, disk and load reads | Dispatch must respect host capacity. |
-| `sol` | Observed Codex rollout rate-limit events | Expose measured headroom and observation time, not an invented spend allowance. |
 
 A sense carries `verdict`, `reason` and `as_of`: `fresh`, `stale` or `unknown`. Read age beyond twice its read interval is stale; producer-specific completeness and expiry checks also apply. Health and place are scheduling inputs, not wake events, and are excluded from the Page 2 intent view. An observation failure is not itself evidence that the world changed.
 

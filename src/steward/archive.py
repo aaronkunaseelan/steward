@@ -45,6 +45,54 @@ def references(directory, manifest):
     return [r for r in found if isinstance(r, dict) and (r.get('tty_run') or r.get('session'))]
 
 
+def pi_session(value, thread, home):
+    """The one way a pi session is accepted: a real file, in pi's or gsd's own session root, named for the thread."""
+    candidate = Path(value)
+    if candidate.is_symlink():
+        return None
+    real = candidate.resolve()
+    if not real.name.endswith('_' + thread + '.jsonl') or not pi_rooted(real, home):
+        return None
+    return real
+
+
+def pi_rooted(path, home):
+    """Resolved pi session files live under pi's sessions or a gsd step's sessions, nowhere else."""
+    root = home.resolve()
+    steps = root / '.local/share/gsd/steps'
+    sessions = path.parent
+    if steps in sessions.parents:
+        return sessions.name == 'sessions' and NATIVE_ID.fullmatch(sessions.parent.name) is not None
+    return root / 'agents/pi/sessions' in path.parents
+
+
+def pi_sources(ref, info, thread, home):
+    """pi keeps a native session per thread: a tty run's cwd-mangled folder, or gsd's step copy."""
+    suffix = '_' + thread + '.jsonl'
+    path = ref.get('path')
+    if path is not None:
+        given = Path(path)
+        candidates = [given] if given.is_absolute() else []
+    else:
+        step = ref.get('step')
+        cwd = info.get('cwd')
+        root = home / 'agents/pi/sessions'
+        if step is not None:
+            if not isinstance(step, str) or not NATIVE_ID.fullmatch(step):
+                raise ValueError('invalid gsd step')
+            candidates = (home / '.local/share/gsd/steps' / step / 'sessions').glob('*' + suffix)
+        elif isinstance(cwd, str) and cwd.startswith('/'):
+            candidates = (root / pi_folder(cwd)).glob('*' + suffix)
+        else:
+            candidates = root.glob('*/*' + suffix)
+    return [real for real in (pi_session(candidate, thread, home) for candidate in candidates) if real is not None]
+
+
+def pi_folder(cwd):
+    """pi's session folder for a cwd: /home/u/run -> --home-u-run-- (real: --home-ubuntu-.local-share-…--)."""
+    return '--' + cwd.strip('/').replace('/', '-') + '--'
+
+
 def resolve(ref, home):
     info = tty_info(ref['tty_run']) if ref.get('tty_run') else ref
     thread = info.get('thread') or info.get('session')
@@ -61,6 +109,8 @@ def resolve(ref, home):
             paths = list(root.glob('*/' + thread + '.jsonl'))
     elif agent == 'codex':
         paths = list((home / '.codex/sessions').glob('*/*/*/rollout-*-' + thread + '.jsonl'))
+    elif agent == 'pi':
+        paths = pi_sources(ref, info, thread, home)
     else:
         raise ValueError('unsupported agent session')
     if len(paths) != 1 or not paths[0].is_file():
@@ -94,6 +144,11 @@ def session_model(path, agent):
             except ValueError:
                 continue
             if not isinstance(row, dict):
+                continue
+            if agent == 'pi':  # pi names the pair on each assistant message it answers with
+                message = row.get('message') if isinstance(row.get('message'), dict) else {}
+                if message.get('role') == 'assistant' and isinstance(message.get('provider'), str) and isinstance(message.get('model'), str):
+                    return message['provider'] + '/' + message['model']
                 continue
             value = row.get('message', {}).get('model') if agent == 'claude' else row.get('payload', {}).get('model')
             if isinstance(value, str):

@@ -28,12 +28,11 @@ class SensesTests(unittest.TestCase):
         from fixture_mind import install
         install(self, Path(self.tmp.name))
         self.root = Path(self.tmp.name) / 'state'
-        self.rollouts = Path(self.tmp.name) / 'sessions'
         with writer(self.root, initialize=True):
             pass
 
     def collect(self, runner=unavailable, settings=None):
-        return senses.collect(self.root, settings or {}, NOW, runner, self.rollouts)
+        return senses.collect(self.root, settings or {}, NOW, runner)
 
     def test_command_failures_and_timeouts_are_unknown(self):
         for error in (OSError('secret'), subprocess.TimeoutExpired('secret', 60)):
@@ -147,7 +146,8 @@ class SensesTests(unittest.TestCase):
         def read():
             return senses.gsd(NOW, runner)
         first = read()
-        self.assertEqual(calls, [['gsd', 'worklist', '--json']])
+        self.assertEqual(calls, [['gsd', 'worklist', '--json'],
+                                 ['gsd', 'closures', '--since', '2026-10-16T00:00:00+03:00', '--json']])
         self.assertEqual([d['id'] for d in first['deadlines']], ['overdue', 'boundary'])
         self.assertEqual(first['deadlines'][0]['project'], 'Fixture project')
         self.assertEqual(first['past_due_older'], {'count': 0, 'oldest_due_at': None})
@@ -161,6 +161,57 @@ class SensesTests(unittest.TestCase):
         self.assertNotEqual(first['digest'], read()['digest'])
         payload['cut']['until'] = None
         self.assertIsNone(read()['cut_age_seconds'])
+
+    def closures_runner(self, payload, envelope=None, error=None, argv_checked=None):
+        def runner(argv):
+            if argv[:2] == ['gsd', 'worklist']:
+                return json.dumps(payload)
+            self.assertEqual(argv[:2], ['gsd', 'closures'])
+            if argv_checked is not None:
+                argv_checked.append(argv)
+            if error is not None:
+                raise error
+            return json.dumps(envelope)
+        return runner
+
+    def closures_envelope(self, done_counts, cut_until='2026-10-16T06:00:00+00:00'):
+        return dict(schema='gsd.closures.v1', at=NOW.isoformat(), since='2026-10-16T00:00:00+03:00',
+                    cut=dict(until=cut_until, change_set_id='cut-1', committed_at='2026-10-16T07:00:00+00:00'),
+                    closures=[], done_counts=done_counts)
+
+    def test_gsd_done_count_is_copied_from_the_closures_answer(self):
+        argv_checked = []
+        data = senses.gsd(NOW, self.closures_runner(fixture('gsd.worklist.v1'),
+                          self.closures_envelope({'2026-10-16': dict(done=4, canceled=1)}), argv_checked=argv_checked))
+        self.assertEqual(data['done_count'], dict(day='2026-10-16', done=4, canceled=1))
+        self.assertNotIn('done_count_reason', data)
+        self.assertEqual(argv_checked, [['gsd', 'closures', '--since', '2026-10-16T00:00:00+03:00', '--json']])
+        # A day absent from done_counts with the cut past its start is a known zero.
+        data = senses.gsd(NOW, self.closures_runner(fixture('gsd.worklist.v1'), self.closures_envelope({})))
+        self.assertEqual(data['done_count'], dict(day='2026-10-16', done=0, canceled=0))
+        # A cut that does not cover the day leaves the count unknown, never zero.
+        data = senses.gsd(NOW, self.closures_runner(fixture('gsd.worklist.v1'),
+                          self.closures_envelope({}, cut_until='2026-10-15T20:00:00+00:00')))
+        self.assertIsNone(data['done_count'])
+        self.assertIn('cut does not cover', data['done_count_reason'])
+
+    def test_gsd_failed_closures_read_keeps_the_worklist_and_names_a_reason(self):
+        from steward.contracts import ContractError
+        payload = fixture('gsd.worklist.v1')
+        for error in (OSError('sensitive output'), ValueError('sensitive invalid JSON'),
+                      ContractError('gsd.closures.v1: done_counts: expected object')):
+            with self.subTest(error=type(error).__name__):
+                data = senses.gsd(NOW, self.closures_runner(payload, error=error))
+                self.assertIsNone(data['done_count'])
+                self.assertTrue(data['done_count_reason'])
+                self.assertNotIn('sensitive', data['done_count_reason'])
+                self.assertEqual(data['counts']['state']['ready'], 2)
+                self.assertEqual(data['cut']['until'], payload['cut']['until'])
+        # A closures answer that is not a closures contract is a named failure too.
+        data = senses.gsd(NOW, self.closures_runner(payload, envelope=payload))
+        self.assertIsNone(data['done_count'])
+        self.assertTrue(data['done_count_reason'].startswith('gsd.closures.v1: '))
+        self.assertEqual(data['waiting_on_you'], payload['priorities']['mine'])
 
     def test_bad_worklist_is_unknown_with_contract_reason(self):
         for bad in ('missing', 'type', 'schema', 'date', 'enum', 'json'):
@@ -209,21 +260,6 @@ class SensesTests(unittest.TestCase):
         self.assertNotIn('"id": "eight-days-late"', text)
         self.assertNotIn('"id": "lower-boundary"', text)
 
-    def write_rollout(self, name, at, primary):
-        path = self.rollouts / '2026/10/16' / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(dict(timestamp=at, payload={'rate_limits': {'primary': primary, 'plan_type': None, 'rate_limit_reached_type': None}})) + '\n')
-
-    def test_rate_limits_newest_observation_across_files_and_nulls(self):
-        self.write_rollout('rollout-z.jsonl', '2026-10-16T10:00:00Z', {'used_percent': 10})
-        self.write_rollout('rollout-a.jsonl', '2026-10-16T11:00:00Z', {'used_percent': 20, 'window_minutes': None, 'resets_at': None})
-        result = senses.rate_observation(self.rollouts, NOW)
-        self.assertEqual(result['used_percent'], 20)
-        self.assertIsNone(result['resets_at'])
-        self.assertIsNone(result['window_elapsed_fraction'])
-        self.write_rollout('rollout-a.jsonl', '2026-10-16T11:00:00Z', None)
-        self.assertIsNone(senses.rate_observation(self.rollouts, NOW)['used_percent'])
-
     def save(self, values, at=NOW):
         with writer(self.root) as store:
             with store.db:
@@ -237,7 +273,7 @@ class SensesTests(unittest.TestCase):
             state = jobs.snapshot(store.db, now=NOW + timedelta(seconds=20))
         self.assertEqual(set(state['senses']), set(senses.INTERVALS))
         self.assertTrue(all(v['age'] == 20 for v in state['senses'].values()))
-        self.assertEqual(set(self.collect()), {'machine', 'sol', 'gsd'})
+        self.assertEqual(set(self.collect()), {'gsd'})
 
     def test_manual_run_landings_are_not_gsd_events(self):
         gsd = lambda d: {'gsd': dict(status='ok', data={'digest': d})}
@@ -267,12 +303,12 @@ class SensesTests(unittest.TestCase):
         with writer(self.root) as store:
             self.assertIn('calendars changed', runtime.gate(store.db))
         wakes = []
-        runtime.tick(self.root, Path(self.tmp.name) / 'data', clock=lambda: NOW, settings={}, update_fetcher=lambda offset: [], telegram={'chat_id': 1, 'owner_user_id': 2, 'topics': {'Talk': 6}}, sender=lambda *a, **k: 1, sense_runner=unavailable, rollout_root=self.rollouts, wake_starter=lambda: wakes.append(True))
+        runtime.tick(self.root, Path(self.tmp.name) / 'data', clock=lambda: NOW, settings={}, update_fetcher=lambda offset: [], telegram={'chat_id': 1, 'owner_user_id': 2, 'topics': {'Talk': 6}}, sender=lambda *a, **k: 1, sense_runner=unavailable, wake_starter=lambda: wakes.append(True))
         self.assertEqual(wakes, [True])
         with writer(self.root) as store:
             with store.db:
                 store.db.execute("INSERT INTO wakes(started_at,status,checkpoint) VALUES (?,'gated','{}')", (NOW.isoformat(),))
-        runtime.tick(self.root, Path(self.tmp.name) / 'data', clock=lambda: NOW + timedelta(minutes=15), settings={}, update_fetcher=lambda offset: [], telegram={'chat_id': 1, 'owner_user_id': 2, 'topics': {'Talk': 6}}, sender=lambda *a, **k: 1, sense_runner=unavailable, rollout_root=self.rollouts, wake_starter=lambda: wakes.append(True))
+        runtime.tick(self.root, Path(self.tmp.name) / 'data', clock=lambda: NOW + timedelta(minutes=15), settings={}, update_fetcher=lambda offset: [], telegram={'chat_id': 1, 'owner_user_id': 2, 'topics': {'Talk': 6}}, sender=lambda *a, **k: 1, sense_runner=unavailable, wake_starter=lambda: wakes.append(True))
         self.assertEqual(wakes, [True])
 
     def test_owner_edit_of_steward_block_is_a_calendar_event(self):
@@ -285,7 +321,7 @@ class SensesTests(unittest.TestCase):
             calendar_b.choose(store.db, SETTINGS, {'schema_version': 1, 'selections': [{'candidate_id': choice['id'], 'reason': 'r'}]}, MONDAY, runner=gog)
 
         def tick(minutes):
-            runtime.tick(self.root, Path(self.tmp.name) / 'data', clock=lambda: MONDAY + timedelta(minutes=minutes), settings=SETTINGS, update_fetcher=lambda offset: [], telegram={'chat_id': 1, 'owner_user_id': 2, 'topics': {'Talk': 6}}, sender=lambda *a, **k: 1, sense_runner=gog, rollout_root=self.rollouts, wake_starter=lambda: None)
+            runtime.tick(self.root, Path(self.tmp.name) / 'data', clock=lambda: MONDAY + timedelta(minutes=minutes), settings=SETTINGS, update_fetcher=lambda offset: [], telegram={'chat_id': 1, 'owner_user_id': 2, 'topics': {'Talk': 6}}, sender=lambda *a, **k: 1, sense_runner=gog, wake_starter=lambda: None)
             with writer(self.root) as store:
                 return store.db.execute("SELECT event FROM senses WHERE name='calendars' ORDER BY id DESC LIMIT 1").fetchone()[0]
         self.assertEqual(tick(20), 0)
@@ -293,16 +329,16 @@ class SensesTests(unittest.TestCase):
         self.assertEqual(tick(40), 1)
         self.assertEqual(tick(60), 0)
 
-    def test_machine_read_failure_does_not_wake_and_history_is_bounded(self):
-        self.save({'machine': dict(status='ok', data={})})
-        self.save({'machine': dict(status='unknown', reason='read failed')})
+    def test_read_failure_does_not_wake_and_history_is_bounded(self):
+        self.save({'place': dict(status='ok', data={'state': 'home'})})
+        self.save({'place': dict(status='unknown', reason='read failed')})
         with writer(self.root) as store:
-            # Losing sight is not a change in the world: no wake; a long unknown reaches Alerts.
-            self.assertNotIn('machine changed', runtime.gate(store.db))
+            # Losing sight is not a change in the world: no wake.
+            self.assertNotIn('place changed', runtime.gate(store.db))
         for i in range(100):
-            self.save({'machine': dict(status='unknown', reason='read failed')}, NOW + timedelta(minutes=i))
+            self.save({'place': dict(status='unknown', reason='read failed')}, NOW + timedelta(minutes=i))
         with writer(self.root) as store:
-            self.assertEqual(store.db.execute("SELECT count(*) FROM senses WHERE name='machine'").fetchone()[0], 96)
+            self.assertEqual(store.db.execute("SELECT count(*) FROM senses WHERE name='place'").fetchone()[0], 96)
 
     @staticmethod
     def feed_page(source='x', count=1, start=0, complete=True):
@@ -445,16 +481,7 @@ class SensesTests(unittest.TestCase):
         with writer(self.root) as store:
             self.assertEqual(senses.events(store.db, 0), [])
             self.assertEqual(runtime.gate(store.db), 'nothing new')
-            from steward import messages
-            messages.alerts(store.db, NOW + timedelta(hours=6), lambda *a, **k: self.fail('qmd health alert'), {})
             self.assertEqual(store.db.execute('SELECT count(*) FROM outbox').fetchone()[0], 0)
-
-    def test_burn_rate_from_history(self):
-        reset = int((NOW + timedelta(days=3)).timestamp())
-        self.write_rollout('rollout-a.jsonl', '2026-10-16T10:00:00Z', {'used_percent': 10, 'window_minutes': 10080, 'resets_at': reset})
-        self.save(self.collect())
-        self.write_rollout('rollout-a.jsonl', '2026-10-16T11:00:00Z', {'used_percent': 12, 'window_minutes': 10080, 'resets_at': reset})
-        self.assertEqual(self.collect()['sol']['data']['burn_percent_per_hour'], 2)
 
     def test_command_adapter_bounds_reads_and_hides_provider_errors(self):
         from unittest.mock import patch
@@ -471,15 +498,9 @@ class SensesTests(unittest.TestCase):
             with self.assertRaises(subprocess.TimeoutExpired):
                 senses.run(['fixture'])
 
-    def test_machine_reports_timer_violation(self):
-        def runner(argv):
-            if 'show' in argv:
-                return state
-            return ''
-        state = 'loaded\nenabled\n'
-        result = senses.machine(runner)
-        self.assertEqual(result['violation'], 'gsd-step.timer enabled')
-        self.assertEqual(len(result['loadavg']), 3)
-        state = 'not-found\n\n'  # never installed is a known, healthy fact
-        result = senses.machine(runner)
-        self.assertEqual((result['gsd_step_timer'], result['violation']), ('not-installed', None))
+    def test_machine_sense_removed(self):
+        # No sense watches the host: dispatch reads capacity itself, and gsd-step.timer is not
+        # Steward's to police (X-74.9, v3 P3a).
+        self.assertNotIn('machine', senses.INTERVALS)
+        self.assertFalse(hasattr(senses, 'machine'))
+        self.assertNotIn('machine', senses.collect(self.root, {}, NOW, unavailable))

@@ -20,7 +20,7 @@ healthy; stale readings are not today's facts. Use producer views, not stores.
 
 Where to look:
 - `steward state`: senses/freshness, calendars/blocks/demands, job specs,
-  runs, Sol observation/reset, moments, pages/receipts and outcomes.
+  runs, moments, pages/receipts and outcomes.
 - `steward inbox`: owner instructions in any topic. Address them, reply where
   written unless Talk is better, then mark only addressed messages done.
 - `gsd worklist`: owner's work in gsd order, waiting on people, dated

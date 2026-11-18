@@ -194,12 +194,11 @@ class ShellPathTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
             original = os.environ['PATH']
-            args, env = capabilities.shell_scope('sol', directory, ['date'])
-            self.assertEqual(os.environ['PATH'], original)
-            self.assertNotIn('PATH', env)
-            self.assertIn('shell_environment_policy.set.PATH=', ' '.join(args))
-            self.assertIn('shell_environment_policy.inherit=all', args)
-            args, env = capabilities.shell_scope('haiku', directory / 'haiku', ['date'])
-            self.assertNotIn('PATH', env)
-            self.assertIn('CLAUDE_ENV_FILE', env)
-            self.assertIn('export PATH=', Path(env['CLAUDE_ENV_FILE']).read_text())
+            for model in ('haiku', 'go', 'opus'):
+                with self.subTest(model=model):
+                    args, env = capabilities.shell_scope(model, directory / model, ['date'])
+                    self.assertEqual(os.environ['PATH'], original)
+                    self.assertNotIn('PATH', env)
+                    self.assertEqual(args, [])
+                    self.assertIn('CLAUDE_ENV_FILE', env)
+                    self.assertIn('export PATH=', Path(env['CLAUDE_ENV_FILE']).read_text())

@@ -1,0 +1,22 @@
+# Example: copy to wrangler.toml and fill in. The live wrangler.toml is deployment config and is not exported.
+name = "steward"
+main = "worker.mjs"
+compatibility_date = "2026-10-01"
+# People reach pages only at the canonical host, behind Cloudflare Access.
+# workers.dev stays on while old page links (28-day life) are still in Telegram: there it 301s people to the
+# canonical host and serves only /_api/ (bearer).
+workers_dev = true
+routes = [{ pattern = "<pages host>/*", custom_domain = true }]
+# Old versions keep the secrets they were uploaded with; their preview URLs would outlive a rotation.
+preview_urls = false
+
+[[r2_buckets]]
+binding = "PAGES"
+bucket_name = "<r2-bucket-name>"
+
+[vars]
+CANONICAL_HOST = "<pages host, e.g. pages.example.com>"
+ACCESS_TEAM = "<your-team>.cloudflareaccess.com"
+# Audience tag of the owner's Access app; the /_api bypass app issues no token.
+ACCESS_AUD = "<your Cloudflare Access application AUD tag>"
+OWNER_EMAIL = "<the one email Access admits>"

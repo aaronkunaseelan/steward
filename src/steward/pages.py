@@ -363,7 +363,10 @@ def put(db, title, data, filename='', slug=None, as_html=False, now=None, actor=
         db.execute('UPDATE changes SET summary=? WHERE id=?', ('page put ' + slug + ': ' + (code or 'live'), cid))
         if code:
             meta(db, 'pages_put_error', dict(code=code, at=now.isoformat()))
-    return dict(slug=slug, url=pages_host() + '/' + slug, state=state, expires_at=expires, public=public)
+    report = dict(slug=slug, url=pages_host() + '/' + slug, state=state, expires_at=expires, public=public)
+    if code:
+        report['error'] = code  # the reason, not just 'failed' (F-70): put_503, read_404, content_mismatch, ...
+    return report
 
 
 def remove(db, slug, now=None, actor='owner', transport=None):

@@ -48,6 +48,31 @@ class ObligationTests(unittest.TestCase):
         self.assertEqual(verdict['verdict'], 'fresh')
         self.assertIn('missed: Wed 21 Oct 18:30 EEST; recovered 19:23 EEST', verdict['reason'])
 
+    def gsd_sense(self, read_at, committed_at):
+        return dict(status='ok', at=read_at, data=dict(
+            promise=dict(target='2026-11-09T06:30:00+02:00', state='kept',
+                         completed_at='2026-11-09T04:27:44Z', started_at='2026-11-09T03:40:00Z'),
+            cut=dict(until='2026-11-09T04:22:28Z', committed_at=committed_at)))
+
+    def test_read_before_the_finish_cannot_call_a_kept_run_stale(self):
+        sense = self.gsd_sense('2026-11-09T04:20:00Z', '2026-11-08T15:52:29Z')
+        verdict = senses.freshness('gsd', sense, dt('2026-11-09T04:33:00Z'))
+        self.assertEqual(verdict['verdict'], 'fresh')
+        self.assertIn("kept: Mon 09 Nov 06:30 EET; cut read 06:20 EET precedes the run's finish 06:27 EET",
+                      verdict['reason'])
+
+    def test_read_after_the_finish_still_finds_no_newer_cut(self):
+        sense = self.gsd_sense('2026-11-09T04:40:00Z', '2026-11-08T15:52:29Z')
+        verdict = senses.freshness('gsd', sense, dt('2026-11-09T04:41:00Z'))
+        self.assertEqual(verdict['verdict'], 'stale')
+        self.assertEqual(verdict['reason'], 'no newer cut for gsd ready_by: Mon 09 Nov 06:30 EET')
+
+    def test_read_after_the_finish_with_a_newer_cut_is_kept(self):
+        sense = self.gsd_sense('2026-11-09T04:40:00Z', '2026-11-09T04:22:28Z')
+        verdict = senses.freshness('gsd', sense, dt('2026-11-09T04:41:00Z'))
+        self.assertEqual(verdict['verdict'], 'fresh')
+        self.assertEqual(verdict['reason'], 'gsd ready_by kept: Mon 09 Nov 06:30 EET')
+
     def test_late_receipt_recovers_but_does_not_keep(self):
         result = timing.obligation(self.target, [(dt('2026-10-21T19:23:00+03:00'), None)], self.now,
                                    start=self.target.replace(hour=0, minute=0))

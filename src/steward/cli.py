@@ -326,4 +326,7 @@ def main(argv=None):
         print(json.dumps({'status': 'rejected', 'error': safe_reason(exc)}), file=sys.stderr if args.command in ('intent', 'transcript', 'tick') else sys.stdout)
         return 2
     print(json.dumps(report, sort_keys=True))
+    if args.command == 'page' and isinstance(report, dict) and report.get('state') == 'failed':
+        print('page put failed: ' + str(report.get('error') or 'unknown'), file=sys.stderr)
+        return 1  # a page that did not land is a failed command (F-70)
     return 0

@@ -79,11 +79,20 @@ print(json.dumps(json.loads(pathlib.Path(os.environ['TEST_TTY_MAP']).read_text()
         if agent == 'claude':
             project = re.sub(r'[^A-Za-z0-9-]', '-', cwd) if cwd else '-synthetic'
             path = self.home / '.claude/projects' / project / (thread + '.jsonl')
+        elif agent == 'pi':
+            mangled = '--' + cwd.strip('/').replace('/', '-') + '--' if cwd else '-synthetic'
+            path = self.home / 'agents/pi/sessions' / mangled / ('2026-10-17T08-00-00-000Z_' + thread + '.jsonl')
         else:
             path = self.home / '.codex/sessions/2026/10/17' / ('rollout-synthetic-' + thread + '.jsonl')
         path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(FIXTURES / ('transcript-' + agent + '.jsonl'), path)
         return path
+
+    def test_pi_folder_matches_pis_own_name(self):
+        # The folder name pi wrote for Steward's 8 Nov review run (F-94), verbatim.
+        self.assertEqual(
+            archive.pi_folder('/home/ubuntu/.local/share/steward/runs/review/23b96ccc1ed14dd6b1105adbc1307e9c'),
+            '--home-ubuntu-.local-share-steward-runs-review-23b96ccc1ed14dd6b1105adbc1307e9c--')
 
     def manifest(self, links=None, **extra):
         directory = self.data / 'runs/watch' / RUN
@@ -152,6 +161,99 @@ print(json.dumps(json.loads(pathlib.Path(os.environ['TEST_TTY_MAP']).read_text()
         job = archive.job(self.data, dict(self.job_row, ended_at=None), manifest, now=NOW, home=self.home)
         self.assertEqual(job['ended_at'], end.isoformat())
         self.assertTrue(job['complete'])
+
+    def test_pi_tty_run_archives_its_native_session_and_model(self):
+        mapping = json.loads(self.tty_map.read_text())
+        mapping['pi-tty'] = dict(agent='pi', thread='synthetic-pi', cwd=str(self.state / 'wakes/7'), ended=NOW.isoformat())
+        self.tty_map.write_text(json.dumps(mapping))
+        source = self.native('pi', 'synthetic-pi', cwd=str(self.state / 'wakes/7'))
+        meta = archive.wake(self.data, dict(self.wake_row, harness_run_id='pi-tty'), now=NOW, home=self.home)
+        self.assertTrue(meta['complete'])
+        session = meta['sessions'][0]
+        self.assertEqual((session['agent'], session['model'], session['thread'], session['label']),
+                         ('pi', 'opencode-go-min/deepseek-v4.1-flash', 'synthetic-pi', None))
+        self.assertGreater(session['turns'], 0)
+        self.assertEqual((self.data / 'wakes/7/sessions' / session['file']).read_bytes(), source.read_bytes())
+        doc = transcripts.document(self.data, 'wake-7')
+        self.assertEqual((doc['ended_at'], len(doc['sessions'][0]['turns'])), (NOW.isoformat(), session['turns']))
+
+    def test_pi_gsd_refs_resolve_from_the_step_copy_or_its_file_path(self):
+        directory, _ = self.manifest(argv=['/release/gsd', 'steady', '--once'])
+        step = 'steady-' + 'b' * 32
+        sessions = self.home / '.local/share/gsd/steps' / step / 'sessions'
+        sessions.mkdir(parents=True)
+        refs = []
+        for label, thread, moment in (('a', '18d07c63-53fd-452b-821d-29c502ffa81a', '08-00-00-000Z'),
+                                      ('r1', '28d07c63-53fd-452b-821d-29c502ffa81b', '08-00-00-000Z'),
+                                      ('r2', '38d07c63-53fd-452b-821d-29c502ffa81c', '08-05-00-000Z')):
+            path = sessions / ('2026-10-17T' + moment + '_' + thread + '.jsonl')
+            shutil.copyfile(FIXTURES / 'transcript-pi.jsonl', path)
+            ref = dict(session=thread, agent='pi', label=label, step=step)
+            refs.append(dict(ref, path=str(path)) if label == 'r2' else ref)
+        (directory / 'records.jsonl').write_text(json.dumps({'links': refs}) + '\n')
+        meta = archive.job(self.data, self.job_row, now=NOW, home=self.home)
+        self.assertTrue(meta['complete'])
+        self.assertEqual([s['label'] for s in meta['sessions']], ['a', 'r1', 'r2'])
+        self.assertEqual({s['model'] for s in meta['sessions']}, {'opencode-go-min/deepseek-v4.1-flash'})
+        self.assertTrue(all(s['turns'] > 0 for s in meta['sessions']))
+
+    def test_pi_ref_paths_outside_home_or_named_for_another_thread_are_refused(self):
+        thread = '18d07c63-53fd-452b-821d-29c502ffa81a'
+        outside = self.root / ('2026-10-17T08-00-00-000Z_' + thread + '.jsonl')
+        captured = self.home / ('captured_' + thread + '.txt')
+        other = self.home / 'sessions' / '2026-10-17T08-00-00-000Z_someone-else.jsonl'
+        for path in (outside, captured, other):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(FIXTURES / 'transcript-pi.jsonl', path)
+        for path in (outside, captured, other):
+            with self.subTest(path=path.name):
+                with self.assertRaises(ValueError):
+                    archive.resolve(dict(session=thread, agent='pi', label='a', path=str(path)), self.home)
+
+    def test_pi_ref_path_that_is_a_symlink_is_refused_and_nothing_is_copied(self):
+        thread = '48d07c63-53fd-452b-821d-29c502ffa81d'
+        secret = self.home / '.config' / 'secret.env'
+        secret.parent.mkdir(parents=True)
+        secret.write_text('SYNTHETIC_API_KEY=synthetic\n')
+        link = self.home / ('x_' + thread + '.jsonl')
+        link.symlink_to(secret)
+        with self.assertRaises(ValueError):
+            archive.resolve(dict(session=thread, agent='pi', label='a', path=str(link)), self.home)
+        directory, _ = self.manifest()
+        (directory / 'records.jsonl').write_text(json.dumps({'links': [dict(
+            session=thread, agent='pi', label='a', path=str(link))]}) + '\n')
+        meta = archive.job(self.data, self.job_row, now=NOW, home=self.home)
+        self.assertFalse(meta['complete'])
+        self.assertEqual(meta['sessions'], [])
+        self.assertFalse((directory / 'sessions').exists())
+
+    def test_pi_ref_path_outside_pis_and_gsds_session_roots_is_refused(self):
+        thread = '58d07c63-53fd-452b-821d-29c502ffa81e'
+        path = self.home / 'notes' / ('y_' + thread + '.jsonl')
+        path.parent.mkdir(parents=True)
+        shutil.copyfile(FIXTURES / 'transcript-pi.jsonl', path)
+        with self.assertRaises(ValueError):
+            archive.resolve(dict(session=thread, agent='pi', label='a', path=str(path)), self.home)
+
+    def test_pi_ref_path_in_a_gsd_step_sessions_dir_resolves(self):
+        thread = '68d07c63-53fd-452b-821d-29c502ffa81f'
+        path = self.home / '.local/share/gsd/steps' / ('steady-' + 'c' * 32) / 'sessions' / ('2026-10-17T08-00-00-000Z_' + thread + '.jsonl')
+        path.parent.mkdir(parents=True)
+        shutil.copyfile(FIXTURES / 'transcript-pi.jsonl', path)
+        session = archive.resolve(dict(session=thread, agent='pi', label='a', path=str(path)), self.home)
+        self.assertEqual(session['source'], str(path.resolve()))
+
+    def test_pi_turns_keep_text_thinking_tool_call_and_tool_result(self):
+        turns = list(transcripts.turns(FIXTURES / 'transcript-pi.jsonl', 'pi'))
+        self.assertEqual([t['type'] for t in turns],
+                         ['text', 'thinking', 'text', 'tool_call', 'tool_call', 'tool_result', 'tool_result', 'text'])
+        self.assertEqual(turns[0], dict(i=0, at='2026-10-17T08:00:00.400Z', role='user', type='text', name=None,
+                                        text='Review the synthetic pi task.', truncated=False))
+        self.assertEqual((turns[3]['role'], turns[3]['name'], turns[3]['text']),
+                         ('assistant', 'bash', '{"command":"printf synthetic"}'))
+        self.assertEqual([(t['role'], t['name'], t['text']) for t in turns[5:7]],
+                         [('tool', 'bash', 'synthetic pi output'), ('tool', 'read', 'synthetic file body')])
+        self.assertNotIn('bookkeeping', json.dumps([t['text'] for t in turns]))
 
     def test_sweep_uses_journal_completion_for_non_model_wake_not_start_or_next_wake(self):
         with writer(self.state) as store:

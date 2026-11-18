@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from fixture_mind import use_settings
+from fixture_mind import config_only, use_settings
 import test_jobs
 from steward import capabilities, cli, jobs, memory, messages, pages, state, timing
 from steward.notify import TODAY_CHARACTERS, flush, notify
@@ -58,7 +58,9 @@ class UpdateMigrationTests(unittest.TestCase):
 
 
 class PageGetTests(unittest.TestCase):
-    setUp = use_settings
+    def setUp(self):
+        use_settings(self)
+        config_only(self)
 
     def invoke(self, transport):
         body = io.BytesIO()

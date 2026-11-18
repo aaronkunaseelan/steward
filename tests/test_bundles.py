@@ -178,6 +178,23 @@ class BundleTests(unittest.TestCase):
         pages.remove(self.db, slug, now=NOW, transport=self.transport)
         self.assertIn('- prepared: no: no live prepared page', briefing.render(state([]), NOW, {}))
 
+    def test_briefing_lists_live_blocks_beyond_the_window(self):
+        from steward import briefing, jobs
+        self.add()
+        self.choose(self.candidate('grants:once:0', 'place'))
+        # No fixture placement reaches day 4; build the calendar_b dict by hand from its own row shape.
+        start = NOW + timedelta(days=4)
+        beyond = dict(event_key='grants:once:0', demand='grants', state='applied',
+                      payload=json.dumps(dict(title='Grants: far sitting', minutes=60, start=start.isoformat(),
+                                              end=(start + timedelta(hours=1)).isoformat())))
+        result = jobs.snapshot(self.db, now=NOW)
+        result.update(calendar_b=dict(b.briefing(self.db, NOW), blocks=[beyond]), live_pages=pages.live(self.db, NOW))
+        blocks = briefing.render(result, NOW, {}).split('## Blocks ', 1)[1].split('\n## ', 1)[0]
+        self.assertIn('- key: grants:once:0', blocks)
+        self.assertIn('- state: applied', blocks)
+        self.assertIn('- beyond: after the 3-day window: no items or use shown', blocks)
+        self.assertNotIn('- items:', blocks)
+
     def test_demands_without_items_never_read_gsd(self):
         b.demand(self.db, 'add', 'focus', {k: v for k, v in BUNDLE.items() if k != 'items'}, NOW, runner=self.runner)
         self.choose(self.candidate('focus:once:0', 'place'))

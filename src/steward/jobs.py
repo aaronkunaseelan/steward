@@ -22,7 +22,14 @@ def run_severity(state):
     return 'bad'
 COMPUTE_GRID_MINUTES = 20
 RELEASE_ROOT = Path.home() / '.local/lib'
-SPEC_DEFAULTS = dict(heavy=False, deliver='digest', max_minutes=30, recurring=True, model='sol')
+SPEC_DEFAULTS = dict(heavy=False, deliver='digest', max_minutes=30, recurring=True, model='haiku')
+MODELS = ('haiku', 'go', 'opus')
+
+
+def running_model(name):
+    """The model a spec runs on. A stored spec may name one Steward no longer runs: it runs as the
+    default, so a live job neither stops nor has its row rewritten."""
+    return name if name in MODELS else SPEC_DEFAULTS['model']
 
 
 def now_utc():
@@ -65,9 +72,32 @@ def get(db, table, identity):
     return view_row(db, table, row)
 
 
+# Guards that refuse a due run only for now: the host frees up, a lane empties.
+PASSING = ('host-load guard', 'host-load guard unknown', 'heavy lane busy or unknown')
+_DEFERRAL = re.compile(r'deferred ([0-9]+)×: ')
+
+
 def is_extra(run):
     """Run-local metadata, not a job setting; retained across all run versions."""
     return json.loads(run.get('spec_json') or '{}').get('_extra', False)
+
+
+def deferring(reason):
+    """The guard a run is waiting on, or None when it is not deferred."""
+    match = _DEFERRAL.match(reason or '')
+    return reason[match.end():] if match else None
+
+
+def deferral(reason, condition):
+    """Hold a due run for one more tick, counting the waits on the same guard."""
+    match = _DEFERRAL.match(reason or '')
+    count = int(match.group(1)) if match and deferring(reason) == condition else 0
+    return f'deferred {count + 1}×: {condition}'
+
+
+def deferred(run):
+    """A due run the guards are holding back: still planned, with the wait recorded."""
+    return run['state'] == 'planned' and deferring(run['reason']) is not None
 
 
 def view_row(db, table, row):
@@ -99,7 +129,7 @@ def append(db, table, row, change_id):
     return row
 
 
-def validate_spec(spec, name, qmd_status=None):
+def validate_spec(spec, name, qmd_status=None, stored=False):
     require(isinstance(name, str) and re.fullmatch('[a-z0-9-]{1,40}', name), 'invalid job name')
     require(isinstance(spec, dict), 'invalid spec')
     allowed = {'justification', 'argv', 'needs', 'heavy', 'deliver', 'max_minutes', 'recurring', 'capability', 'cwd', 'env_file', 'min_gap', 'model'}
@@ -126,7 +156,10 @@ def validate_spec(spec, name, qmd_status=None):
     if 'min_gap' in spec:
         duration(spec['min_gap'])
     spec = {**SPEC_DEFAULTS, **spec}
-    require(spec['model'] in ('sol', 'haiku', 'opus'), 'job model must be sol, haiku or opus')
+    if stored:
+        spec['model'] = running_model(spec['model'])
+    else:
+        require(spec['model'] in MODELS, 'job model must be haiku, go or opus')
     for key in ('heavy', 'recurring'):
         require(type(spec[key]) is bool, 'invalid boolean')
     require(spec['deliver'] in ('digest', 'immediate', 'silent'), 'invalid delivery')

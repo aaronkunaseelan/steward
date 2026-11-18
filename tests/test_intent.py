@@ -84,7 +84,6 @@ class IntentTests(unittest.TestCase):
         readings['gsd']['data']['cut'] = dict(until=now.isoformat(), committed_at=now.isoformat())
         readings['qmd']['data'].update(alive=True, sources={'gmail': dict(
             cadence_s=900, fresh_through=now.timestamp(), current=True, valid_until=now.timestamp() + 86400)})
-        readings['sol']['data'].update(observed_at=now.isoformat(), resets_at=(now + timedelta(days=7)).isoformat())
         senses.save(db, readings, now, cid)
 
     def test_unfolded_completion_keeps_deadline_without_writing_state(self):
@@ -174,6 +173,37 @@ class IntentTests(unittest.TestCase):
         doc = self.doc(now=now)
         self.assertEqual(doc['state'], 'red')
         self.assertIn('consolidate missed 06:00', doc['headline'])
+
+    def miss_ready_by(self, state, reason, ended):
+        """A missed ready_by with the run behind it refused or still held by a guard (F-164)."""
+        now = NOW.replace(hour=3)
+        with writer(self.state) as st:
+            messages.poll(st.db, now, {}, fetcher=lambda offset: [], telegram={'chat_id': -1})
+            self.save_healthy(st.db, now)
+            jobs.job_verb(st.db, 'add', 'consolidate', dict(
+                justification='Keep memory fresh.', argv=[released()],
+                needs={'ready_by': ['06:00']}), now=now - timedelta(days=1))
+            self.measure(st.db, 'consolidate', now - timedelta(days=1) + timedelta(minutes=1))
+            with st.db:
+                cid = jobs.change(st.db, 'fixture', now - timedelta(minutes=40), 'tick')
+                jobs.append(st.db, 'runs', dict(run_id='held-run', job='consolidate', state=state,
+                                                planned_for=(now - timedelta(minutes=40)).isoformat(), started_at=None,
+                                                ended_at=(now - timedelta(minutes=35)).isoformat() if ended else None,
+                                                reason=reason, spec_json='{}'), cid)
+        return self.doc(now=now)
+
+    def test_missed_ready_by_names_the_run_a_guard_refused(self):
+        doc = self.miss_ready_by('refused', 'host-load guard', ended=True)
+        self.assertIn('consolidate missed 06:00 (refused: host-load guard)', doc['headline'])
+        promise = next(p for p in self.block(doc, 'day')['promises'] if p['label'] == 'consolidate')
+        self.assertEqual(promise['state'], 'missed')
+        self.assertIn('refused: host-load guard', promise['why'])
+        self.assertEqual(problems(load('intent-1', vendor=True), doc), [])
+
+    def test_missed_ready_by_names_the_guard_still_holding_its_run(self):
+        doc = self.miss_ready_by('planned', 'deferred 2×: host-load guard', ended=False)
+        self.assertIn('consolidate missed 06:00 (deferred: host-load guard)', doc['headline'])
+        self.assertEqual(problems(load('intent-1', vendor=True), doc), [])
 
     def test_inflight_wake_is_running_and_judges_last_finished_model(self):
         now = NOW.replace(hour=2)
@@ -269,7 +299,6 @@ class IntentTests(unittest.TestCase):
                 with writer(self.state) as st:
                     readings = {name: dict(status=sense['status'], data=sense.get('data', {}))
                                 for name, sense in senses.snapshot(st.db, at).items() if sense['status'] == 'ok'}
-                    readings['sol']['data']['observed_at'] = at.isoformat()
                     senses.save(st.db, readings, at, jobs.change(st.db, 'fixture', at, 'tick'))
                     st.db.commit()
                 doc = self.doc(now=at)
@@ -501,23 +530,29 @@ class IntentTests(unittest.TestCase):
         self.assertFalse(hop['warn'])
         self.assertEqual(hop['lag_s'], 600)
 
-    def test_unobserved_senses_and_sol_are_unknown_not_healthy_zeroes(self):
+    def test_no_codex_rollouts_leaves_a_green_intent_with_no_sol_hop(self):
+        # X-60: no Codex session runs, so there is nothing for Steward to sense about a ChatGPT plan.
+        self.assertNotIn('sol', senses.INTERVALS)
+        now = NOW.replace(hour=3)
+        # The fixture audit hook forbids any read of ~/.codex/sessions, so a green doc proves none was needed.
+        with writer(self.state) as st:
+            messages.poll(st.db, now, {}, fetcher=lambda offset: [], telegram={'chat_id': -1})
+            self.save_healthy(st.db, now)
+            st.db.commit()
+        doc = self.doc(now=now)
+        self.assertEqual(doc['state'], 'green', doc['headline'])
+        hop = self.block(doc, 'chain')['hops'][0]
+        self.assertFalse(hop['warn'])
+        self.assertNotIn('sol', hop['note'].lower())
+        self.assertNotIn('sol', json.dumps(doc).lower().replace('console', '').replace('solution', ''))
+
+    def test_unobserved_senses_are_unknown_not_healthy_zeroes(self):
         doc = self.doc()
         hop = self.block(doc, 'chain')['hops'][0]
         self.assertTrue(hop['warn'])
         self.assertIsNone(hop['lag_s'])
         self.assertIn('gsd', hop['note'])
-        meter = self.block(doc, 'meters')['items'][0]
-        self.assertIsNone(meter['used'])
-        self.assertIsNone(meter['pace'])
-        with writer(self.state) as st:
-            with st.db:
-                cid = jobs.change(st.db, 'fixture', NOW)
-                senses.save(st.db, {'sol': {'status': 'ok', 'data': {'used_percent': 42,
-                    'window_elapsed_fraction': 0.5, 'resets_at': '2026-10-22T00:00:00+00:00'}}}, NOW - timedelta(minutes=5), cid)
-                senses.save(st.db, {'sol': {'status': 'unknown', 'reason': 'read failed'}}, NOW, cid)
-        meter = self.block(self.doc(), 'meters')['items'][0]
-        self.assertEqual(meter, dict(label='Sol weekly pool', used=None, pace=None, resets=None))
+        self.assertEqual([b for b in doc['blocks'] if b['kind'] == 'meters'], [])
 
     def test_counts_use_model_attempts_configured_cap_and_only_page_two_senses(self):
         with writer(self.state) as st:
@@ -531,7 +566,7 @@ class IntentTests(unittest.TestCase):
                                   (NOW.isoformat(), status, json.dumps({'model_calls': calls})))
         doc = self.doc()
         steps = self.block(doc, 'funnel')['steps']
-        self.assertEqual(steps[0][1], 5)  # Health/place are intentionally not Page 2 signals.
+        self.assertEqual(steps[0][1], 3)  # Health/place are intentionally not Page 2 signals.
         self.assertEqual(steps[1][1], 2)  # Failed model attempts still consumed a wake.
         self.assertEqual(self.block(doc, 'chips')['cap'], 8)
 
@@ -595,7 +630,9 @@ class IntentTests(unittest.TestCase):
         def journal(argv, **options):
             calls.append(argv)
             self.assertEqual(argv[:4], ['journalctl', '--user', '-u', 'steward-tick.service'])
-            self.assertLessEqual(options['timeout'], 1)
+            self.assertEqual(options['timeout'], intent.JOURNAL_TIMEOUT)
+            self.assertGreaterEqual(options['timeout'], 5)
+            self.assertLessEqual(options['timeout'], 15)
             return subprocess.CompletedProcess(argv, 0, '{}\n', '')
         output = io.StringIO()
         with patch('steward.intent.sqlite3.connect', side_effect=connect), \
@@ -791,6 +828,28 @@ class IntentTests(unittest.TestCase):
         runs[-1]['cost_minutes'] = 8
         self.assertEqual(estimate(), 8)
         self.assertEqual(planner.expected(runs, 'synthetic', {'max_minutes': 45}), 8)
+
+    def test_schedule_observed_duration_follows_a_job_that_gets_slower(self):
+        from steward import planner
+        def row(index, minutes):
+            started = NOW - timedelta(minutes=600 - index)
+            return dict(job='review', state='succeeded', started_at=started.isoformat(),
+                        ended_at=(started + timedelta(minutes=minutes)).isoformat(),
+                        planned_for=started.isoformat(), cost_minutes=minutes)
+        runs = [row(i, m) for i, m in enumerate([5, 6, 7, 7, 8, 9, 9, 17, 15, 43])]
+        self.assertEqual(planner.expected(runs, 'review', {'max_minutes': 120}), 17)
+        self.assertEqual(planner.expected([runs[i] for i in (4, 9, 0, 7, 2, 5, 8, 1, 6, 3)], 'review',
+                                          {'max_minutes': 120}), 17)
+
+    def test_schedule_observed_duration_does_not_drop_to_a_faster_recent_run(self):
+        from steward import planner
+        def row(index, minutes):
+            started = NOW - timedelta(minutes=600 - index)
+            return dict(job='review', state='succeeded', started_at=started.isoformat(),
+                        ended_at=(started + timedelta(minutes=minutes)).isoformat(),
+                        planned_for=started.isoformat(), cost_minutes=minutes)
+        runs = [row(i, m) for i, m in enumerate([40, 40, 40, 5, 5, 5])]
+        self.assertEqual(planner.expected(runs, 'review', {'max_minutes': 120}), 22.5)
 
     def test_schedule_array_cap(self):
         rows = [dict(run_id=f'{i:032x}', job='synthetic', state='planned', spec_json=json.dumps(dict(argv=[released()])), reason=None,

@@ -212,6 +212,8 @@ class CapabilityTests(unittest.TestCase):
             store.db.commit()
         bindir=Path(self.tmp.name)/'bin'; bindir.mkdir()
         tty=bindir/'tty'; tty.write_text('#!/bin/sh\nif [ "$1" = run ]; then printf \'%s\\n\' "$@" > "$STEWARD_RUN_DIR/tty-args"; fi\nif [ "$1" = wait ] && [ -s "$STEWARD_RUN_DIR/links.json" ]; then echo yes > "$STEWARD_RUN_DIR/links-at-wait"; fi\nprintf \'{"run":"fake-run"}\\n\'\n');tty.chmod(0o755)
+        # A declared tool the runner only has to find in the shell's bin: never run here.
+        qmd=bindir/'qmd'; qmd.write_text('#!/bin/sh\nexit 1\n'); qmd.chmod(0o755)
         directory=Path(self.tmp.name)/'run'
         env=dict(os.environ,PATH=str(bindir)+':'+os.environ['PATH'],STEWARD_RUN_DIR=str(directory),STEWARD_STATE=str(self.root),STEWARD_JOB='test',STEWARD_RUN_ID='fixture')
         subprocess.run([str(Path('jobs/agent-run').resolve()),'papers-from-saves'],env=env,check=True,capture_output=True)
@@ -248,7 +250,8 @@ class CapabilityTests(unittest.TestCase):
 
 
 class ModelChoiceTests(unittest.TestCase):
-    def test_async_harness_uses_selected_model_and_effort(self):
+    def argv(self, model):
+        # The argv agent-run builds for one started run, from the model the run records.
         import runpy
         from fixture_mind import install
         with tempfile.TemporaryDirectory() as tmp:
@@ -256,29 +259,38 @@ class ModelChoiceTests(unittest.TestCase):
             install(self, root)
             (root / 'mind/capabilities/sample.md').write_text(
                 '---\nname: "sample"\nreads: []\ncalls: []\nrecord: []\n---\nDo the task.')
-            for model, agent, vendor_model, effort in [
-                ('sol', 'codex', 'gpt-6.1-sol', ['-c', 'model_reasoning_effort=high']),
-                ('haiku', 'claude', 'claude-haiku-5-5', ['--effort', 'high']),
-                ('opus', 'claude', 'claude-opus-5-5', ['--effort', 'medium']),
-            ]:
-                with self.subTest(model=model):
-                    with writer(root / 'state', initialize=True) as store:
-                        jobs.job_verb(store.db, 'add', model, spec(capability='sample', model=model))
-                        jobs.append(store.db, 'runs', dict(run_id=model, job=model, state='started',
-                            planned_for=NOW.isoformat(), started_at=NOW.isoformat(), reason='fixture',
-                            spec_json=jobs.get(store.db, 'jobs', model)['spec_json']), jobs.change(store.db, 'fixture', NOW))
-                        store.db.commit()
-                    directory = root / model
-                    with patch.dict(os.environ, STEWARD_RUN_DIR=str(directory),
-                                    STEWARD_STATE=str(root / 'state'), STEWARD_JOB=model, STEWARD_RUN_ID=model), \
-                         patch.object(sys, 'argv', ['agent-run', 'sample']), \
-                         patch.object(c, 'shell_scope', return_value=([], {})), \
-                         patch.object(runtime, 'harness', return_value='fixture-run') as harness, \
-                         redirect_stdout(io.StringIO()):
-                        runpy.run_path(str(Path('jobs/agent-run').resolve()), run_name='__main__')
-                    argv = harness.call_args.args[0]
-                    self.assertEqual(argv[:6], ['tty', 'run', '-a', agent, '-m', vendor_model])
-                    vendor_args = argv[argv.index('--') + 1:]
-                    self.assertEqual(vendor_args[-2:], effort)
-                    if agent == 'claude':
-                        self.assertEqual(vendor_args[:2], ['--permission-mode', 'bypassPermissions'])
+            with writer(root / 'state', initialize=True) as store:
+                jobs.job_verb(store.db, 'add', model, spec(capability='sample', model=model))
+                jobs.append(store.db, 'runs', dict(run_id=model, job=model, state='started',
+                    planned_for=NOW.isoformat(), started_at=NOW.isoformat(), reason='fixture',
+                    spec_json=jobs.get(store.db, 'jobs', model)['spec_json']), jobs.change(store.db, 'fixture', NOW))
+                store.db.commit()
+            directory = root / model
+            with patch.dict(os.environ, STEWARD_RUN_DIR=str(directory),
+                            STEWARD_STATE=str(root / 'state'), STEWARD_JOB=model, STEWARD_RUN_ID=model), \
+                 patch.object(sys, 'argv', ['agent-run', 'sample']), \
+                 patch.object(c, 'shell_scope', return_value=([], {})), \
+                 patch.object(runtime, 'harness', return_value='fixture-run') as harness, \
+                 redirect_stdout(io.StringIO()):
+                runpy.run_path(str(Path('jobs/agent-run').resolve()), run_name='__main__')
+            return harness.call_args.args[0]
+
+    def test_async_harness_uses_selected_model_and_effort(self):
+        for model, agent, vendor_model, effort in [
+            ('haiku', 'claude', 'claude-haiku-5-5', ['--effort', 'high']),
+            ('opus', 'claude', 'claude-opus-5-5', ['--effort', 'medium']),
+        ]:
+            with self.subTest(model=model):
+                argv = self.argv(model)
+                self.assertEqual(argv[:6], ['tty', 'run', '-a', agent, '-m', vendor_model])
+                vendor_args = argv[argv.index('--') + 1:]
+                self.assertEqual(vendor_args[:4], ['--permission-mode', 'bypassPermissions', *effort])
+                # The isolation flags come after the model's own flags (owner X-66 item 5).
+                self.assertEqual(vendor_args[4:], c.CLAUDE_ISOLATION)
+
+    def test_go_model_runs_pi_deepseek(self):
+        argv = self.argv('go')
+        self.assertEqual(argv[:6], ['tty', 'run', '-a', 'pi', '-m', 'opencode-go-min/deepseek-v4.1-flash'])
+        # pi's own trust flag only: the run's project settings scope the bash tool's PATH.
+        self.assertEqual(argv[argv.index('--') + 1:], ['--approve'])
+        self.assertNotIn('claude', ' '.join(argv))

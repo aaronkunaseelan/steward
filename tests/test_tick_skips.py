@@ -37,7 +37,6 @@ class SkipTests(unittest.TestCase):
                                          waiting_on_you=[], notion_urls={}, digest='unchanged')
             result['qmd']['data'] = dict(alive=True, sources={'files': dict(
                 cadence_s=1200, current=True, fresh_through=now.timestamp(), valid_until=now.timestamp() + 1800)})
-            result['sol']['data'] = dict(observed_at=now.isoformat(), resets_at=(now + timedelta(days=7)).isoformat())
             return result
         with writer(self.root) as store:
             jobs.job_verb(store.db, 'add', 'gsd-steady', test_jobs.spec(needs={'ready_by': ['00:01']}),
@@ -75,8 +74,8 @@ class SkipTests(unittest.TestCase):
         from steward import senses
         self.skip()
         with writer(self.root) as store, store.db:
-            senses.save(store.db, {'machine': dict(status='ok', data={})}, NOW, jobs.change(store.db, 'fixture', NOW))
-            self.assertEqual(senses.snapshot(store.db, NOW + timedelta(hours=1))['machine']['age'], 3600)
+            senses.save(store.db, {'gsd': dict(status='ok', data={})}, NOW, jobs.change(store.db, 'fixture', NOW))
+            self.assertEqual(senses.snapshot(store.db, NOW + timedelta(hours=1))['gsd']['age'], 3600)
 
     def test_limits_and_cli_undo_not_told(self):
         for start,end,reason in [(NOW,NOW,'after'), (NOW-timedelta(hours=2),NOW-timedelta(hours=1),'future'), (NOW,NOW+timedelta(hours=8,seconds=1),'8 hours')]:
@@ -181,7 +180,7 @@ class SkipTests(unittest.TestCase):
         self.assertFalse(result['scheduled_wake'])
         self.assertIsNone(result['wake'])
         self.assertEqual(wakes,[])
-        self.assertEqual(result['refused'],[rid])
+        self.assertEqual(result['deferred'],[rid])
         self.assertEqual(self.launched,[])
 
     def test_future_skip_and_schema_8_migration(self):

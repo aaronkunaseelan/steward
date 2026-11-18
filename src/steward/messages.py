@@ -5,7 +5,7 @@ from .memory import local_day
 import json
 import re
 import subprocess
-from datetime import timedelta
+from datetime import datetime, time, timedelta
 from . import contracts, jobs, senses, telegram_files
 from .notify import notify, flush, binding, updates, telegram_sender
 from .state import StateError
@@ -105,9 +105,13 @@ def poll_status(db, now):
     row = db.execute("SELECT value FROM message_meta WHERE key='inbound_poll'").fetchone()
     data = json.loads(row[0]) if row else dict(last_poll_ok_at=None, last_error=None)
     ok = jobs.instant(data['last_poll_ok_at']) if data['last_poll_ok_at'] else None
-    reason = ('Telegram inbound poll has never succeeded' if ok is None else
-              'Telegram inbound poll last succeeded over 60 min ago' if now - ok > POLL_MAX_AGE else
-              'Telegram inbound poll failed: ' + data['last_error']['code'] if data['last_error'] else None)
+    if ok is not None and now - ok <= POLL_MAX_AGE:
+        reason = None  # A failure inside the window keeps the sense healthy.
+    else:
+        reason = ('Telegram inbound poll has never succeeded' if ok is None else
+                  'Telegram inbound poll last succeeded over 60 min ago')
+        if data['last_error']:
+            reason += ' (last error: ' + data['last_error']['code'] + ')'
     return dict(data, status='unknown' if reason else 'ok', reason=reason)
 
 
@@ -195,6 +199,22 @@ def queued(db):
 
 def clipped(text, limit):
     return text if len(text) <= limit else text[:limit - 1] + '…'
+
+
+FINDS_SINCE = time(18, 0)  # Finds sent since last evening's 18:00 count as tonight's finds.
+
+
+def finds_since(db, since):
+    """Finds already sent at or after `since`, oldest first: a pending digest is not a sent Find."""
+    rows = [(jobs.instant(row['sent_at']), row['sent_at'], row['text']) for row in db.execute(
+        "SELECT sent_at, text FROM outbox WHERE topic='Finds' AND state='sent' AND sent_at IS NOT NULL")]
+    return [dict(sent_at=sent_at, first_line=clipped(text.split('\n', 1)[0], 120))
+            for at, sent_at, text in sorted(rows) if at >= since]
+
+
+def evening_cutoff(now):
+    """The wake's finds window opens at 18:00 on the previous local day."""
+    return datetime.combine(local_day(now) - timedelta(days=1), FINDS_SINCE, local_zone())
 
 
 def fallback(db, now):
@@ -314,50 +334,3 @@ def changes(db, now, sender, settings, key=None):
                key if len(batches) == 1 else f'{key}:{i}' if key else None,
                sender, now, 'tick', settings=settings, change_id=batch[0][0]['id'],
                related_changes=[r['id'] for r, _ in batch])
-
-
-def alerts(db, now, sender, settings):
-    health = db.execute("SELECT * FROM senses WHERE name='health' ORDER BY id DESC LIMIT 1").fetchone()
-    if health and health['status'] == 'ok':
-        auth = json.loads(health['payload'])['data']['auth']
-        row = db.execute("SELECT value FROM message_meta WHERE key='garmin_auth'").fetchone()
-        prior = json.loads(row[0]) if row else {}
-        # Persist the episode key: bounded sense history and read outages must not
-        # repeat a sign-in request. A later known auth state starts a new episode.
-        if prior.get('auth') != auth:
-            prior = dict(auth=auth, key=f"alert:garmin:signed_out:{health['id']}")
-            with db:
-                db.execute("INSERT INTO message_meta VALUES ('garmin_auth',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                           (json.dumps(prior),))
-        if auth == 'signed_out':
-            notify(db, 'Alerts',
-                   'Garmin needs you to sign in again: run `~/tools/garmin/bin/garmin-login` on OCI',
-                   prior['key'], sender, now, 'tick', settings=settings)
-    problems = []
-    machine = senses.snapshot(db, now)['machine']
-    if machine['status'] == 'ok' and machine.get('data', {}).get('violation'):
-        problems.append(('violation', machine['data']['violation'], machine['at'],
-                         'Disable gsd-step.timer; Steward owns the run schedule.'))
-    for name in ('calendars', 'gsd', 'sol'):
-        rows = db.execute('SELECT * FROM senses WHERE name=? ORDER BY id DESC', (name,)).fetchall()
-        unknown = []
-        for r in rows:
-            if r['status'] != 'unknown':
-                break
-            unknown.append(r)
-        if unknown and now - jobs.instant(unknown[-1]['at']) > timedelta(hours=2):
-            problems.append(('sense', name, unknown[-1]['at'], 'Check credentials and the read CLI.'))
-    sol = senses.snapshot(db, now)['sol']
-    if sol.get('data', {}).get('rate_limit_reached_type') is not None:
-        problems.append(('limit', 'Sol', sol['at'], 'Wait for the provider reset or check the subscription.'))
-    runs = jobs.current(db, 'runs')
-    for name in {r['job'] for r in runs}:
-        last = sorted([r for r in runs if r['job'] == name and r['state'] in ('failed','succeeded')], key=lambda r:r['ended_at'] or '', reverse=True)[:3]
-        if len(last) == 3 and all(r['state'] == 'failed' for r in last):
-            problems.append(('job', name, last[-1]['ended_at'], 'Inspect the job command and credentials; pause it if needed.'))
-    wakes = db.execute("SELECT * FROM wakes WHERE status IN ('completed','failed') ORDER BY id DESC LIMIT 2").fetchall()
-    if len(wakes) == 2 and all(r['status'] == 'failed' for r in wakes):
-        problems.append(('wake', 'harness', wakes[-1]['started_at'], 'Check tty/Codex authentication and harness availability.'))
-    for kind, subject, since, action in problems:
-        key = f'alert:{kind}:{subject}:{local_day(now)}'
-        notify(db, 'Alerts', f'{subject}: {kind} problem since {since}. {action}', key, sender, now, 'tick', settings=settings)

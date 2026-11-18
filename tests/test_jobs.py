@@ -220,13 +220,41 @@ class JobsTests(unittest.TestCase):
         with redirect_stdout(output):
             self.assertEqual(main(['state', '--state', str(self.root)]), 0)
         row = json.loads(output.getvalue())['jobs'][0]
-        for key, expected in dict(model='sol', heavy=False, recurring=True, deliver='digest',
+        for key, expected in dict(model='haiku', heavy=False, recurring=True, deliver='digest',
                                   max_minutes=30, cwd=str(Path.home())).items():
             self.assertEqual(row[key], expected, key)
         for key in ('min_gap', 'env_file', 'capability'):
             self.assertIsNone(row[key], key)
         with writer(self.root) as st:
             self.assertEqual(json.loads(jobs.get(st.db, 'jobs', 'test')['spec_json']), legacy)
+
+    def test_job_default_model_is_haiku(self):
+        self.add()
+        with writer(self.root) as st:
+            self.assertEqual(json.loads(jobs.get(st.db, 'jobs', 'test')['spec_json'])['model'], 'haiku')
+            self.assertEqual(jobs.snapshot(st.db, now=NOW)['jobs'][0]['model'], 'haiku')
+
+    def test_sol_model_rejected_for_new_jobs(self):
+        with self.assertRaisesRegex(StateError, 'job model must be haiku, go or opus'):
+            with writer(self.root) as st:
+                jobs.job_verb(st.db, 'add', 'retired', spec(model='sol'), now=NOW)
+
+    def test_stored_sol_job_runs_as_haiku(self):
+        # A row that names the retired model is not quarantined, is not rewritten, and the run it
+        # starts records haiku: the one mapping is jobs.running_model, applied where the spec is read.
+        self.add()
+        run_id = self.run_now()
+        with writer(self.root) as st, st.db:
+            row = jobs.get(st.db, 'jobs', 'test')
+            legacy = json.dumps(dict(json.loads(row['spec_json']), model='sol'))
+            jobs.append(st.db, 'jobs', dict(row, version=row['version'] + 1, spec_json=legacy),
+                        jobs.change(st.db, 'fixture', NOW))
+        result = self.tick()
+        self.assertEqual(result['invalid_specs'], {})
+        self.assertEqual(result['started'], [run_id])
+        with writer(self.root) as st:
+            self.assertEqual(jobs.get(st.db, 'jobs', 'test')['spec_json'], legacy)
+            self.assertEqual(json.loads(jobs.get(st.db, 'runs', run_id)['spec_json'])['model'], 'haiku')
 
     def test_cli_job_add_rejects_after(self):
         output = io.StringIO()
@@ -379,20 +407,66 @@ class JobsTests(unittest.TestCase):
             moved = jobs.run_verb(db, 'plan', 'test', 'move', (NOW + timedelta(hours=5)).isoformat(), now=NOW)
             self.assertEqual(late['run_id'], moved['run_id'])
 
-    def test_load_and_host_heavy_lock_skip_with_reason(self):
-        self.add(heavy=True)
+    def test_load_guard_defers_a_due_run_with_its_reason_and_no_message(self):
+        self.add()
         rid = self.run_now()
         told = []
         result = self.tick(load_reader=lambda: (3.6, 20 * 1024**3), sender=lambda topic, *a, **k: told.append(topic) or 1)
-        self.assertEqual(result['refused'], [rid])
+        self.assertEqual(result['deferred'], [rid])
         self.assertFalse(self.launched)
         self.assertNotIn('Changes', told)  # a skip is the guard working, not news
-        rid2 = self.run_now()
-        result = self.tick(lock_reader=lambda: True)
-        self.assertIn(rid2, result['refused'])
-        self.assertFalse(self.launched)
         with writer(self.root) as store:
-            self.assertIn('heavy', jobs.get(store.db, 'runs', rid2)['reason'])
+            self.assertIn('host-load', jobs.get(store.db, 'runs', rid)['reason'])
+
+    def test_passing_guard_defers_a_due_run_instead_of_losing_it(self):
+        # F-164: the 6 Nov 15:40 tick refused gsd-steady on host load and nothing retried it.
+        self.add(needs={'ready_by': ['18:30']}, max_minutes=5)
+        at = NOW + timedelta(minutes=20)  # 15:20 Athens, inside the 18:30 window.
+        with writer(self.root) as st:
+            rid = jobs.run_verb(st.db, 'plan', 'test', 'synthetic placement', at.isoformat(), now=NOW)['run_id']
+        result = self.tick(at=at, load_reader=lambda: (3.6, 20 * 1024**3))
+        self.assertEqual(result['deferred'], [rid])
+        self.assertEqual(self.launched, [])
+        with writer(self.root) as st:
+            row = jobs.get(st.db, 'runs', rid)
+            self.assertEqual((row['state'], row['planned_for']), ('planned', at.isoformat()))
+            self.assertEqual(row['reason'], 'deferred 1×: host-load guard')
+        result = self.tick(at=at + timedelta(minutes=20), load_reader=lambda: (3.6, 20 * 1024**3))
+        self.assertEqual(result['deferred'], [rid])
+        with writer(self.root) as st:
+            self.assertEqual(jobs.get(st.db, 'runs', rid)['reason'], 'deferred 2×: host-load guard')
+        # The spike clears inside the window: the held run starts, with no second reservation.
+        result = self.tick(at=at + timedelta(minutes=40))
+        self.assertEqual(result['started'], [rid])
+        with writer(self.root) as st:
+            self.assertEqual([r['run_id'] for r in jobs.current(st.db, 'runs')], [rid])
+
+    def test_deferred_run_is_refused_for_good_once_its_deadline_passes(self):
+        self.add(needs={'ready_by': ['18:30']}, max_minutes=5)
+        deadline = NOW + timedelta(hours=3, minutes=30)  # 18:30 Athens.
+        rid = self.run_now()
+        self.assertEqual(self.tick(load_reader=lambda: (3.6, 20 * 1024**3))['deferred'], [rid])
+        # Past its deadline the held run can serve nothing: refuse it and let the planner move on.
+        result = self.tick(at=deadline + timedelta(minutes=20), load_reader=lambda: (3.6, 20 * 1024**3))
+        self.assertEqual(result['refused'], [rid])
+        with writer(self.root) as st:
+            row = jobs.get(st.db, 'runs', rid)
+            self.assertEqual((row['state'], row['reason']), ('refused', 'host-load guard'))
+            self.assertEqual(row['ended_at'], (deadline + timedelta(minutes=20)).isoformat())
+
+    def test_journal_runs_name_the_reason_a_run_is_waiting_on(self):
+        self.add()
+        rid = self.run_now()
+        self.assertEqual(self.tick(load_reader=lambda: (3.6, 20 * 1024**3))['deferred'], [rid])
+        from steward import memory
+        with writer(self.root) as st, st.db:
+            jobs.append(st.db, 'runs', dict(run_id='quiet', job='test', state='cancelled', planned_for=NOW.isoformat(),
+                                            started_at=None, ended_at=NOW.isoformat(), reason='', spec_json='{}'),
+                        jobs.change(st.db, 'fixture', NOW))
+            doc = memory.journal(st.db, day=memory.local_day(NOW).isoformat())
+        runs = {r['run_id']: r for r in doc['runs']}
+        self.assertEqual(runs[rid]['reason'], 'deferred 1×: host-load guard')
+        self.assertIsNone(runs['quiet']['reason'])
 
     def test_two_ticks_never_double_start_and_snapshot_input(self):
         self.add(heavy=True)
@@ -741,7 +815,7 @@ class JobsTests(unittest.TestCase):
         done = dict(job='g', state='succeeded', started_at=datetime(2026, 10, 17, 5, 15, tzinfo=athens).isoformat(),
                     ended_at=datetime(2026, 10, 17, 5, 15, 4, tzinfo=athens).isoformat(), spec_json=job['spec_json'], minutes=None)
         at, _ = runtime.placement(job, [done], datetime(2026, 10, 17, 5, 20, tzinfo=athens))
-        self.assertEqual(at.astimezone(athens).strftime('%H:%M'), '18:00')  # not 06:15 again
+        self.assertEqual(at.astimezone(athens).strftime('%H:%M'), '17:40')  # not 06:15 again
 
     def test_ready_by_missed_slot_is_retried_before_its_deadline(self):
         # A load-guard skip at 05:15 must not lose the 06:30 deadline to the evening one.
@@ -839,7 +913,8 @@ class JobsTests(unittest.TestCase):
         self.tick(at=NOW + timedelta(minutes=40), unit_reader=lambda unit: True)
         self.assertEqual(len(self.launched), 1)
         with writer(self.root) as store:
-            self.assertEqual(jobs.get(store.db, 'runs', second['run_id'])['state'], 'refused')
+            row = jobs.get(store.db, 'runs', second['run_id'])
+            self.assertEqual((row['state'], row['reason']), ('planned', 'deferred 1×: heavy lane busy or unknown'))
 
     def test_undo_reservation_creation_records_cancellation_time(self):
         self.add(recurring=False)

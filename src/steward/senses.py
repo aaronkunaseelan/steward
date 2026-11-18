@@ -1,13 +1,10 @@
 """Read-only, bounded observations. Failures never imply an empty source."""
 from .errors import safe_reason
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 import calendar as month_calendar
 import hashlib
 import json
-import os
 from pathlib import Path
-import re
-import shutil
 import sqlite3
 import subprocess
 
@@ -19,7 +16,7 @@ from .jobs import COMPUTE_GRID_MINUTES
 
 UTC = timezone.utc
 # gsd is read every tick (0.27 s CPU): a 30-min interval hid a finished gsd-steady from the next ready_by judgement (F-64).
-INTERVALS = {'calendars': 900, 'gsd': 0, 'qmd': 900, 'health': 1800, 'place': 600, 'machine': 0, 'sol': 0}
+INTERVALS = {'calendars': 900, 'gsd': 0, 'qmd': 900, 'health': 1800, 'place': 600}
 
 
 class ReadNotFound(ValueError):
@@ -192,13 +189,41 @@ def gsd(now, runner):
             at = timestamp(event['at'], 'done.at')
             if memory.local_day(at) == memory.local_day(now) and at <= now:
                 closures.append(event)
-    return dict(counts=counts, deadlines=deadlines, horizon_deadlines=horizon,
-                done=[event for event in closures if event['state'] == 'done'] if closures is not None else None,
-                canceled_today=[event for event in closures if event['state'] == 'canceled'] if closures is not None else None,
-                waiting_on_you=raw['priorities']['mine'], waiting_on_others=raw['priorities']['waiting_on_others'],
-                notion_urls={item['id']: item['notion_url'] for item in raw['items']},
-                past_due_older=past_due_older, cut=cut, cut_age_seconds=cut_age,
-                digest=digest({k: v for k, v in raw.items() if k != 'at'}))
+    done_count, done_count_reason = day_done_count(now, runner)
+    result = dict(counts=counts, deadlines=deadlines, horizon_deadlines=horizon,
+                  done=[event for event in closures if event['state'] == 'done'] if closures is not None else None,
+                  canceled_today=[event for event in closures if event['state'] == 'canceled'] if closures is not None else None,
+                  waiting_on_you=raw['priorities']['mine'], waiting_on_others=raw['priorities']['waiting_on_others'],
+                  notion_urls={item['id']: item['notion_url'] for item in raw['items']},
+                  past_due_older=past_due_older, cut=cut, cut_age_seconds=cut_age,
+                  digest=digest({k: v for k, v in raw.items() if k != 'at'}),
+                  done_count=done_count)
+    if done_count is None:
+        result['done_count_reason'] = done_count_reason
+    return result
+
+
+def day_done_count(now, runner):
+    """gsd's own count for the owner's day, copied from gsd.closures.v1 done_counts; a failed read never fails the sense."""
+    day = memory.local_day(now)
+    start = datetime.combine(day, time(), local_zone())
+    try:
+        envelope = read('gsd.closures.v1', runner(['gsd', 'closures', '--since', start.isoformat(), '--json']))
+    except ContractError as exc:
+        return None, str(exc)
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
+        return None, 'read failed: ' + safe_reason(exc)
+    counted = envelope['done_counts'].get(day.isoformat())
+    if counted is not None:
+        return dict(day=day.isoformat(), done=counted['done'], canceled=counted['canceled']), None
+    until = envelope['cut']['until']
+    try:
+        covered = until is not None and datetime.fromisoformat(until) >= start
+    except (TypeError, ValueError):
+        covered = False
+    if covered:
+        return dict(day=day.isoformat(), done=0, canceled=0), None
+    return None, 'gsd closures cut does not cover the day'
 
 
 def qmd(settings, runner, previous):
@@ -363,57 +388,6 @@ def place(runner, now):
                 last_city=raw['last_city'], nights=night_runs(raw['nights']))
 
 
-def machine(runner):
-    timers = runner(['systemctl', '--user', 'list-timers', '--all', '--no-legend', '--plain'])
-    units = runner(['systemctl', 'list-units', 'batch-*', '--no-legend', '--plain'])
-    # is-enabled exits 1 for a disabled timer: show yields a successful read of that fact.
-    load_state, enabled = (runner(['systemctl', '--user', 'show', 'gsd-step.timer', '--property=LoadState,UnitFileState', '--value']).split('\n') + ['', ''])[:2]
-    enabled = 'not-installed' if load_state == 'not-found' else enabled.strip()
-    if not enabled:
-        raise ValueError('gsd timer enablement unknown')
-    memory = next(int(line.split()[1]) * 1024 for line in Path('/proc/meminfo').read_text().splitlines() if line.startswith('MemAvailable:'))
-    return dict(loadavg=list(os.getloadavg()), memory_available=memory, root_disk_free=shutil.disk_usage('/').free,
-                timers=[s for s in timers.splitlines() if re.search(r'(steward|gsd).*\.timer', s)],
-                batch_units=units.splitlines(), gsd_step_timer=enabled,
-                violation='gsd-step.timer enabled' if enabled in ('enabled', 'enabled-runtime', 'linked', 'linked-runtime') else None)
-
-
-def rate_observation(root, now):
-    found = []
-    for offset in range(8):
-        day = now.date() - timedelta(days=offset)
-        for path in (root / day.strftime('%Y/%m/%d')).glob('rollout-*.jsonl'):
-            with path.open('rb') as stream:
-                stream.seek(0, 2)
-                size = stream.tell()
-                stream.seek(max(0, size - 262144))
-                if size > 262144:
-                    stream.readline()
-                for line in stream:
-                    try:
-                        event = json.loads(line)
-                        limits = event.get('payload', {}).get('rate_limits')
-                        if isinstance(limits, dict):
-                            observed = datetime.fromisoformat(event['timestamp'].replace('Z', '+00:00'))
-                            if observed <= now:
-                                found.append((observed, limits))
-                    except (ValueError, KeyError, TypeError):
-                        continue
-    if not found:
-        raise ValueError('no recent rate_limits observation')
-    observed, limits = max(found, key=lambda x: x[0])
-    primary = limits.get('primary') or {}
-    reset = primary.get('resets_at')
-    reset = datetime.fromtimestamp(reset, UTC) if reset is not None else None
-    window = primary.get('window_minutes')
-    fraction = (now - (reset - timedelta(minutes=window))).total_seconds() / (window * 60) if reset and window else None
-    return dict(used_percent=primary.get('used_percent'), window_minutes=window,
-                resets_at=reset.isoformat() if reset else None,
-                resets_at_athens=reset.astimezone(local_zone()).isoformat() if reset else None,
-                rate_limit_reached_type=limits.get('rate_limit_reached_type'), plan_type=limits.get('plan_type'),
-                observed_at=observed.isoformat(), window_elapsed_fraction=fraction)
-
-
 def read_age(at, now):
     return max(0, (now - datetime.fromisoformat(at)).total_seconds()) if at else None
 
@@ -484,7 +458,14 @@ def freshness(name, sense, now):
         elif not as_of or not committed or not promise['started_at']:
             verdict, reason = 'unknown', 'landed cut or kept run start unknown'
         elif datetime.fromisoformat(committed) <= datetime.fromisoformat(promise['started_at']):
-            verdict, reason = 'stale', 'no newer cut for gsd ready_by: ' + target_label
+            finished = datetime.fromisoformat(promise['completed_at'])
+            if sense.get('at') and datetime.fromisoformat(sense['at']) < finished:
+                # This reading predates the run's finish, so it cannot judge it; the check resumes next read.
+                reason = (f'gsd ready_by kept: {target_label}; cut read '
+                          f"{owner_time(datetime.fromisoformat(sense['at']), '%H:%M')} precedes the run's finish "
+                          + owner_time(finished, '%H:%M'))
+            else:
+                verdict, reason = 'stale', 'no newer cut for gsd ready_by: ' + target_label
         elif promise['state'] == 'recovered':
             recovered = datetime.fromisoformat(promise['completed_at']).astimezone(local_zone())
             reason = f'gsd ready_by missed: {target_label}; recovered {owner_time(recovered, '%H:%M')}'
@@ -492,12 +473,6 @@ def freshness(name, sense, now):
             reason = 'gsd ready_by kept: ' + target_label
     elif name == 'calendars':
         reason = 'calendar read succeeded'
-    elif name == 'sol':
-        as_of = data.get('observed_at')
-        if not as_of or not data.get('resets_at'):
-            verdict, reason = 'unknown', 'provider observation or reset time unknown'
-        elif now >= datetime.fromisoformat(data['resets_at']):
-            verdict, reason = 'stale', 'provider reset passed; new observation required'
     if sense.get('status') == 'ok':
         age = sense.get('age')
         if age is None:
@@ -510,7 +485,7 @@ def freshness(name, sense, now):
     return dict(verdict=verdict, reason=reason, as_of=as_of)
 
 
-def collect(root, settings, now, runner=run, rollout_root=None):
+def collect(root, settings, now, runner=run):
     db = sqlite3.connect(f'{(Path(root) / "state.sqlite").as_uri()}?mode=ro', uri=True)
     db.row_factory = sqlite3.Row
     try:
@@ -536,13 +511,8 @@ def collect(root, settings, now, runner=run, rollout_root=None):
                 data = health(now, runner)
             elif name == 'place':
                 data = place(runner, now)
-            elif name == 'machine':
-                data = machine(runner)
             else:
-                data = rate_observation(Path(rollout_root or Path.home() / '.codex/sessions'), now)
-                prior = old.get('data', {})
-                elapsed = (datetime.fromisoformat(data['observed_at']) - datetime.fromisoformat(prior['observed_at'])).total_seconds() / 3600 if prior.get('observed_at') else 0
-                data['burn_percent_per_hour'] = ((data['used_percent'] - prior['used_percent']) / elapsed if elapsed > 0 and data['used_percent'] is not None and prior.get('used_percent') is not None and data['resets_at'] == prior.get('resets_at') else prior.get('burn_percent_per_hour') if elapsed == 0 else None)
+                raise ValueError('unknown sense: ' + name)
             observations[name] = dict(status='ok', data=data)
         except ContractError as exc:
             observations[name] = dict(status='unknown', reason=str(exc))

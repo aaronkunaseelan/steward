@@ -25,8 +25,7 @@ class PlaceVerdictTests(unittest.TestCase):
                 if argv == ['phone', 'where', '--json']:
                     return json.dumps(value)
                 raise FileNotFoundError
-            observation = senses.collect(self.state, {}, now, runner,
-                                         Path(self.tmp.name) / 'rollouts')['place']
+            observation = senses.collect(self.state, {}, now, runner)['place']
             self.assertEqual(observation['status'], 'ok')
             senses.save(st.db, {'place': observation},
                         now, jobs.change(st.db, 'fixture', now, 'tick'))

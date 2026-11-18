@@ -103,7 +103,9 @@ def journal(db, since=None, until=None, day=None, full=False):
                         reasons.append(r['reason'])
             add('changes', dict(row, subject=subjects, reason=reasons or [row['summary']]))
     for r in jobs.current(db, 'runs'):
-        if any(inside(r[k]) for k in ('planned_for','started_at','ended_at')) or any(inside(changes[v[0]]['at']) for v in db.execute('SELECT change_id FROM runs WHERE run_id=?', (r['run_id'],))):
+        # A run belongs to exactly one window: the day of its anchor, so a run across midnight or one
+        # touched by a later change is counted once, by the day it began.
+        if inside(r['started_at'] or r['planned_for'] or r['ended_at']):
             count = None
             if r['manifest']:
                 try:
@@ -113,7 +115,7 @@ def journal(db, since=None, until=None, day=None, full=False):
                     count = sum(1 for line in records.read_text().splitlines() if line.strip()) if records.exists() else 0
                 except (OSError, ValueError, TypeError):
                     pass
-            add('runs', {**{k:r[k] for k in ('run_id','job','state','planned_for','started_at','ended_at')}, 'minutes':r['cost_minutes'], 'tokens':r['cost_tokens'], 'records_count':count})
+            add('runs', {**{k:r[k] for k in ('run_id','job','state','planned_for','started_at','ended_at')}, 'reason':r['reason'] or None, 'minutes':r['cost_minutes'], 'tokens':r['cost_tokens'], 'records_count':count})
     for r in db.execute("SELECT * FROM outbox WHERE state='sent'"):
         if inside(r['sent_at']):
             keys = [k[0] for k in db.execute('SELECT key FROM outbox_keys WHERE outbox_id=? ORDER BY key', (r['id'],))]

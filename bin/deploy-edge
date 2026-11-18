@@ -3,7 +3,6 @@
 from pathlib import Path
 import os
 import json
-import secrets
 import subprocess
 import sys
 import tempfile
@@ -16,14 +15,8 @@ def git(*args):
 
 
 def page_secrets():
-    config = Path.home() / '.config'
-    try:
-        password = json.loads((config / 'mech-d/credentials.json').read_text()).get('PAGE_PASSWORD')
-    except (OSError, ValueError):
-        raise SystemExit('Page password unavailable') from None
-    if not isinstance(password, str) or not password:
-        raise SystemExit('Page password unavailable')
-    path = config / 'steward/pages.env'
+    # People sign in through Cloudflare Access now (cloudflare D1/P3); the only Worker secret is the API bearer.
+    path = Path.home() / '.config/steward/pages.env'
     values = {}
     for line in path.read_text().splitlines():
         key, sep, value = line.partition('=')
@@ -31,12 +24,7 @@ def page_secrets():
             values[key.strip()] = value.strip().strip('"\'')
     if not values.get('STEWARD_PAGES_TOKEN'):
         raise SystemExit('Pages token unavailable')
-    if not values.get('SESSION_SECRET'):
-        values['SESSION_SECRET'] = secrets.token_urlsafe(48)
-        with path.open('a') as stream:
-            os.fchmod(stream.fileno(), 0o600)
-            stream.write('\nSESSION_SECRET=' + values['SESSION_SECRET'] + '\n')
-    return {key: values[key] for key in ('STEWARD_PAGES_TOKEN', 'SESSION_SECRET')} | {'PAGE_PASSWORD': password}
+    return {'STEWARD_PAGES_TOKEN': values['STEWARD_PAGES_TOKEN']}
 
 
 def main():
@@ -45,6 +33,9 @@ def main():
     if git('status', '--porcelain'):
         raise SystemExit('Refusing dirty working tree')
     sha = git('rev-parse', '--verify', '--end-of-options', sys.argv[1] + '^{commit}')
+    code = subprocess.run(['release-guard', 'steward', sha]).returncode
+    if code:
+        raise SystemExit(code)
     credentials = page_secrets()
     with tempfile.TemporaryDirectory(prefix='steward-edge-') as build:
         archive = subprocess.check_output(['git', '-C', str(repo), 'archive', sha, 'edge'])
@@ -56,10 +47,12 @@ def main():
         subprocess.run(['npm', 'test'], cwd=project, env=clean, check=True)
         cli = ['node', str(project / 'node_modules/wrangler/bin/wrangler.js')]
         env = dict(os.environ, WRANGLER_SEND_METRICS='false')
-        subprocess.run([*cli, 'deploy'], cwd=project, env=env, check=True)
-        for name, value in credentials.items():
-            subprocess.run([*cli, 'secret', 'put', name], input=value + '\n',
-                           text=True, cwd=project, env=env, check=True)
+        # Secrets go up with the code: no version is ever live with the old ones (cloudflare D1/P1).
+        # The file lives in the build directory (0600) and is removed with it; omitted secrets are kept.
+        secrets_file = Path(build) / 'secrets.json'
+        os.close(os.open(secrets_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+        secrets_file.write_text(json.dumps(credentials))
+        subprocess.run([*cli, 'deploy', '--secrets-file', str(secrets_file)], cwd=project, env=env, check=True)
     print(sha + ': steward edge deployed')
 
 

@@ -96,6 +96,22 @@ def turns(path, agent):
                     pieces.append(('assistant', 'tool_call', name, compact(value)))
                 elif kind in ('function_call_output', 'custom_tool_call_output', 'local_shell_call_output'):
                     pieces.append(('tool', 'tool_result', tools.get(p.get('call_id')), output(p.get('output', ''))))
+            elif agent == 'pi' and row.get('type') == 'message':
+                msg = row.get('message') if isinstance(row.get('message'), dict) else {}
+                role, content = msg.get('role'), msg.get('content', [])
+                if role == 'toolResult':
+                    pieces.append(('tool', 'tool_result', msg.get('toolName') or tools.get(msg.get('toolCallId')), output(content)))
+                elif role in ('user', 'assistant'):
+                    content = [{'type': 'text', 'text': content}] if isinstance(content, str) else content
+                    for block in content:
+                        kind = block.get('type')
+                        if kind == 'text':
+                            pieces.append((role, 'text', None, block.get('text', '')))
+                        elif kind == 'thinking':
+                            pieces.append(('assistant', 'thinking', None, block.get('thinking', '')))
+                        elif kind == 'toolCall':
+                            tools[block.get('id')] = block.get('name')
+                            pieces.append(('assistant', 'tool_call', block.get('name'), compact(block.get('arguments', {}))))
             for role, kind, name, text in pieces:
                 text = compact(redact_input(json.loads(text))) if kind == 'tool_call' else redact(text)
                 yield dict(i=index, at=at, role=role, type=kind, name=redact(name) if name else None,

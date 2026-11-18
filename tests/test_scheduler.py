@@ -1,6 +1,6 @@
 from fixture_mind import use_settings
 import copy
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import unittest
@@ -185,6 +185,36 @@ class SchedulerTests(unittest.TestCase):
         c = generate(self.data)
         with self.assertRaises(InvalidPlan):
             self.checked(c, [])
+
+
+class PlacementTickRoomTests(unittest.TestCase):
+    """A default start must survive one held tick, not just one rerun."""
+
+    def setUp(self):
+        use_settings(self)
+
+    def test_short_ready_by_job_keeps_room_for_one_held_tick(self):
+        # Ticks are one COMPUTE_GRID_MINUTES apart and fire a minute late, so a start deferred at
+        # the tick after it must still finish before the deadline (18 Nov: 06:00 Athens = 04:00Z).
+        from steward.jobs import COMPUTE_GRID_MINUTES
+        from steward.memory import local_day
+        from steward.runtime import placement
+        from steward.timing import clock_on
+
+        def done(start):
+            return dict(job="nightly", state="succeeded", spec_json=job["spec_json"],
+                        started_at=start.isoformat(), ended_at=(start + timedelta(minutes=2.5)).isoformat())
+
+        job = {"name": "nightly", "spec_json": json.dumps(
+            {"needs": {"ready_by": ["06:00"]}, "heavy": False, "max_minutes": 1})}
+        now = datetime(2026, 11, 18, 0, 0, tzinfo=timezone.utc)
+        runs = [done(datetime(2026, 11, 17, 3, 20, tzinfo=timezone.utc)),
+                done(datetime(2026, 11, 17, 4, 0, tzinfo=timezone.utc))]
+        deadline = clock_on(local_day(now), "06:00")
+        self.assertEqual(deadline, datetime(2026, 11, 18, 4, 0, tzinfo=timezone.utc))
+        at, _ = placement(job, runs, now)
+        self.assertEqual(at.strftime("%H:%M"), "03:20")
+        self.assertLessEqual(at + timedelta(minutes=COMPUTE_GRID_MINUTES + 1) + timedelta(minutes=2.5), deadline)
 
 
 if __name__ == "__main__":

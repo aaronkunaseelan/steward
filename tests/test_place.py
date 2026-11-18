@@ -32,7 +32,7 @@ class PlaceTests(unittest.TestCase):
             if error:
                 raise error
             return output if output is not None else json.dumps(value if value is not None else fixture())
-        return senses.collect(self.root, {}, now, runner, Path(self.tmp.name) / 'rollouts')
+        return senses.collect(self.root, {}, now, runner)
 
     def save(self, observation, now=NOW):
         with writer(self.root) as store:

@@ -1,6 +1,6 @@
 """Weekly observations, not inferred owner intent. Nothing is persisted."""
 from .settings import local_zone
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 import json
 import subprocess
 
@@ -145,9 +145,16 @@ def weekly(db, week=None, now=None, runner=senses.run):
             closure_reason = 'gsd closures coverage does not include evaluated window'
     for r in item_blocks(db, lo, hi, now, events, closure_reason):
         rows.append(dict(r, status='unknown', reason=coverage, count=None, total=None) if coverage else r)
-    rows.append(row('items_closed', None if events is None else sum(e['state'] == 'done' and inside(e['at']) for e in events),
-                    reason=coverage or closure_reason,
-                    definition="items closed done in week, by gsd's closure time (gsd.closures.v1)"))
+    # gsd owns the count: copy its per-day done_counts over the evaluated days, never recount events.
+    counted = None
+    if events is not None:
+        counted = 0
+        day_key, last_day = memory.local_day(lo), memory.local_day(min(hi, now))
+        while day_key <= last_day:
+            counted += envelope['done_counts'].get(day_key.isoformat(), {}).get('done', 0)
+            day_key += timedelta(days=1)
+    rows.append(row('items_closed', counted, reason=coverage or closure_reason,
+                    definition="items closed done in week: the sum of gsd's own per-day done_counts (gsd.closures.v1); Steward does not recount"))
     moved_interests = 0
     for r in db.execute('SELECT i.name, i.version, i.spec_json, c.at FROM interests i JOIN changes c ON c.id=i.change_id ORDER BY i.name, i.version'):
         prior = db.execute('SELECT spec_json FROM interests WHERE name=? AND version=?', (r['name'], r['version'] - 1)).fetchone()

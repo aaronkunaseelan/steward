@@ -179,6 +179,7 @@ class PagesTests(unittest.TestCase):
         self.assertEqual((new['slug'], new['state']), ('prep-grants-20261022', 'live'))
         failed = pages.put(self.db, 'Notes', b'Hi', 'x.txt', slug='prep-comms-20261022', now=NOW, transport=lambda *a, **k: (503, b''))
         self.assertEqual(failed['state'], 'failed')
+        self.assertEqual(failed['error'], 'put_503')
         self.assertEqual(self.put(slug='prep-comms-20261022')['state'], 'live')
         with self.assertRaisesRegex(StateError, 'invalid page slug'):
             self.put(slug='Bad--Slug')
@@ -418,6 +419,16 @@ class IntegrationTests(unittest.TestCase):
             self.assertEqual(main(['page','rm','--state',str(self.root),page['slug']]), 0)
             self.assertEqual(json.loads(output.getvalue())['state'], 'removed')
 
+
+    def test_cli_failed_put_names_reason_and_exits_nonzero(self):
+        from steward.cli import main
+        stdin = io.TextIOWrapper(io.BytesIO(b'<p>Notes</p>'))
+        with patch('sys.stdin', stdin), patch('steward.pages.request', lambda *a, **k: (503, b'')), \
+                patch('sys.stdout', new_callable=io.StringIO) as output, patch('sys.stderr', new_callable=io.StringIO) as err:
+            self.assertEqual(main(['page','put','--state',str(self.root),'--title','CLI notes','--html','-']), 1)
+            page = json.loads(output.getvalue())
+        self.assertEqual((page['state'], page['error']), ('failed', 'put_503'))
+        self.assertIn('page put failed: put_503', err.getvalue())
 
 class MarkdownTests(unittest.TestCase):
     setUp = use_settings

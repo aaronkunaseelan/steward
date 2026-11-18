@@ -1,10 +1,11 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import worker from '../worker.mjs';
+import {AUD, OWNER, TEAM, access, accessToken} from './access-fixture.mjs';
 
 function fixture() {
   const objects = new Map(), pending = [];
-  const env = {PAGE_PASSWORD: 'test-password', SESSION_SECRET: 'session-secret', STEWARD_PAGES_TOKEN: 'test-secret', PAGES: {
+  const env = {STEWARD_PAGES_TOKEN: 'test-secret', CANONICAL_HOST: 'test', ACCESS_TEAM: TEAM, ACCESS_AUD: AUD, OWNER_EMAIL: OWNER, PAGES: {
     async put(key, body, options = {}) { objects.set(key, {body: typeof body === 'string' ? body : await body.text(), httpMetadata: options.httpMetadata, customMetadata: options.customMetadata}); },
     async get(key) { return objects.get(key); },
     async head(key) { return objects.get(key); },
@@ -30,11 +31,9 @@ test('auth, slugs and private paths', async () => {
 test('PUT, HEAD without receipt, GET receipt and headers, DELETE', async () => {
   const {request, objects, pending} = fixture();
   assert.equal((await request('/_api/pages/hello', 'PUT', '<p>Hi</p>', true, {'Content-Type':'text/html'})).status, 204);
-  const login = await request('/login', 'POST', new URLSearchParams({password:'test-password', slug:'hello'}), false, {Origin:'https://test'});
-  const Cookie = login.headers.get('set-cookie').split(';')[0];
-  const head = await request('/hello', 'HEAD', undefined, false, {Cookie});
+  const head = await request('/hello', 'HEAD', undefined, false, access);
   assert.equal(head.status, 200); assert.equal(await head.text(), ''); assert.equal(pending.length, 0);
-  const get = await request('/hello', 'GET', undefined, true, {'User-Agent':'iPhone', Cookie});
+  const get = await request('/hello', 'GET', undefined, true, {'User-Agent':'iPhone', ...access});
   assert.equal(await get.text(), '<p>Hi</p>');
   for (const [key, value] of Object.entries({'content-type':'text/html', 'cache-control':'private, no-store', 'x-robots-tag':'noindex', 'referrer-policy':'no-referrer'})) assert.equal(get.headers.get(key), value);
   assert.match(get.headers.get('content-security-policy'), /default-src 'none'/);
@@ -59,55 +58,48 @@ test('opens pagination uses exclusive keys', async () => {
   assert.equal((await request('/_api/opens?limit=0')).status, 400);
 });
 
-test('password gate, signed cookies, expiry, missing secrets and API independence', async () => {
+test('Access gate: owner token opens, anything else is refused, missing config fails closed, API independent', async () => {
   const {request, pending, env} = fixture();
   await request('/_api/pages/hello', 'PUT', 'private');
   for (const method of ['GET', 'HEAD']) {
-    const r = await request('/hello', method);
-    assert.equal(r.status, 200);
+    const r = await request('/hello', method, undefined, false);
+    assert.equal(r.status, 403);
     assert.equal(r.headers.get('cache-control'), 'private, no-store');
-    assert.equal((await r.text()).includes('type="password"'), method === 'GET');
   }
   assert.equal(pending.length, 0);
-  const post = (password, slug='hello') => request('/login', 'POST', new URLSearchParams({password, slug}), false, {Origin:'https://test'});
-  assert.equal((await post('wrong')).status, 401);
-  assert.equal((await post('test-password', '//evil.test')).status, 400);
-  const login = await post('test-password');
-  assert.equal(login.status, 303);
-  assert.equal(login.headers.get('location'), '/hello');
-  const cookie = login.headers.get('set-cookie');
-  for (const flag of ['HttpOnly','Secure','SameSite=Lax','Path=/','Max-Age=2592000']) assert.ok(cookie.includes(flag));
-  assert.equal(await (await request('/hello', 'GET', undefined, false, {Cookie:cookie.split(';')[0]})).text(), 'private');
+  assert.equal(await (await request('/hello', 'GET', undefined, false, access)).text(), 'private');
   await Promise.all(pending);
   assert.equal(pending.length, 1);
-  const now = Date.now;
-  try {
-    Date.now = () => now() + 2592001 * 1000;
-    assert.match(await (await request('/hello', 'GET', undefined, false, {Cookie:cookie.split(';')[0]})).text(), /type="password"/);
-  } finally { Date.now = now; }
-  assert.match(await (await request('/hello', 'GET', undefined, false, {Cookie:cookie.split(';')[0]+'0'})).text(), /type="password"/);
+  const now = Math.floor(Date.now() / 1000);
+  for (const claims of [{exp: now - 1}, {aud: ['other']}, {email: 'someone@example.com'}, {iss: 'https://evil.cloudflareaccess.com'}]) {
+    assert.equal((await request('/hello', 'GET', undefined, false, {'cf-access-jwt-assertion': await accessToken(claims)})).status, 403);
+  }
+  assert.equal((await request('/hello', 'GET', undefined, false, {'cf-access-jwt-assertion': access['cf-access-jwt-assertion'] + 'x'})).status, 403);
   assert.equal(pending.length, 1);
-  for (const key of ['PAGE_PASSWORD', 'SESSION_SECRET']) {
+  for (const key of ['ACCESS_TEAM', 'ACCESS_AUD', 'OWNER_EMAIL']) {
     const saved = env[key]; delete env[key];
-    assert.equal((await request('/hello')).status, 503);
-    assert.equal((await request('/_api/opens')).status, 200);
+    assert.equal((await request('/hello', 'GET', undefined, false, access)).status, 403);
     env[key] = saved;
   }
+  const saved = env.CANONICAL_HOST; delete env.CANONICAL_HOST;
+  assert.equal((await request('/hello', 'GET', undefined, false, access)).status, 503);
+  assert.equal((await request('/_api/opens')).status, 200);
+  env.CANONICAL_HOST = saved;
 });
 
 test('pages are private by default; public opt-in can be flipped both ways', async () => {
   const {request, pending, objects} = fixture();
   await request('/_api/pages/notes', 'PUT', 'private notes');
-  assert.match(await (await request('/notes', 'GET', undefined, false)).text(), /type="password"/);
+  assert.equal((await request('/notes', 'GET', undefined, false)).status, 403);
   assert.equal(pending.length, 0);
   assert.equal((await request('/_api/pages/notes', 'PUT', 'attack', false, {'X-Steward-Public':'1'})).status, 401);
-  assert.match(await (await request('/notes', 'GET', undefined, false)).text(), /type="password"/);
+  assert.equal((await request('/notes', 'GET', undefined, false)).status, 403);
   for (const publicFlag of [true, false, true]) {
     await request('/_api/pages/notes', 'PUT', 'notes', true, publicFlag ? {'X-Steward-Public':'1'} : {});
     assert.equal(objects.get('notes').customMetadata.public, publicFlag ? '1' : '0');
     const before = pending.length;
     const head = await request('/notes', 'HEAD', undefined, false);
-    assert.equal(head.status, 200);
+    assert.equal(head.status, publicFlag ? 200 : 403);
     assert.equal(await head.text(), '');
     assert.equal(pending.length, before);
     const get = await request('/notes', 'GET', undefined, false);
@@ -115,7 +107,7 @@ test('pages are private by default; public opt-in can be flipped both ways', asy
       assert.equal(await get.text(), 'notes');
       assert.equal(pending.length, before + 1);
     } else {
-      assert.match(await get.text(), /type="password"/);
+      assert.equal(get.status, 403);
       assert.equal(pending.length, before);
     }
   }
@@ -125,10 +117,12 @@ test('pages are private by default; public opt-in can be flipped both ways', asy
   assert.equal(opens.keys.length, 2);
 });
 
-test('the login page lets browsers send its origin back (no-referrer makes them send Origin: null)', async () => {
-  const {request} = fixture();
-  await request('/_api/pages/hello', 'PUT', 'private');
-  const r = await request('/hello', 'GET', undefined, false);
-  assert.equal(r.status, 200);
-  assert.equal(r.headers.get('referrer-policy'), 'same-origin');
+test('other hosts redirect people to the canonical host; the API still answers there with its bearer', async () => {
+  const {env} = fixture();
+  const at = (url, headers = {}) => worker.fetch(new Request(url, {headers}), env, {waitUntil() {}});
+  const r = await at('https://steward.05802.workers.dev/hello?x=1', access);
+  assert.equal(r.status, 301);
+  assert.equal(r.headers.get('location'), 'https://test/hello?x=1');
+  assert.equal((await at('https://steward.05802.workers.dev/_api/opens', {Authorization: 'Bearer test-secret'})).status, 200);
+  assert.equal((await at('https://steward.05802.workers.dev/_api/opens')).status, 401);
 });
