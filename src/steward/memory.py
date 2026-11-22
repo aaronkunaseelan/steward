@@ -302,7 +302,8 @@ def index(db):
 
 
 # An oversized decision page is a visible failure, never permission to omit inputs.
-BRIEFING_BYTES = 96 * 1024
+# 128 KiB: live pages (28-day expiry) filled their window 21 Nov; ordinary pages ~90 KB, day close +8 KB.
+BRIEFING_BYTES = 128 * 1024
 
 
 def system_prompt(prompt, source=None):
