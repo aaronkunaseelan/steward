@@ -152,6 +152,14 @@ class DayCloseTests(unittest.TestCase):
                 section = page.split('## Day close — Done today', 1)[1].split('## Day close — Next two days', 1)[0]
                 self.assertIn(reason, section)
 
+    def test_next_two_days_names_its_plan_horizon_not_calendar_coverage(self):
+        from steward.briefing import render
+        page = render(dict(moments=['day_close']), NOW, {})
+        section = page.split('## Day close — Next two days', 1)[1].split('## Day close — Horizon', 1)[0]
+        self.assertIn('plan until: ', section)
+        self.assertIn('Not calendar coverage; see Ahead for what the calendar covers.', section)
+        self.assertNotIn('through', section)
+
     def test_outcome_projection_is_one_line_and_does_not_expose_message_bodies(self):
         from steward.briefing import day_close
         from unittest.mock import patch

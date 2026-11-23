@@ -281,6 +281,11 @@ def notify(db, topic, text, told_key=None, sender=telegram_sender, now=None,
     require(0 < len(visible) <= 4000, 'invalid message length')
     require(topic != 'Today' or len(visible) <= TODAY_CHARACTERS,
             f'Today must be at most {TODAY_CHARACTERS} characters; put the detail on a page')
+    if topic == 'Today' and actor in ('model', 'owner'):
+        # A wrong restatement of a fact Steward holds is caught before it reaches the owner.
+        from .claims import refusals
+        refused = refusals(db, text, now)
+        require(not refused, 'claim check: ' + '; '.join(refused))
     keys = [] if told_key is None else [told_key] if isinstance(told_key, str) else told_key
     require(isinstance(keys, (list, tuple)) and all(isinstance(key, str) and key.strip() for key in keys), 'invalid told key')
     keys = list(dict.fromkeys(canonical_key(key) for key in keys))

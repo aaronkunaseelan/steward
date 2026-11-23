@@ -338,7 +338,9 @@ def render(state, now, receipt):
                            'Inbox handled is not proof of an answer; correlate replies. '
                            'Changes summarize keeps, moves and deletions; use steward journal for detail or ids.'), ('gsd',))
         section('Day close — Next two days', dict(
-            through=end.isoformat(), calendar='See Calendar above; re-plan with current senses.',
+            plan_until=end.isoformat(),
+            coverage='Not calendar coverage; see Ahead for what the calendar covers.',
+            calendar='See Calendar above; re-plan with current senses.',
             blocks='See Blocks above; explain moves rather than repeat Done today.'), ('calendars',))
         section('Day close — Horizon', dict(
             calendar='See Ahead for future events and its observed coverage.',
